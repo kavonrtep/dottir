@@ -11,6 +11,14 @@ authors.workspace = true
 [dependencies]
 thiserror = { workspace = true }
 tracing = { workspace = true }
+rayon = { workspace = true, optional = true }
+
+[features]
+default = ["rayon"]
+# `rayon` enables compute_dotplot to use a parallel subject-chunked driver.
+# Disable for WASM or to verify single-thread determinism.
+rayon = ["dep:rayon"]
 
 [dev-dependencies]
 proptest = { workspace = true }
+rayon = { workspace = true }

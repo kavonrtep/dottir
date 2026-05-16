@@ -10,7 +10,7 @@ use crate::karlin::{karlin_window_size, KarlinResult};
 use crate::matrix::{BlastMode, ScoreMatrix};
 use crate::pixel::{image_dimension, PixelMap};
 use crate::score_vec::ScoreVec;
-use crate::sliding::{sliding_window_pass, Direction};
+use crate::sliding::{sliding_window_pass_chunked, Direction};
 
 /// Which strand(s) of the *subject* sequence to compute against the query.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -219,7 +219,7 @@ pub fn compute_dotplot(
         && matches!(config.strand, Strand::Reverse | Strand::Both);
 
     if do_forward {
-        sliding_window_pass(
+        run_pass(
             &score_vec,
             &s_encoded_forward,
             window,
@@ -227,17 +227,15 @@ pub fn compute_dotplot(
             config.pixel_fac,
             Direction::Forward,
             config.self_comparison,
+            config.memory_limit_bytes,
             &mut forward_map,
-        );
+        )?;
     }
 
     if do_reverse {
         // Match C dotter's reverse pass: build the score vector against
         // the *complement* of the query (C uses the ntob_compl[] table
-        // for the same effect), then scan the subject backwards. A hit
-        // at (q, s) then means `subject[s..s+W]` (read backwards)
-        // matches `complement(query)[q..q+W]`, i.e. a reverse-strand
-        // hit. This is the standard BLASTN bothstrand semantics.
+        // for the same effect), then scan the subject backwards.
         let q_complement = complement_encoded(&q_encoded);
         let score_vec_rev = ScoreVec::build(&config.matrix, &q_complement);
         let target_map = if config.separate_strand_channels {
@@ -246,7 +244,7 @@ pub fn compute_dotplot(
         } else {
             &mut forward_map
         };
-        sliding_window_pass(
+        run_pass(
             &score_vec_rev,
             &s_encoded_forward,
             window,
@@ -254,8 +252,9 @@ pub fn compute_dotplot(
             config.pixel_fac,
             Direction::Reverse,
             config.self_comparison,
+            config.memory_limit_bytes,
             target_map,
-        );
+        )?;
     }
 
     // Self-comparison post-processing (spec §4.1.8).
@@ -302,6 +301,100 @@ pub fn compute_dotplot(
 /// to the original Dotter's `-r` / `-v` CLI flags per spec §4.1.10).
 pub fn reverse_complement(dna: &[u8]) -> Vec<u8> {
     reverse_complement_dna(dna)
+}
+
+/// Run a single sliding-window pass into `out`, chunking on the subject
+/// axis with rayon when the `rayon` feature is enabled. Worker pixelmaps
+/// are merged element-wise back into `out` (`max` is associative and
+/// commutative so the merge order doesn't affect the result).
+///
+/// At least 4 subject positions per chunk and at least `window * 4` total
+/// subject length to make chunking worthwhile.
+#[allow(clippy::too_many_arguments)]
+fn run_pass(
+    score_vec: &ScoreVec,
+    subject: &[u8],
+    window: u32,
+    zoom: u32,
+    pixel_fac: u32,
+    direction: Direction,
+    self_comp: bool,
+    memory_limit_bytes: u64,
+    out: &mut PixelMap,
+) -> Result<(), DottirError> {
+    #[cfg(feature = "rayon")]
+    {
+        use rayon::prelude::*;
+
+        let slen = subject.len();
+        let n_threads = rayon::current_num_threads().max(1);
+        // Skip parallelisation if the input is small. The chunk overhead
+        // dominates and serial is faster.
+        let min_for_parallel = (window as usize).saturating_mul(64).max(2048);
+        if n_threads <= 1 || slen < min_for_parallel {
+            sliding_window_pass_chunked(
+                score_vec, subject, window, zoom, pixel_fac, direction,
+                self_comp, 0..slen, out,
+            );
+            return Ok(());
+        }
+
+        // Aim for ~4× as many chunks as threads, so straggling workers
+        // don't dominate runtime. Self-comparison's lower-triangle cap
+        // means later subject positions are heavier than earlier ones,
+        // and finer chunks balance the work better.
+        let target_chunks = (n_threads * 4).max(2);
+        let chunk_size = slen.div_ceil(target_chunks).max(window as usize);
+
+        let chunks: Vec<std::ops::Range<usize>> = (0..slen)
+            .step_by(chunk_size)
+            .map(|lo| lo..(lo + chunk_size).min(slen))
+            .collect();
+
+        let width = out.width_u32();
+        let height = out.height_u32();
+        let pixmaps: Vec<PixelMap> = chunks
+            .par_iter()
+            .map(|range| {
+                let mut local =
+                    PixelMap::new_checked(width, height, memory_limit_bytes)
+                        .expect("local chunk pixelmap fits if the global one did");
+                sliding_window_pass_chunked(
+                    score_vec,
+                    subject,
+                    window,
+                    zoom,
+                    pixel_fac,
+                    direction,
+                    self_comp,
+                    range.clone(),
+                    &mut local,
+                );
+                local
+            })
+            .collect();
+        for p in pixmaps {
+            out.merge_from(&p);
+        }
+        Ok(())
+    }
+
+    #[cfg(not(feature = "rayon"))]
+    {
+        let _ = memory_limit_bytes;
+        sliding_window_pass_chunked(
+            score_vec,
+            subject,
+            window,
+            zoom,
+            pixel_fac,
+            direction,
+            self_comp,
+            0..subject.len(),
+            out,
+        );
+        Ok(())
+    }
 }
 
 /// Post-process a self-comparison pixelmap according to [`Triangle`].

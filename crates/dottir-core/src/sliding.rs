@@ -74,26 +74,66 @@ pub fn sliding_window_pass(
     self_comp: bool,
     out: &mut PixelMap,
 ) {
+    sliding_window_pass_chunked(
+        score_vec,
+        subject_encoded,
+        window,
+        zoom,
+        pixel_fac,
+        direction,
+        self_comp,
+        0..subject_encoded.len(),
+        out,
+    );
+}
+
+/// Same as [`sliding_window_pass`] but emits pixels only for subject
+/// indices in `s_emit_range`. Used by Phase 3's rayon chunking: each
+/// worker is given `s_emit_range = chunk_lo..chunk_hi` and walks the
+/// kernel over an extended range that includes `window-1` warm-up
+/// positions before the chunk so the sliding sums are fully populated
+/// by the time `s` enters the emit range. The final pixelmaps from all
+/// workers are then `merge_from`'d, which is associative and preserves
+/// byte-identical output across thread counts (spec §4.1.11).
+#[allow(clippy::too_many_arguments)]
+pub fn sliding_window_pass_chunked(
+    score_vec: &ScoreVec,
+    subject_encoded: &[u8],
+    window: u32,
+    zoom: u32,
+    pixel_fac: u32,
+    direction: Direction,
+    self_comp: bool,
+    s_emit_range: std::ops::Range<usize>,
+    out: &mut PixelMap,
+) {
     let qlen = score_vec.qlen;
     let slen = subject_encoded.len();
     let w = window as usize;
     let win2 = w / 2;
     let zoom_us = zoom as usize;
 
-    if w == 0 || qlen == 0 || slen == 0 {
+    if w == 0 || qlen == 0 || slen == 0 || s_emit_range.is_empty() {
         return;
     }
 
-    // Ping-pong buffers for the previous and current row of partial sums.
     let mut sum1 = vec![0_i32; qlen];
     let mut sum2 = vec![0_i32; qlen];
 
-    // Iteration bounds per direction:
-    //   forward: s = 0, 1, ..., slen - 1     (s_in_valid_range when s >= W)
-    //   reverse: s = slen-1, ..., 0          (s_in_valid_range when s <  slen - W)
+    // Iteration bounds. For chunks we extend the start of iteration by
+    // `w` positions so that warm-up of the partial sums completes before
+    // the chunk's emit range begins.
     let (s_start, s_end_excl, step): (i64, i64, i64) = match direction {
-        Direction::Forward => (0, slen as i64, 1),
-        Direction::Reverse => (slen as i64 - 1, -1, -1),
+        Direction::Forward => {
+            let lo = s_emit_range.start.saturating_sub(w);
+            (lo as i64, s_emit_range.end as i64, 1)
+        }
+        Direction::Reverse => {
+            // For reverse, extend the warm-up forward (toward higher
+            // indices) since the kernel walks s downward.
+            let hi = (s_emit_range.end + w).min(slen);
+            (hi as i64 - 1, s_emit_range.start as i64 - 1, -1)
+        }
     };
 
     // Iteration counter for the ping-pong parity. C uses `sIdx & 1`, which
@@ -108,26 +148,26 @@ pub fn sliding_window_pass(
         let s_row = score_vec.subject_row(subject_encoded[s]) as usize;
         let add_row = score_vec.row(s_row);
 
-        // Row that's leaving the window. For forward: s-W (rows `W` steps
-        // ago). For reverse: s+W (rows `W` steps ago in iteration order,
-        // which is `W` ahead in array order).
-        let del_row: &[i32] = match direction {
-            Direction::Forward => {
-                if s >= w {
+        // Row that's leaving the window. The C dotter uses absolute s for
+        // its warm-up test (delrow=zero when s < W). For Phase 3 we need
+        // the chunk's *local* warm-up to behave identically to a fresh
+        // pass's warm-up regardless of absolute s, so we gate on
+        // `iter_idx < w` instead. For un-chunked passes (where the loop
+        // starts at absolute s = 0 forward / slen-1 reverse) the two
+        // conditions are equivalent.
+        let del_row: &[i32] = if iter_idx < w {
+            score_vec.row(score_vec.unknown_row() as usize)
+        } else {
+            match direction {
+                Direction::Forward => {
                     let prev_s = s - w;
                     let prev_row = score_vec.subject_row(subject_encoded[prev_s]) as usize;
                     score_vec.row(prev_row)
-                } else {
-                    score_vec.row(score_vec.unknown_row() as usize)
                 }
-            }
-            Direction::Reverse => {
-                if s + w < slen {
+                Direction::Reverse => {
                     let prev_s = s + w;
                     let prev_row = score_vec.subject_row(subject_encoded[prev_s]) as usize;
                     score_vec.row(prev_row)
-                } else {
-                    score_vec.row(score_vec.unknown_row() as usize)
                 }
             }
         };
@@ -154,10 +194,13 @@ pub fn sliding_window_pass(
         // qmax to `s + 1` so only the lower triangle is filled (the
         // mirror step then populates the other half).
         if w < qlen {
-            let s_valid = match direction {
-                Direction::Forward => s >= w,
-                Direction::Reverse => s + w < slen,
-            };
+            // "Valid" iff we've iterated at least W subject positions so
+            // the partial sums represent a full W-residue window. For
+            // chunks this preserves byte-identical behaviour vs serial:
+            // serial chunks start at absolute s = 0/slen-1 so iter_idx >= W
+            // coincides with s >= W (or s < slen - W); chunked passes
+            // get the same gate locally.
+            let s_valid = iter_idx >= w;
             // C self-comp cap: `qmax = min(sIdx + 1, pepQSeqLen)`.
             let q_end = if self_comp {
                 qlen.min(s + 1)
@@ -170,6 +213,9 @@ pub fn sliding_window_pass(
                 newsum[q] = new_val;
 
                 if !s_valid || new_val <= 0 {
+                    continue;
+                }
+                if !s_emit_range.contains(&s) {
                     continue;
                 }
                 // Pixel emission. Coordinates mirror C dotplot.c:1391–1424.
