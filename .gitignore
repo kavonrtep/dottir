@@ -6,6 +6,9 @@ target/
 **/*.rs.bk
 Cargo.lock.bak
 
+# Compiled reference harness for golden generation
+tests/golden_gen/karlin_ref
+
 # IDE / editor
 .idea/
 .vscode/
