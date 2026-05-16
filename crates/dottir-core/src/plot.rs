@@ -4,9 +4,13 @@
 //! kernel through them; Phase 2 adds reverse-strand, BLASTP/BLASTX, and
 //! self-comparison.
 
+use crate::alphabet::encode;
 use crate::error::DottirError;
-use crate::karlin::KarlinResult;
+use crate::karlin::{karlin_window_size, KarlinResult};
 use crate::matrix::{BlastMode, ScoreMatrix};
+use crate::pixel::{image_dimension, PixelMap};
+use crate::score_vec::ScoreVec;
+use crate::sliding::{sliding_window_pass, Direction};
 
 /// Which strand(s) of the *subject* sequence to compute against the query.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,13 +110,108 @@ pub struct DotPlot {
     pub params: PlotParams,
 }
 
-/// Compute a dotplot. Stub for Phase 0; populated by Phase 1+.
+/// Compute a dotplot for a `(query, subject)` pair.
+///
+/// **Phase 1 scope**: BLASTN with `strand = Forward`, no self-comparison.
+/// Other modes return [`DottirError::NotImplemented`] and will be filled in
+/// by Phase 2 (reverse strand, BLASTP, BLASTX, self-comparison).
+///
+/// # Example
+///
+/// ```
+/// use dottir_core::{compute_dotplot, ScoreMatrix, PlotConfig, Strand};
+///
+/// let q = b"ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT".repeat(2);
+/// let s = q.clone();
+/// let mut cfg = PlotConfig::default_blastn(ScoreMatrix::dna_identity());
+/// cfg.strand = Strand::Forward;
+/// cfg.window_size = Some(8);
+/// cfg.zoom = 1;
+/// let plot = compute_dotplot(&q, &s, &cfg).unwrap();
+/// // The main diagonal should be heavily lit on a self-similar input.
+/// let diag_pixel = plot.pixels[plot.width as usize / 2 * plot.width as usize + plot.width as usize / 2];
+/// assert!(diag_pixel > 0);
+/// ```
 pub fn compute_dotplot(
-    _query: &[u8],
-    _subject: &[u8],
-    _config: &PlotConfig,
+    query: &[u8],
+    subject: &[u8],
+    config: &PlotConfig,
 ) -> Result<DotPlot, DottirError> {
-    Err(DottirError::NotImplemented(
-        "compute_dotplot — Phase 1 will land the BLASTN forward kernel",
-    ))
+    if query.is_empty() || subject.is_empty() {
+        return Err(DottirError::EmptySequence);
+    }
+    if config.zoom == 0 {
+        return Err(DottirError::InvalidConfig("zoom must be >= 1".into()));
+    }
+    if config.pixel_fac == 0 {
+        return Err(DottirError::InvalidConfig("pixel_fac must be >= 1".into()));
+    }
+    if config.self_comparison {
+        return Err(DottirError::NotImplemented(
+            "self_comparison — Phase 2",
+        ));
+    }
+    if config.mode != BlastMode::Blastn {
+        return Err(DottirError::NotImplemented(
+            "BLASTP / BLASTX — Phase 2",
+        ));
+    }
+    if matches!(config.strand, Strand::Reverse | Strand::Both) {
+        return Err(DottirError::NotImplemented(
+            "reverse / both strand — Phase 2",
+        ));
+    }
+
+    // Karlin window estimate, or honour the override.
+    let (window, karlin_result) = match config.window_size {
+        Some(w) => (w, None),
+        None => {
+            let r = karlin_window_size(&config.matrix, query, subject, config.mode)?;
+            (r.window_size, Some(r))
+        }
+    };
+    if window < 1 {
+        return Err(DottirError::InvalidConfig(
+            "window size must be >= 1".into(),
+        ));
+    }
+
+    // Encode sequences using the alphabet for the mode.
+    let alpha = config.mode.alphabet();
+    let q_encoded = encode(query, alpha);
+    let s_encoded = encode(subject, alpha);
+
+    // Output dimensions.
+    let width = image_dimension(q_encoded.len(), config.zoom);
+    let height = image_dimension(s_encoded.len(), config.zoom);
+    let mut pixelmap =
+        PixelMap::new_checked(width, height, config.memory_limit_bytes)?;
+
+    // Precomputed score vector keyed on the query.
+    let score_vec = ScoreVec::build(&config.matrix, &q_encoded);
+
+    // Phase 1: single forward pass.
+    sliding_window_pass(
+        &score_vec,
+        &s_encoded,
+        window,
+        config.zoom,
+        config.pixel_fac,
+        Direction::Forward,
+        &mut pixelmap,
+    );
+
+    Ok(DotPlot {
+        width,
+        height,
+        pixels: pixelmap.into_vec(),
+        forward_pixels: None,
+        reverse_pixels: None,
+        params: PlotParams {
+            window_size: window,
+            zoom: config.zoom,
+            pixel_fac: config.pixel_fac,
+            karlin: karlin_result,
+        },
+    })
 }
