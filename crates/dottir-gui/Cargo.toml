@@ -18,4 +18,7 @@ dottir-io = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-# egui/eframe added in Phase 5 once the GUI MVP starts
+# eframe/egui will be added once the workspace MSRV is bumped past
+# Rust 1.75. As of 2026-05, the egui ≥ 0.27 dependency chain
+# (winit → toml_edit-0.25 → indexmap-2.14) requires edition2024 which
+# stabilised in 1.85. Tracked in docs/adr/0003-gui-msrv.md.

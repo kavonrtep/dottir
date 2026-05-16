@@ -7,6 +7,7 @@ over Y because…" live here. Format: [MADR](https://adr.github.io/madr/).
 |------|-----------------------------|----------|
 | 0001 | egui frontend               | Accepted |
 | 0002 | License = GPLv3-or-later    | Accepted |
+| 0003 | Defer GUI to MSRV bump      | Accepted |
 
 Add a new ADR whenever the change is one of:
 
