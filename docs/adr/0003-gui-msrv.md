@@ -1,6 +1,7 @@
 # ADR 0003 — Defer egui/eframe runtime to a future MSRV bump
 
-* Status: Accepted
+* Status: Superseded by the MSRV-1.85 bump on 2026-05-17 — egui MVP
+  is now in tree (Phase 5 commit).
 * Date: 2026-05-16
 * Deciders: petr
 
