@@ -115,18 +115,27 @@ fn memory_limit_enforced() {
     assert!(s.contains("memory_limit"), "got: {s}");
 }
 
-/// Phase 2 features still return NotImplemented for now.
+/// BLASTX is still NotImplemented (Phase 2-extra).
 #[test]
-fn unimplemented_modes_return_not_implemented_error() {
-    let q = b"ACGT";
-    let s = b"ACGT";
+fn blastx_returns_not_implemented_error() {
+    use dottir_core::BlastMode;
+    let q = b"ACGTACGTACGT";
+    let s = b"MKTAYIAKQRQI";
     let mut cfg = PlotConfig::default_blastn(ScoreMatrix::dna_identity());
+    cfg.mode = BlastMode::Blastx;
     cfg.window_size = Some(3);
-
-    cfg.strand = Strand::Both;
     assert!(compute_dotplot(q, s, &cfg).is_err());
+}
 
-    cfg.strand = Strand::Forward;
-    cfg.self_comparison = true;
+/// BLASTP + reverse strand is meaningless and returns InvalidConfig.
+#[test]
+fn blastp_rejects_reverse_strand() {
+    use dottir_core::BlastMode;
+    let q = b"MKTAYIAKQRQI";
+    let s = b"MAATKRIIRQRY";
+    let mut cfg = PlotConfig::default_blastp(ScoreMatrix::blosum62());
+    cfg.mode = BlastMode::Blastp;
+    cfg.window_size = Some(3);
+    cfg.strand = Strand::Reverse;
     assert!(compute_dotplot(q, s, &cfg).is_err());
 }

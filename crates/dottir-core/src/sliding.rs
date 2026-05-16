@@ -63,6 +63,7 @@ impl Direction {
 /// Single-threaded; iteration order is `s = 0..slen` (or its reverse),
 /// `q = 0..pepqlen`. With max-merge being associative+commutative, parallel
 /// chunking by subject in Phase 3 will preserve byte-identical output.
+#[allow(clippy::too_many_arguments)]
 pub fn sliding_window_pass(
     score_vec: &ScoreVec,
     subject_encoded: &[u8],
@@ -70,6 +71,7 @@ pub fn sliding_window_pass(
     zoom: u32,
     pixel_fac: u32,
     direction: Direction,
+    self_comp: bool,
     out: &mut PixelMap,
 ) {
     let qlen = score_vec.qlen;
@@ -148,18 +150,22 @@ pub fn sliding_window_pass(
         }
 
         // Steady state: q in [W, qlen). Full recurrence; this is where
-        // pixels are emitted.
+        // pixels are emitted. For self-comparison the C dotter restricts
+        // qmax to `s + 1` so only the lower triangle is filled (the
+        // mirror step then populates the other half).
         if w < qlen {
-            // For the steady state we need to know whether s is in the
-            // "valid range" (full window built up):
-            //   forward: valid when s >= W
-            //   reverse: valid when s < slen - W
             let s_valid = match direction {
                 Direction::Forward => s >= w,
                 Direction::Reverse => s + w < slen,
             };
+            // C self-comp cap: `qmax = min(sIdx + 1, pepQSeqLen)`.
+            let q_end = if self_comp {
+                qlen.min(s + 1)
+            } else {
+                qlen
+            };
 
-            for q in w..qlen {
+            for q in w..q_end {
                 let new_val = oldsum[q - 1] + add_row[q] - del_row[q - w];
                 newsum[q] = new_val;
 

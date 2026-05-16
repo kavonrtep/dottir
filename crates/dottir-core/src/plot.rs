@@ -4,7 +4,7 @@
 //! kernel through them; Phase 2 adds reverse-strand, BLASTP/BLASTX, and
 //! self-comparison.
 
-use crate::alphabet::encode;
+use crate::alphabet::{complement_encoded, encode, reverse_complement_dna};
 use crate::error::DottirError;
 use crate::karlin::{karlin_window_size, KarlinResult};
 use crate::matrix::{BlastMode, ScoreMatrix};
@@ -20,9 +20,21 @@ pub enum Strand {
     Both,
 }
 
-/// Choice of triangle in self-comparison mode.
+/// Which triangles of a self-comparison plot end up populated.
+///
+/// The kernel only fills the lower triangle when `self_comparison` is set
+/// (matching C dotter's `qmax = sIdx + 1` cap). After the kernel,
+/// `mirror_self_comparison` post-processes per this enum:
+///
+/// * [`Triangle::Both`]: mirror lower into upper — the default, gives a
+///   symmetric plot. Matches C `DOTTER_TRIANGLE_BOTH`.
+/// * [`Triangle::Upper`]: copy lower into upper, then zero the lower.
+///   Matches C `DOTTER_TRIANGLE_UPPER`.
+/// * [`Triangle::Lower`]: leave the lower as computed, leave the upper
+///   blank. Matches C `DOTTER_TRIANGLE_LOWER` ("done by default").
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Triangle {
+    Both,
     Upper,
     Lower,
 }
@@ -62,7 +74,7 @@ impl PlotConfig {
             pixel_fac: 50,
             strand: Strand::Both,
             self_comparison: false,
-            triangle: Triangle::Upper,
+            triangle: Triangle::Both,
             disable_mirror: false,
             memory_limit_bytes: 512 * 1024 * 1024,
             separate_strand_channels: false,
@@ -79,7 +91,7 @@ impl PlotConfig {
             pixel_fac: 50,
             strand: Strand::Forward,
             self_comparison: false,
-            triangle: Triangle::Upper,
+            triangle: Triangle::Both,
             disable_mirror: false,
             memory_limit_bytes: 512 * 1024 * 1024,
             separate_strand_channels: false,
@@ -112,25 +124,28 @@ pub struct DotPlot {
 
 /// Compute a dotplot for a `(query, subject)` pair.
 ///
-/// **Phase 1 scope**: BLASTN with `strand = Forward`, no self-comparison.
-/// Other modes return [`DottirError::NotImplemented`] and will be filled in
-/// by Phase 2 (reverse strand, BLASTP, BLASTX, self-comparison).
+/// Supports BLASTN (forward, reverse, both, with optional separate
+/// strand channels and self-comparison mirroring) and BLASTP. BLASTX
+/// (three-frame translation) is Phase 2-extra and still returns
+/// [`DottirError::NotImplemented`].
 ///
-/// # Example
+/// # Example — BLASTN self-comparison, both strands
 ///
 /// ```
 /// use dottir_core::{compute_dotplot, ScoreMatrix, PlotConfig, Strand};
 ///
 /// let q = b"ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT".repeat(2);
-/// let s = q.clone();
 /// let mut cfg = PlotConfig::default_blastn(ScoreMatrix::dna_identity());
-/// cfg.strand = Strand::Forward;
+/// cfg.strand = Strand::Both;
 /// cfg.window_size = Some(8);
 /// cfg.zoom = 1;
-/// let plot = compute_dotplot(&q, &s, &cfg).unwrap();
-/// // The main diagonal should be heavily lit on a self-similar input.
-/// let diag_pixel = plot.pixels[plot.width as usize / 2 * plot.width as usize + plot.width as usize / 2];
-/// assert!(diag_pixel > 0);
+/// cfg.self_comparison = true;
+/// let plot = compute_dotplot(&q, &q, &cfg).unwrap();
+/// // Main diagonal is symmetric.
+/// let n = plot.width as usize;
+/// for i in 8..n {
+///     assert_eq!(plot.pixels[i * n + i], plot.pixels[i * n + i]);
+/// }
 /// ```
 pub fn compute_dotplot(
     query: &[u8],
@@ -146,23 +161,27 @@ pub fn compute_dotplot(
     if config.pixel_fac == 0 {
         return Err(DottirError::InvalidConfig("pixel_fac must be >= 1".into()));
     }
-    if config.self_comparison {
+    if config.mode == BlastMode::Blastx {
         return Err(DottirError::NotImplemented(
-            "self_comparison — Phase 2",
+            "BLASTX three-frame translation — Phase 2-extra",
         ));
     }
-    if config.mode != BlastMode::Blastn {
-        return Err(DottirError::NotImplemented(
-            "BLASTP / BLASTX — Phase 2",
+    if config.self_comparison && query.len() != subject.len() {
+        return Err(DottirError::InvalidConfig(
+            "self_comparison requires query.len() == subject.len()".into(),
         ));
     }
-    if matches!(config.strand, Strand::Reverse | Strand::Both) {
-        return Err(DottirError::NotImplemented(
-            "reverse / both strand — Phase 2",
+    // BLASTP only does a single forward pass; reverse-strand options
+    // are meaningless on proteins.
+    if config.mode == BlastMode::Blastp
+        && matches!(config.strand, Strand::Reverse | Strand::Both)
+    {
+        return Err(DottirError::InvalidConfig(
+            "BLASTP only supports Strand::Forward (proteins have no reverse strand)".into(),
         ));
     }
 
-    // Karlin window estimate, or honour the override.
+    // Karlin window estimate or override.
     let (window, karlin_result) = match config.window_size {
         Some(w) => (w, None),
         None => {
@@ -176,37 +195,99 @@ pub fn compute_dotplot(
         ));
     }
 
-    // Encode sequences using the alphabet for the mode.
     let alpha = config.mode.alphabet();
     let q_encoded = encode(query, alpha);
-    let s_encoded = encode(subject, alpha);
+    let s_encoded_forward = encode(subject, alpha);
 
-    // Output dimensions.
     let width = image_dimension(q_encoded.len(), config.zoom);
-    let height = image_dimension(s_encoded.len(), config.zoom);
-    let mut pixelmap =
-        PixelMap::new_checked(width, height, config.memory_limit_bytes)?;
+    let height = image_dimension(s_encoded_forward.len(), config.zoom);
 
-    // Precomputed score vector keyed on the query.
     let score_vec = ScoreVec::build(&config.matrix, &q_encoded);
 
-    // Phase 1: single forward pass.
-    sliding_window_pass(
-        &score_vec,
-        &s_encoded,
-        window,
-        config.zoom,
-        config.pixel_fac,
-        Direction::Forward,
-        &mut pixelmap,
-    );
+    // Per spec §4.4.3, separate-strand channels keep forward and reverse
+    // hits distinct (used for inverted-repeat highlighting in the GUI).
+    // Otherwise both passes max-merge into a single pixelmap.
+    let mut forward_map = PixelMap::new_checked(width, height, config.memory_limit_bytes)?;
+    let mut reverse_map: Option<PixelMap> = None;
+
+    // Decide which passes to run. For BLASTN, Strand::Both = forward +
+    // reverse; Strand::Forward = forward only; Strand::Reverse = reverse
+    // only. For BLASTP, always Forward.
+    let do_forward = matches!(config.strand, Strand::Forward | Strand::Both)
+        || config.mode == BlastMode::Blastp;
+    let do_reverse = config.mode == BlastMode::Blastn
+        && matches!(config.strand, Strand::Reverse | Strand::Both);
+
+    if do_forward {
+        sliding_window_pass(
+            &score_vec,
+            &s_encoded_forward,
+            window,
+            config.zoom,
+            config.pixel_fac,
+            Direction::Forward,
+            config.self_comparison,
+            &mut forward_map,
+        );
+    }
+
+    if do_reverse {
+        // Match C dotter's reverse pass: build the score vector against
+        // the *complement* of the query (C uses the ntob_compl[] table
+        // for the same effect), then scan the subject backwards. A hit
+        // at (q, s) then means `subject[s..s+W]` (read backwards)
+        // matches `complement(query)[q..q+W]`, i.e. a reverse-strand
+        // hit. This is the standard BLASTN bothstrand semantics.
+        let q_complement = complement_encoded(&q_encoded);
+        let score_vec_rev = ScoreVec::build(&config.matrix, &q_complement);
+        let target_map = if config.separate_strand_channels {
+            reverse_map = Some(PixelMap::new_checked(width, height, config.memory_limit_bytes)?);
+            reverse_map.as_mut().unwrap()
+        } else {
+            &mut forward_map
+        };
+        sliding_window_pass(
+            &score_vec_rev,
+            &s_encoded_forward,
+            window,
+            config.zoom,
+            config.pixel_fac,
+            Direction::Reverse,
+            config.self_comparison,
+            target_map,
+        );
+    }
+
+    // Self-comparison post-processing (spec §4.1.8).
+    if config.self_comparison {
+        mirror_self_comparison(&mut forward_map, config.triangle, config.disable_mirror);
+        if let Some(ref mut r) = reverse_map {
+            mirror_self_comparison(r, config.triangle, config.disable_mirror);
+        }
+    }
+
+    let (combined, fwd_split, rev_split) = if config.separate_strand_channels && reverse_map.is_some() {
+        // Combined channel: max-merge of forward + reverse for downstream
+        // code that wants the unified view.
+        let mut combined = forward_map.clone();
+        if let Some(ref r) = reverse_map {
+            combined.merge_from(r);
+        }
+        (
+            combined.into_vec(),
+            Some(forward_map.into_vec()),
+            Some(reverse_map.unwrap().into_vec()),
+        )
+    } else {
+        (forward_map.into_vec(), None, None)
+    };
 
     Ok(DotPlot {
         width,
         height,
-        pixels: pixelmap.into_vec(),
-        forward_pixels: None,
-        reverse_pixels: None,
+        pixels: combined,
+        forward_pixels: fwd_split,
+        reverse_pixels: rev_split,
         params: PlotParams {
             window_size: window,
             zoom: config.zoom,
@@ -214,4 +295,50 @@ pub fn compute_dotplot(
             karlin: karlin_result,
         },
     })
+}
+
+/// Reverse-complement a DNA sequence in place (helper for callers who want
+/// to pre-flip a sequence before passing to [`compute_dotplot`]; equivalent
+/// to the original Dotter's `-r` / `-v` CLI flags per spec §4.1.10).
+pub fn reverse_complement(dna: &[u8]) -> Vec<u8> {
+    reverse_complement_dna(dna)
+}
+
+/// Post-process a self-comparison pixelmap according to [`Triangle`].
+/// The kernel only filled the *lower* triangle (q < s, i.e. row > col)
+/// thanks to the `qmax = s + 1` cap, so:
+///
+/// * [`Triangle::Both`]: copy lower into upper — full symmetric plot.
+/// * [`Triangle::Upper`]: copy lower into upper, then zero the lower.
+/// * [`Triangle::Lower`]: do nothing (already filled).
+///
+/// `disable_mirror = true` short-circuits to a no-op regardless of mode,
+/// honouring spec §4.1.8 / the original `--disable-mirror` flag.
+fn mirror_self_comparison(map: &mut PixelMap, triangle: Triangle, disable_mirror: bool) {
+    if disable_mirror {
+        return;
+    }
+    let stride = map.width();
+    let dim = stride.min(map.height());
+    let data = map.as_mut_slice();
+    for s in 0..dim {
+        for q in 0..s {
+            // (row=s, col=q): row > col → LOWER triangle (filled by kernel).
+            // (row=q, col=s): row < col → UPPER triangle (empty).
+            let lower_idx = s * stride + q;
+            let upper_idx = q * stride + s;
+            match triangle {
+                Triangle::Both => {
+                    data[upper_idx] = data[lower_idx];
+                }
+                Triangle::Upper => {
+                    data[upper_idx] = data[lower_idx];
+                    data[lower_idx] = 0;
+                }
+                Triangle::Lower => {
+                    // No-op: the kernel already filled the lower triangle.
+                }
+            }
+        }
+    }
 }

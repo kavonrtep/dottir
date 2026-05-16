@@ -36,7 +36,9 @@ pub mod sliding;
 pub use error::DottirError;
 pub use karlin::{karlin_window_size, KarlinConfig, KarlinResult};
 pub use matrix::{BlastMode, ScoreMatrix};
-pub use plot::{compute_dotplot, DotPlot, PlotConfig, PlotParams, Strand};
+pub use plot::{
+    compute_dotplot, reverse_complement, DotPlot, PlotConfig, PlotParams, Strand, Triangle,
+};
 
 /// Bumped whenever the algorithmic contract changes such that previously
 /// pinned golden pixelmaps must be regenerated. See CLAUDE.md.

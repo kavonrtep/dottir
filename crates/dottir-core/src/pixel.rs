@@ -65,6 +65,12 @@ impl PixelMap {
         &self.data
     }
 
+    /// Mutable borrow of the raw bytes; used by self-comparison mirror
+    /// post-processing in [`crate::plot`].
+    pub fn as_mut_slice(&mut self) -> &mut [u8] {
+        &mut self.data
+    }
+
     /// `pixel[y * width + x] = max(pixel[y * width + x], value)`. Out-of-
     /// bounds coordinates are silently dropped; the caller is expected to
     /// have gated on bounds already.

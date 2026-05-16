@@ -117,6 +117,31 @@ pub fn reverse_complement_dna(seq: &[u8]) -> Vec<u8> {
     seq.iter().rev().map(|&b| complement_dna_byte(b)).collect()
 }
 
+/// Complement an *encoded* DNA index (output of [`encode_dna`]). Used by
+/// the reverse-strand BLASTN pass to build a score vector against the
+/// complement of the query. Mirrors C dotter's `ntob_compl[]` table.
+///
+/// * 0 (A) ↔ 3 (T)
+/// * 1 (C) ↔ 2 (G)
+/// * 4 (N) → 4 (N) — ambiguity stays ambiguous
+/// * [`SENTINEL`] → [`SENTINEL`]
+#[inline]
+pub fn complement_dna_encoded(idx: u8) -> u8 {
+    match idx {
+        0 => 3,
+        1 => 2,
+        2 => 1,
+        3 => 0,
+        4 => 4,
+        _ => idx, // SENTINEL or out-of-alphabet stays as-is
+    }
+}
+
+/// Apply [`complement_dna_encoded`] to every byte of an encoded sequence.
+pub fn complement_encoded(seq: &[u8]) -> Vec<u8> {
+    seq.iter().map(|&b| complement_dna_encoded(b)).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
