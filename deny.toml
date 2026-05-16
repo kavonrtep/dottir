@@ -1,0 +1,47 @@
+# cargo-deny configuration. See https://embarkstudios.github.io/cargo-deny/
+# Run with: cargo deny check
+
+[graph]
+# Restrict to the targets we ship binaries for.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
+]
+
+[licenses]
+# dottir is GPL-3.0-or-later (ADR 0002). Allow only GPL-compatible deps.
+unlicensed = "deny"
+copyleft = "allow"
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "Zlib",
+    "MPL-2.0",
+    "CC0-1.0",
+    "GPL-3.0",
+    "GPL-3.0-or-later",
+]
+confidence-threshold = 0.93
+
+[bans]
+multiple-versions = "warn"
+wildcards = "warn"
+
+# Crates that have known cargo-audit advisories we explicitly accept (none
+# right now). Add entries here with an explanation.
+deny = []
+
+[advisories]
+yanked = "warn"
+ignore = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

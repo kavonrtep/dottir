@@ -41,3 +41,25 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --workspace --locked
       - run: cargo test --workspace --locked
+
+  wasm-check:
+    # Verify dottir-core compiles to wasm32 with rayon disabled. This is
+    # the only piece we promise WASM compatibility for in this release
+    # (the GUI is deferred per ADR 0003).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check -p dottir-core --target wasm32-unknown-unknown --no-default-features --locked
+
+  deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-deny
+        run: cargo install --locked cargo-deny
+      - run: cargo deny --all-features check

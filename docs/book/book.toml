@@ -1,0 +1,13 @@
+[book]
+authors = ["dottir contributors"]
+language = "en"
+multilingual = false
+src = "src"
+title = "dottir — user manual"
+description = "A modern Rust reimplementation of Dotter (Sonnhammer & Durbin 1995)"
+
+[output.html]
+default-theme = "rust"
+preferred-dark-theme = "navy"
+git-repository-url = "https://github.com/petr/dottir"
+edit-url-template = "https://github.com/petr/dottir/edit/main/docs/book/{path}"
