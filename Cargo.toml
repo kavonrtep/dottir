@@ -1,0 +1,43 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/dottir-core",
+    "crates/dottir-io",
+    "crates/dottir-cli",
+    "crates/dottir-gui",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/petr/dottir"
+authors = ["dottir contributors"]
+
+[workspace.dependencies]
+anyhow = "1"
+thiserror = "1"
+clap = { version = "=4.5.20", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+toml = "=0.8.19"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rayon = "1.10"
+sha2 = "0.10"
+flate2 = "1"
+# needletail / image / memmap2 added in their consuming phase; the MSRV-1.75
+# floor breaks if these get pulled in transitively before we need them.
+proptest = "=1.5.0"
+
+# Internal
+dottir-core = { path = "crates/dottir-core" }
+dottir-io = { path = "crates/dottir-io" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+debug = 1
+
+[profile.bench]
+inherits = "release"

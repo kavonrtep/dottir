@@ -1,0 +1,37 @@
+dottir
+======
+
+A Rust reimplementation of Dotter (Sonnhammer & Durbin 1995), a sliding-window
+sequence dot-matrix plotter.
+
+Algorithm lineage
+-----------------
+
+The window-size estimation in `dottir-core::karlin` is a direct port of the
+Karlin/Altschul statistics implementation in `dotterApp/dotterKarlin.c` of
+seqtools-4.28 (https://github.com/douglasgscofield/seqtools-4.28), which in
+turn descends from NCBI BLAST.
+
+The sliding-window sum recurrence, anti-diagonal suppression rule, and pixel
+max-merge logic in `dottir-core::sliding`, `::antidiag`, and `::pixel`
+preserve the algorithms documented at `dotterApp/dotplot.c:1308`, `:1405`,
+and surrounding lines.
+
+Acknowledgements
+----------------
+
+- Erik L. L. Sonnhammer and Richard Durbin, authors of the original Dotter
+  (Gene 167(2):GC1-10, 1995).
+- Gemma Barson, Roy Storey, Malcolm Hinsley and others, maintainers of
+  seqtools.
+- Douglas G. Scofield, maintainer of the seqtools-4.28 fork that serves as
+  this project's reference implementation.
+- Stephen F. Altschul and Samuel Karlin, authors of the statistical
+  framework underlying the window-size estimation.
+- The NCBI BLAST authors.
+
+License
+-------
+
+dottir is distributed under GPL-3.0-or-later, the same license as upstream
+Dotter. See the LICENSE file for the full text.

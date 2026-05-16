@@ -1,0 +1,22 @@
+[package]
+name = "dottir-io"
+description = "I/O for dottir: FASTA, GFF3, PAF, matrix files, .dot, image exports"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+dottir-core = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+flate2 = { workspace = true }
+sha2 = { workspace = true }
+serde = { workspace = true }
+toml = { workspace = true }
+# FASTA / image exports / mmap added in Phase 1 / Phase 4 when their
+# downstream code lands. Adding them early just inflates the dep graph
+# and the MSRV-1.75 pin gets fragile.

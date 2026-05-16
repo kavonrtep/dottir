@@ -1,0 +1,23 @@
+# Vendored upstream reference, not part of dottir
+third_party/seqtools/
+
+# Rust build artifacts
+target/
+**/*.rs.bk
+Cargo.lock.bak
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local override settings
+.claude/settings.local.json
+
+# Generated documentation outputs
+docs/book/book/
