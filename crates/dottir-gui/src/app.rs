@@ -75,6 +75,9 @@ struct Settings {
     /// renderer paints reverse hits in `reverse_colour`. Only
     /// meaningful for BLASTN Strand::Both.
     inverted_repeat_colour: bool,
+    /// H2 alignment-dock window size (residues, centred on the
+    /// crosshair). Clamped to [20, 400] at render time.
+    align_window_size: u32,
 }
 
 impl Default for Settings {
@@ -92,6 +95,7 @@ impl Default for Settings {
             reverse_query: false,
             reverse_subject: false,
             inverted_repeat_colour: false,
+            align_window_size: 100,
         }
     }
 }
@@ -202,6 +206,10 @@ pub struct DottirApp {
     /// finer-grained computation, the kernel re-runs at a new
     /// `PlotConfig::zoom` tier.
     last_zoom_event: Option<std::time::Instant>,
+    /// H2: whether the alignment-view dock is shown beneath the
+    /// canvas. Default true; toggled via View → "Show alignment
+    /// view".
+    align_dock_visible: bool,
 }
 
 impl DottirApp {
@@ -233,6 +241,7 @@ impl DottirApp {
             reverse_query: false,
             reverse_subject: false,
             inverted_repeat_colour: false,
+            align_window_size: 100,
         };
 
         let mut app = Self {
@@ -256,6 +265,7 @@ impl DottirApp {
             // want one job dispatched once both inputs are settled.
             suspend_recompute: true,
             last_zoom_event: None,
+            align_dock_visible: true,
         };
 
         // Pre-load any sequences supplied on the command line. Errors
@@ -558,6 +568,9 @@ impl eframe::App for DottirApp {
             self.draw_settings_window(ctx);
         }
         self.draw_status_bar(ctx);
+        if self.align_dock_visible {
+            self.draw_alignment_dock(ctx);
+        }
         self.draw_canvas(ctx);
     }
 }
@@ -666,6 +679,15 @@ impl DottirApp {
                         } else {
                             egui::Visuals::dark()
                         });
+                    }
+                    ui.separator();
+                    let dock_label = if self.align_dock_visible {
+                        "Hide alignment view"
+                    } else {
+                        "Show alignment view"
+                    };
+                    if ui.button(dock_label).clicked() {
+                        self.align_dock_visible = !self.align_dock_visible;
                     }
                     ui.separator();
                     if ui.button("Settings…").clicked() {
@@ -990,6 +1012,169 @@ impl DottirApp {
                 }
             });
         });
+    }
+
+    /// H2: bottom dock showing the sequence context around the
+    /// crosshair as a 3-row (query / match-line / subject) monospace
+    /// alignment with per-column background colour:
+    ///
+    /// * green — identical residues
+    /// * yellow — positive-score non-identical (per the loaded matrix)
+    /// * grey + `-` — out-of-bounds at slice edges
+    /// * none — other (mismatch / non-positive substitution)
+    fn draw_alignment_dock(&mut self, ctx: &Context) {
+        egui::TopBottomPanel::bottom("alignment_dock")
+            .resizable(false)
+            .min_height(70.0)
+            .show(ctx, |ui| {
+                let Some(plot) = self.plot.as_ref() else {
+                    ui.label("Alignment view: load a query and subject and click on the plot.");
+                    return;
+                };
+                if self.settings.mode == BlastMode::Blastx {
+                    ui.label(
+                        "Alignment view: BLASTX (three-frame translated) not yet supported here. \
+                         Use --mode blastp or blastn for now.",
+                    );
+                    return;
+                }
+                let Some((cq_pix, cs_pix)) = self.crosshair else {
+                    ui.label("Alignment view: click on the plot to set the crosshair.");
+                    return;
+                };
+                let Some(q_seq) = self.query.as_ref() else { return };
+                let Some(s_seq) = self.subject.as_ref() else { return };
+
+                // Centre coordinates in *residue* space (translate
+                // pixelmap coords back through the kernel zoom).
+                let kzoom = plot.params.zoom.max(1) as usize;
+                let q_centre = (cq_pix as usize) * kzoom + kzoom / 2;
+                let s_centre = (cs_pix as usize) * kzoom + kzoom / 2;
+
+                // Header row: coords + window-size spinner.
+                ui.horizontal(|ui| {
+                    ui.label(format!(
+                        "q = {}",
+                        format_coord(self.query.as_ref(), q_centre)
+                    ));
+                    ui.separator();
+                    ui.label(format!(
+                        "s = {}",
+                        format_coord(self.subject.as_ref(), s_centre)
+                    ));
+                    ui.separator();
+                    ui.label("window:");
+                    ui.add(
+                        egui::DragValue::new(&mut self.settings.align_window_size)
+                            .range(20..=400)
+                            .speed(1.0),
+                    );
+                });
+
+                let window =
+                    self.settings.align_window_size.clamp(20, 400) as usize;
+                let half = window / 2;
+                let q_bytes = q_seq.bytes();
+                let s_bytes = s_seq.bytes();
+
+                // Score matrix for the current mode — used to colour
+                // positive non-identical substitutions.
+                let matrix = self.settings.build_matrix();
+
+                // Pre-compute per-column data: (q_char, s_char, class).
+                let mut cols: Vec<(u8, u8, MatchClass)> =
+                    Vec::with_capacity(window);
+                for i in 0..window {
+                    let off = i as isize - half as isize;
+                    let qp = q_centre as isize + off;
+                    let sp = s_centre as isize + off;
+                    let (qc, q_oob) = lookup(&q_bytes, qp);
+                    let (sc, s_oob) = lookup(&s_bytes, sp);
+                    let class = if q_oob || s_oob {
+                        MatchClass::OutOfBounds
+                    } else {
+                        classify_match(qc, sc, matrix.as_ref(), self.settings.mode)
+                    };
+                    cols.push((qc, sc, class));
+                }
+
+                // Render the three rows. We compute per-glyph
+                // pixel width from the actual font so backgrounds
+                // and characters line up precisely.
+                let font = egui::FontId::monospace(12.0);
+                let glyph_w = ctx.fonts(|f| {
+                    f.glyph_width(&font, 'A').max(f.glyph_width(&font, 'M'))
+                });
+                let glyph_w = glyph_w.max(7.0); // fall-back if egui can't measure
+                let row_h = 16.0;
+                let total_w = glyph_w * window as f32;
+                let total_h = row_h * 3.0;
+                let (rect, _) = ui.allocate_exact_size(
+                    Vec2::new(total_w, total_h),
+                    Sense::hover(),
+                );
+                let painter = ui.painter_at(rect);
+                let bg_identity = Color32::from_rgb(0xd8, 0xf5, 0xcf);
+                let bg_positive = Color32::from_rgb(0xff, 0xf2, 0xc4);
+                let bg_oob = Color32::from_gray(225);
+                let text_color = ui.style().visuals.text_color();
+                let match_color = Color32::from_gray(60);
+
+                for (i, &(qc, sc, class)) in cols.iter().enumerate() {
+                    let x = rect.left() + i as f32 * glyph_w;
+                    let bg = match class {
+                        MatchClass::Identical => Some(bg_identity),
+                        MatchClass::Positive => Some(bg_positive),
+                        MatchClass::OutOfBounds => Some(bg_oob),
+                        MatchClass::Other => None,
+                    };
+                    // Row 0: query
+                    let r0 =
+                        Rect::from_min_size(Pos2::new(x, rect.top()), Vec2::new(glyph_w, row_h));
+                    if let Some(c) = bg {
+                        painter.rect_filled(r0, 0.0, c);
+                    }
+                    painter.text(
+                        r0.center(),
+                        egui::Align2::CENTER_CENTER,
+                        char_to_string(qc, class, true),
+                        font.clone(),
+                        text_color,
+                    );
+                    // Row 1: match line
+                    let r1 = Rect::from_min_size(
+                        Pos2::new(x, rect.top() + row_h),
+                        Vec2::new(glyph_w, row_h),
+                    );
+                    let match_ch = match class {
+                        MatchClass::Identical => "|",
+                        MatchClass::Positive => ":",
+                        _ => " ",
+                    };
+                    painter.text(
+                        r1.center(),
+                        egui::Align2::CENTER_CENTER,
+                        match_ch,
+                        font.clone(),
+                        match_color,
+                    );
+                    // Row 2: subject
+                    let r2 = Rect::from_min_size(
+                        Pos2::new(x, rect.top() + 2.0 * row_h),
+                        Vec2::new(glyph_w, row_h),
+                    );
+                    if let Some(c) = bg {
+                        painter.rect_filled(r2, 0.0, c);
+                    }
+                    painter.text(
+                        r2.center(),
+                        egui::Align2::CENTER_CENTER,
+                        char_to_string(sc, class, false),
+                        font.clone(),
+                        text_color,
+                    );
+                }
+            });
     }
 
     fn draw_canvas(&mut self, ctx: &Context) {
@@ -1375,6 +1560,81 @@ impl DottirApp {
 
 /// Truncate a record name to fit roughly within `max_px` of
 /// monospace 11-px font (~6 px per glyph), with a `…` marker.
+/// Match class used by the alignment dock to colour columns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MatchClass {
+    /// Identical residues (case-insensitive for ASCII letters).
+    Identical,
+    /// Positive matrix score, non-identical (e.g. BLOSUM62 A/S = 1).
+    Positive,
+    /// Either side ran past the sequence end.
+    OutOfBounds,
+    /// Mismatch / zero or negative matrix score.
+    Other,
+}
+
+/// Read a residue at a possibly-out-of-bounds coordinate. Returns
+/// `(b'-', true)` for out-of-bounds, `(byte, false)` otherwise.
+fn lookup(seq: &[u8], pos: isize) -> (u8, bool) {
+    if pos < 0 || (pos as usize) >= seq.len() {
+        (b'-', true)
+    } else {
+        (seq[pos as usize], false)
+    }
+}
+
+/// Classify a residue column. Identity wins; otherwise consult the
+/// score matrix; otherwise "Other". Case-insensitive on the
+/// identity check so the GUI doesn't trip on a mixed-case FASTA
+/// (the kernel itself uppercases via the encode tables).
+fn classify_match(
+    q: u8,
+    s: u8,
+    matrix: Option<&dottir_core::ScoreMatrix>,
+    mode: BlastMode,
+) -> MatchClass {
+    if q.eq_ignore_ascii_case(&s) && q.is_ascii_alphabetic() {
+        return MatchClass::Identical;
+    }
+    let Some(matrix) = matrix else {
+        return MatchClass::Other;
+    };
+    let (qi, si) = match mode {
+        BlastMode::Blastn => (
+            dottir_core::alphabet::encode_dna(q),
+            dottir_core::alphabet::encode_dna(s),
+        ),
+        BlastMode::Blastp | BlastMode::Blastx => (
+            dottir_core::alphabet::encode_protein(q),
+            dottir_core::alphabet::encode_protein(s),
+        ),
+    };
+    let n = matrix.size();
+    if (qi as usize) >= n || (si as usize) >= n {
+        return MatchClass::Other;
+    }
+    if matrix.get(qi as usize, si as usize) > 0 {
+        MatchClass::Positive
+    } else {
+        MatchClass::Other
+    }
+}
+
+/// Render a residue byte for display in the alignment dock. Out-of-
+/// bounds columns show as `-`; everything else uses the input byte
+/// as a single ASCII char. `_is_query` is currently unused but kept
+/// in the signature so future logic (e.g. translated-frame hints
+/// for BLASTX) can branch on which row it's drawing.
+fn char_to_string(b: u8, class: MatchClass, _is_query: bool) -> String {
+    if matches!(class, MatchClass::OutOfBounds) {
+        "-".to_string()
+    } else if b.is_ascii_graphic() {
+        (b as char).to_string()
+    } else {
+        "?".to_string()
+    }
+}
+
 fn truncate_for_span(name: &str, max_px: f32) -> String {
     let max_chars = (max_px / 6.0).floor() as usize;
     if max_chars == 0 {
@@ -1564,6 +1824,8 @@ fn save_session(app: &mut DottirApp) {
             display_zoom: app.display_zoom,
             crosshair: app.crosshair.map(|(q, s)| [q, s]),
             light_theme: app.light_theme,
+            align_dock_visible: app.align_dock_visible,
+            align_window_size: app.settings.align_window_size,
         },
     };
     let pick = rfd::FileDialog::new()
@@ -1637,6 +1899,8 @@ fn open_session(app: &mut DottirApp) {
     app.display_zoom = s.view.display_zoom.max(0.1);
     app.crosshair = s.view.crosshair.map(|[q, s]| (q, s));
     app.light_theme = s.view.light_theme;
+    app.align_dock_visible = s.view.align_dock_visible;
+    app.settings.align_window_size = s.view.align_window_size.clamp(20, 400);
     tracing::info!("loaded session {}", path.display());
 }
 

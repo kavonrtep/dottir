@@ -60,6 +60,22 @@ pub struct SessionView {
     /// Crosshair pixelmap coord, if set.
     pub crosshair: Option<[u32; 2]>,
     pub light_theme: bool,
+    /// H2: whether the alignment-view dock is shown. Default-true
+    /// via `#[serde(default = …)]` so older session files
+    /// (schema v1 pre-H2) round-trip cleanly.
+    #[serde(default = "default_true")]
+    pub align_dock_visible: bool,
+    /// H2: window size (residues) of the alignment dock. Default 100
+    /// via `#[serde(default = …)]` for pre-H2 sessions.
+    #[serde(default = "default_align_window")]
+    pub align_window_size: u32,
+}
+
+fn default_true() -> bool {
+    true
+}
+fn default_align_window() -> u32 {
+    100
 }
 
 pub const SESSION_VERSION: u32 = 1;
@@ -177,6 +193,8 @@ mod tests {
                 display_zoom: 1.0,
                 crosshair: Some([10, 20]),
                 light_theme: true,
+                align_dock_visible: true,
+                align_window_size: 100,
             },
         }
     }
