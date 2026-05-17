@@ -1297,7 +1297,97 @@ impl DottirApp {
                 break;
             }
         }
+
+        // H1: record-name labels for multi-record FASTAs. Drawn one
+        // text-row above the top-axis tick labels and to the left
+        // of the left-axis tick labels, centred on each record's
+        // projected span. Single-record inputs render no extra
+        // labels.
+        let record_font = egui::FontId::monospace(11.0);
+        if let Some(q) = self.query.as_ref() {
+            if q.records.len() > 1 {
+                for rec in &q.records {
+                    let r_start = rec.range.start as u64;
+                    let r_end = rec.range.end as u64;
+                    if r_end <= r_start {
+                        continue;
+                    }
+                    let x0 = rect.left()
+                        + (r_start as f32 / zoom_us - self.view_offset.x)
+                            * self.display_zoom;
+                    let x1 = rect.left()
+                        + (r_end as f32 / zoom_us - self.view_offset.x)
+                            * self.display_zoom;
+                    let span = (x1 - x0).max(0.0);
+                    // Skip records narrower than ~3 characters of
+                    // monospace 11px (~6 px/char ⇒ 18 px min).
+                    if span < 18.0 {
+                        continue;
+                    }
+                    let cx = (x0 + x1) * 0.5;
+                    if cx < rect.left() || cx > rect.right() {
+                        continue;
+                    }
+                    painter.text(
+                        Pos2::new(cx, rect.top() + 14.0),
+                        egui::Align2::CENTER_TOP,
+                        truncate_for_span(&rec.id, span),
+                        record_font.clone(),
+                        label_color,
+                    );
+                }
+            }
+        }
+        if let Some(s) = self.subject.as_ref() {
+            if s.records.len() > 1 {
+                for rec in &s.records {
+                    let r_start = rec.range.start as u64;
+                    let r_end = rec.range.end as u64;
+                    if r_end <= r_start {
+                        continue;
+                    }
+                    let y0 = rect.top()
+                        + (r_start as f32 / zoom_us - self.view_offset.y)
+                            * self.display_zoom;
+                    let y1 = rect.top()
+                        + (r_end as f32 / zoom_us - self.view_offset.y)
+                            * self.display_zoom;
+                    let span = (y1 - y0).max(0.0);
+                    if span < 14.0 {
+                        continue;
+                    }
+                    let cy = (y0 + y1) * 0.5;
+                    if cy < rect.top() || cy > rect.bottom() {
+                        continue;
+                    }
+                    painter.text(
+                        Pos2::new(rect.left() + 2.0, cy),
+                        egui::Align2::LEFT_CENTER,
+                        truncate_for_span(&rec.id, span * 6.0),
+                        record_font.clone(),
+                        label_color,
+                    );
+                }
+            }
+        }
     }
+}
+
+/// Truncate a record name to fit roughly within `max_px` of
+/// monospace 11-px font (~6 px per glyph), with a `…` marker.
+fn truncate_for_span(name: &str, max_px: f32) -> String {
+    let max_chars = (max_px / 6.0).floor() as usize;
+    if max_chars == 0 {
+        return String::new();
+    }
+    if name.chars().count() <= max_chars {
+        return name.to_string();
+    }
+    if max_chars <= 1 {
+        return "…".to_string();
+    }
+    let kept: String = name.chars().take(max_chars - 1).collect();
+    format!("{kept}…")
 }
 
 /// Pick a "nice" tick step (1, 2, or 5 × 10^k) so each tick is at
@@ -1394,12 +1484,46 @@ fn save_svg(app: &mut DottirApp) {
         .save_file();
     if let Some(path) = pick {
         let mapped: Vec<u8> = plot.pixels.iter().map(|&v| lut[v as usize]).collect();
+        let recs_x: Vec<_> = app
+            .query
+            .as_ref()
+            .map(|q| {
+                q.records
+                    .iter()
+                    .map(|r| {
+                        dottir_io::text_overlay::AxisRecord::new(
+                            r.id.clone(),
+                            r.range.start as u32,
+                            r.range.end as u32,
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let recs_y: Vec<_> = app
+            .subject
+            .as_ref()
+            .map(|s| {
+                s.records
+                    .iter()
+                    .map(|r| {
+                        dottir_io::text_overlay::AxisRecord::new(
+                            r.id.clone(),
+                            r.range.start as u32,
+                            r.range.end as u32,
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         match dottir_io::svg_export::write_svg(
             &path,
             plot.width,
             plot.height,
             &mapped,
             50,
+            &recs_x,
+            &recs_y,
             &[
                 ("dottir-gui", env!("CARGO_PKG_VERSION")),
                 ("greyramp-white", &app.greyramp.white.to_string()),

@@ -26,8 +26,17 @@ pub const FONT_ADVANCE: usize = FONT_W + 1;
 
 /// 5×7 bitmap font. Each entry is 7 rows, each row encoded as the
 /// low 5 bits of a u8 (MSB = leftmost pixel within the glyph).
-/// Glyphs cover the characters used by axis labels.
+/// Covers digits, uppercase A–Z, common FASTA-id punctuation, and a
+/// few helpers (`.kM-_|:/`); lowercase letters resolve to their
+/// uppercase counterpart so the table stays small. Unknown chars
+/// fall back to space.
 fn glyph(c: char) -> Option<&'static [u8; FONT_H]> {
+    // ASCII case-fold so 'a'..'z' use the uppercase glyphs.
+    let c = if c.is_ascii_lowercase() {
+        c.to_ascii_uppercase()
+    } else {
+        c
+    };
     // Each row is 5 bits; '1' means "ink", '0' means "background".
     static G0: [u8; 7] = [0b01110, 0b10001, 0b10011, 0b10101, 0b11001, 0b10001, 0b01110];
     static G1: [u8; 7] = [0b00100, 0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110];
@@ -40,10 +49,41 @@ fn glyph(c: char) -> Option<&'static [u8; FONT_H]> {
     static G8: [u8; 7] = [0b01110, 0b10001, 0b10001, 0b01110, 0b10001, 0b10001, 0b01110];
     static G9: [u8; 7] = [0b01110, 0b10001, 0b10001, 0b01111, 0b00001, 0b00010, 0b01100];
     static GDOT: [u8; 7] = [0, 0, 0, 0, 0, 0b00110, 0b00110];
-    static GK: [u8; 7] = [0b10000, 0b10000, 0b10010, 0b10100, 0b11000, 0b10100, 0b10010];
-    static GM: [u8; 7] = [0b10001, 0b11011, 0b10101, 0b10001, 0b10001, 0b10001, 0b10001];
+    static GM_LO: [u8; 7] = [0b10000, 0b10000, 0b10010, 0b10100, 0b11000, 0b10100, 0b10010]; // lowercase 'k' shape kept as legacy
     static GDASH: [u8; 7] = [0, 0, 0, 0b11111, 0, 0, 0];
     static GSPACE: [u8; 7] = [0; 7];
+    static GUSCORE: [u8; 7] = [0, 0, 0, 0, 0, 0, 0b11111];
+    static GPIPE: [u8; 7] = [0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100];
+    static GCOLON: [u8; 7] = [0, 0b00110, 0b00110, 0, 0b00110, 0b00110, 0];
+    static GSLASH: [u8; 7] = [0b00001, 0b00010, 0b00010, 0b00100, 0b01000, 0b01000, 0b10000];
+    // Uppercase A–Z.
+    static GA: [u8; 7] = [0b01110, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001];
+    static GB: [u8; 7] = [0b11110, 0b10001, 0b10001, 0b11110, 0b10001, 0b10001, 0b11110];
+    static GC: [u8; 7] = [0b01110, 0b10001, 0b10000, 0b10000, 0b10000, 0b10001, 0b01110];
+    static GD: [u8; 7] = [0b11100, 0b10010, 0b10001, 0b10001, 0b10001, 0b10010, 0b11100];
+    static GE: [u8; 7] = [0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b11111];
+    static GF: [u8; 7] = [0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b10000];
+    static GG: [u8; 7] = [0b01110, 0b10001, 0b10000, 0b10111, 0b10001, 0b10001, 0b01110];
+    static GH: [u8; 7] = [0b10001, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001];
+    static GI: [u8; 7] = [0b01110, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110];
+    static GJ: [u8; 7] = [0b00111, 0b00010, 0b00010, 0b00010, 0b00010, 0b10010, 0b01100];
+    static GK: [u8; 7] = [0b10001, 0b10010, 0b10100, 0b11000, 0b10100, 0b10010, 0b10001];
+    static GL: [u8; 7] = [0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b11111];
+    static GM: [u8; 7] = [0b10001, 0b11011, 0b10101, 0b10001, 0b10001, 0b10001, 0b10001];
+    static GN: [u8; 7] = [0b10001, 0b10001, 0b11001, 0b10101, 0b10011, 0b10001, 0b10001];
+    static GO: [u8; 7] = [0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110];
+    static GP: [u8; 7] = [0b11110, 0b10001, 0b10001, 0b11110, 0b10000, 0b10000, 0b10000];
+    static GQ: [u8; 7] = [0b01110, 0b10001, 0b10001, 0b10001, 0b10101, 0b10010, 0b01101];
+    static GR: [u8; 7] = [0b11110, 0b10001, 0b10001, 0b11110, 0b10100, 0b10010, 0b10001];
+    static GS: [u8; 7] = [0b01110, 0b10001, 0b10000, 0b01110, 0b00001, 0b10001, 0b01110];
+    static GT: [u8; 7] = [0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100];
+    static GU: [u8; 7] = [0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110];
+    static GV: [u8; 7] = [0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01010, 0b00100];
+    static GW: [u8; 7] = [0b10001, 0b10001, 0b10001, 0b10001, 0b10101, 0b10101, 0b01010];
+    static GX: [u8; 7] = [0b10001, 0b10001, 0b01010, 0b00100, 0b01010, 0b10001, 0b10001];
+    static GY: [u8; 7] = [0b10001, 0b10001, 0b10001, 0b01010, 0b00100, 0b00100, 0b00100];
+    static GZ: [u8; 7] = [0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b10000, 0b11111];
+    let _ = GM_LO; // legacy shape kept for parity; no character maps here
     match c {
         '0' => Some(&G0),
         '1' => Some(&G1),
@@ -56,10 +96,38 @@ fn glyph(c: char) -> Option<&'static [u8; FONT_H]> {
         '8' => Some(&G8),
         '9' => Some(&G9),
         '.' => Some(&GDOT),
-        'k' => Some(&GK),
-        'M' => Some(&GM),
         '-' => Some(&GDASH),
+        '_' => Some(&GUSCORE),
+        '|' => Some(&GPIPE),
+        ':' => Some(&GCOLON),
+        '/' => Some(&GSLASH),
         ' ' => Some(&GSPACE),
+        'A' => Some(&GA),
+        'B' => Some(&GB),
+        'C' => Some(&GC),
+        'D' => Some(&GD),
+        'E' => Some(&GE),
+        'F' => Some(&GF),
+        'G' => Some(&GG),
+        'H' => Some(&GH),
+        'I' => Some(&GI),
+        'J' => Some(&GJ),
+        'K' => Some(&GK),
+        'L' => Some(&GL),
+        'M' => Some(&GM),
+        'N' => Some(&GN),
+        'O' => Some(&GO),
+        'P' => Some(&GP),
+        'Q' => Some(&GQ),
+        'R' => Some(&GR),
+        'S' => Some(&GS),
+        'T' => Some(&GT),
+        'U' => Some(&GU),
+        'V' => Some(&GV),
+        'W' => Some(&GW),
+        'X' => Some(&GX),
+        'Y' => Some(&GY),
+        'Z' => Some(&GZ),
         _ => None,
     }
 }
@@ -108,6 +176,24 @@ pub fn text_width(s: &str) -> usize {
     }
 }
 
+/// One record's contribution to an axis label strip. The renderer
+/// places `name` centred on the residue interval `[start, end)` of
+/// the axis. Records that project to fewer than ~`FONT_ADVANCE * 3`
+/// pixels are skipped so dense multi-record inputs don't end up
+/// with overlapping labels.
+#[derive(Debug, Clone)]
+pub struct AxisRecord {
+    pub name: String,
+    pub start: u32,
+    pub end: u32,
+}
+
+impl AxisRecord {
+    pub fn new(name: impl Into<String>, start: u32, end: u32) -> Self {
+        Self { name: name.into(), start, end }
+    }
+}
+
 /// Compose a `(plot_w × plot_h)` greyscale pixelmap into a larger
 /// canvas with a margin on every side, a 1-px axis frame, tick marks
 /// at top and left, and numeric labels along both axes. Returns
@@ -131,6 +217,8 @@ pub fn compose_image_with_axes(
     coord_w: u32,
     coord_h: u32,
     margin: u32,
+    axis_records_x: &[AxisRecord],
+    axis_records_y: &[AxisRecord],
 ) -> (Vec<u8>, u32, u32) {
     let total_w = plot_w + 2 * margin;
     let total_h = plot_h + 2 * margin;
@@ -202,7 +290,152 @@ pub fn compose_image_with_axes(
         t = t.saturating_add(step_y);
     }
 
+    // Record-name labels along each axis. Drawn one font row *above*
+    // the tick labels on the top axis, and one font advance *to the
+    // left of* the tick labels on the left axis. Records whose
+    // projected pixel extent is smaller than ~3 characters of font
+    // advance are skipped to avoid garbage-overlap when many small
+    // records line up.
+    if !axis_records_x.is_empty() {
+        // Tick labels for the top axis are drawn at
+        // y = top - 5 - FONT_H - 2. Record names sit another
+        // (FONT_H + 4) px above that.
+        let tick_label_y = top.saturating_sub(5 + FONT_H + 2);
+        let ly = tick_label_y.saturating_sub(FONT_H + 4);
+        draw_axis_record_labels_x(
+            &mut canvas,
+            stride_out,
+            total_h as usize,
+            m,
+            plot_w,
+            coord_w_safe,
+            px_per_coord_x,
+            axis_records_x,
+            ly,
+        );
+    }
+    if !axis_records_y.is_empty() {
+        // Tick labels for the left axis right-align at
+        // x = left - 5 - tick_label_width - 2. Record names sit
+        // another column to the left, vertically along each
+        // record's slice midpoint.
+        draw_axis_record_labels_y(
+            &mut canvas,
+            stride_out,
+            total_h as usize,
+            m,
+            plot_h,
+            coord_h_safe,
+            px_per_coord_y,
+            axis_records_y,
+            left,
+        );
+    }
+
     (canvas, total_w, total_h)
+}
+
+/// Place record-name labels along the top axis. Each name is
+/// truncated (with ellipsis) to fit within its record's projected
+/// pixel span; records too narrow for even a 3-character label are
+/// skipped.
+#[allow(clippy::too_many_arguments)]
+fn draw_axis_record_labels_x(
+    canvas: &mut [u8],
+    stride: usize,
+    total_h: usize,
+    margin: usize,
+    plot_w: u32,
+    coord_w: u32,
+    px_per_coord: f64,
+    records: &[AxisRecord],
+    label_y: usize,
+) {
+    let plot_left = margin;
+    let plot_right = margin + plot_w as usize;
+    let label_ink = 60_u8; // slightly bolder than tick labels
+    for r in records {
+        if r.end <= r.start || r.start >= coord_w {
+            continue;
+        }
+        let start = r.start.min(coord_w);
+        let end = r.end.min(coord_w);
+        let x0 = plot_left + (start as f64 * px_per_coord).round() as usize;
+        let x1 = plot_left + (end as f64 * px_per_coord).round() as usize;
+        let span = x1.saturating_sub(x0);
+        let max_chars = if FONT_ADVANCE > 0 { span / FONT_ADVANCE } else { 0 };
+        if max_chars < 3 {
+            continue;
+        }
+        let name = truncate_to_chars(&r.name, max_chars);
+        let lw = text_width(&name);
+        let centre = (x0 + x1) / 2;
+        let lx = centre.saturating_sub(lw / 2).max(plot_left);
+        let lx = lx.min(plot_right.saturating_sub(lw));
+        draw_text(canvas, stride, total_h, lx, label_y, &name, label_ink);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_axis_record_labels_y(
+    canvas: &mut [u8],
+    stride: usize,
+    total_h: usize,
+    margin: usize,
+    plot_h: u32,
+    coord_h: u32,
+    px_per_coord: f64,
+    records: &[AxisRecord],
+    plot_left: usize,
+) {
+    let plot_top = margin;
+    let plot_bot = margin + plot_h as usize;
+    let label_ink = 60_u8;
+    // Place record names hard against the left margin (x = 2) so
+    // they don't collide with the tick labels (which sit a bit to
+    // the right). Truncate to the available char count between
+    // x=2 and the tick-label area.
+    let avail_chars =
+        plot_left.saturating_sub(5 + 4 * FONT_ADVANCE + 2) / FONT_ADVANCE;
+    for r in records {
+        if r.end <= r.start || r.start >= coord_h {
+            continue;
+        }
+        let start = r.start.min(coord_h);
+        let end = r.end.min(coord_h);
+        let y0 = margin + (start as f64 * px_per_coord).round() as usize;
+        let y1 = margin + (end as f64 * px_per_coord).round() as usize;
+        let span = y1.saturating_sub(y0);
+        if span < FONT_H + 2 {
+            continue;
+        }
+        let _ = (plot_top, plot_bot); // bounds only; label fits inside span by construction
+        let max_chars = avail_chars.max(3);
+        let name = truncate_to_chars(&r.name, max_chars);
+        let centre = (y0 + y1) / 2;
+        let ly = centre.saturating_sub(FONT_H / 2);
+        // Draw at the very left of the canvas margin.
+        draw_text(canvas, stride, total_h, 2, ly, &name, label_ink);
+    }
+}
+
+/// Truncate a string so it fits in `max_chars` glyphs, using `…`
+/// (rendered as a single `.`) when the original is longer.
+fn truncate_to_chars(s: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+    let count = s.chars().count();
+    if count <= max_chars {
+        return s.to_string();
+    }
+    if max_chars <= 1 {
+        return ".".to_string();
+    }
+    // Drop trailing chars, append "." as an ellipsis marker (our
+    // bitmap font doesn't carry an actual U+2026).
+    let keep: String = s.chars().take(max_chars - 1).collect();
+    format!("{keep}.")
 }
 
 fn draw_hline(canvas: &mut [u8], stride: usize, x0: usize, x1: usize, y: usize, ink: u8) {
@@ -379,7 +612,8 @@ mod tests {
     #[test]
     fn compose_writes_pixelmap_into_interior() {
         let pixels = vec![100_u8; 4 * 3];
-        let (canvas, tw, th) = compose_image_with_axes(&pixels, 4, 3, 4, 3, 10);
+        let (canvas, tw, th) =
+            compose_image_with_axes(&pixels, 4, 3, 4, 3, 10, &[], &[]);
         assert_eq!(tw, 24);
         assert_eq!(th, 23);
         // The interior pixel block should still read 100 (no

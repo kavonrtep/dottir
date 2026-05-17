@@ -332,6 +332,35 @@ fn run_batch(args: BatchArgs) -> Result<()> {
     // (residues), regardless of any pixelmap upscaling. For zoom > 1
     // the pre-upscale pixelmap already represents `seq_len / zoom`
     // pixels, but the axes still label in residue coordinates.
+    //
+    // For multi-record FASTAs we also pass per-axis record metadata
+    // so each record's id is drawn as a segment label above the top
+    // axis / beside the left axis (H1).
+    let axis_records_x: Vec<dottir_io::text_overlay::AxisRecord> = query
+        .records
+        .iter()
+        .map(|r| dottir_io::text_overlay::AxisRecord::new(
+            r.id.clone(),
+            r.range.start as u32,
+            r.range.end as u32,
+        ))
+        .collect();
+    let axis_records_y: Vec<dottir_io::text_overlay::AxisRecord> = subject
+        .records
+        .iter()
+        .map(|r| dottir_io::text_overlay::AxisRecord::new(
+            r.id.clone(),
+            r.range.start as u32,
+            r.range.end as u32,
+        ))
+        .collect();
+    // Larger margin when we have record names to draw, so the extra
+    // label row above the ticks has breathing room.
+    let png_margin = if query.records.len() > 1 || subject.records.len() > 1 {
+        70
+    } else {
+        50
+    };
     png_export::write_grayscale_png_with_axes(
         &args.output,
         png_w,
@@ -339,7 +368,9 @@ fn run_batch(args: BatchArgs) -> Result<()> {
         query.len() as u32,
         subject.len() as u32,
         &png_pixels,
-        50, // margin in pixels
+        png_margin,
+        &axis_records_x,
+        &axis_records_y,
         &text_chunk_refs,
     )?;
     tracing::info!("wrote {}", args.output.display());
@@ -350,7 +381,9 @@ fn run_batch(args: BatchArgs) -> Result<()> {
             plot.width,
             plot.height,
             &plot.pixels,
-            50, // margin
+            png_margin,
+            &axis_records_x,
+            &axis_records_y,
             &text_chunk_refs,
         )
         .context("SVG export failed")?;

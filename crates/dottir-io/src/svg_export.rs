@@ -35,12 +35,15 @@ pub enum SvgError {
 /// `metadata` is an optional list of (key, value) pairs included as
 /// `<dottir:KEY>VALUE</dottir:KEY>` elements inside the SVG
 /// `<metadata>` block. Mirror what the PNG `tEXt` writer accepts.
+#[allow(clippy::too_many_arguments)]
 pub fn write_svg<P: AsRef<Path>>(
     path: P,
     width: u32,
     height: u32,
     pixels: &[u8],
     margin: u32,
+    axis_records_x: &[crate::text_overlay::AxisRecord],
+    axis_records_y: &[crate::text_overlay::AxisRecord],
     metadata: &[(&str, &str)],
 ) -> Result<(), SvgError> {
     if pixels.len() != (width as usize) * (height as usize) {
@@ -155,6 +158,55 @@ pub fn write_svg<P: AsRef<Path>>(
         t += step_y;
     }
 
+    // Record-name labels along each axis. Top axis names sit above
+    // the residue tick labels (margin - 28). Left axis names sit
+    // along the left edge of the SVG, rotated 0° but right-aligned
+    // to just before the tick labels.
+    let coord_w = width.max(1) as f64;
+    let coord_h = height.max(1) as f64;
+    for r in axis_records_x {
+        if r.end <= r.start || r.start as f64 >= coord_w {
+            continue;
+        }
+        let start = (r.start as f64).min(coord_w);
+        let end = (r.end as f64).min(coord_w);
+        let pixel_span = (end - start) * (width as f64 / coord_w);
+        // Skip narrow records (less than ~3 characters of the
+        // typical SVG monospace 11px font, ~6 px each).
+        if pixel_span < 18.0 {
+            continue;
+        }
+        let cx = margin as f64 + (start + end) / 2.0 * (width as f64 / coord_w);
+        writeln!(
+            w,
+            "  <text x=\"{cx}\" y=\"{}\" text-anchor=\"middle\" \
+             font-family=\"monospace\" font-size=\"11\" font-weight=\"bold\" \
+             fill=\"#222\">{}</text>",
+            margin.saturating_sub(28),
+            xml_escape(&r.name),
+        )?;
+    }
+    for r in axis_records_y {
+        if r.end <= r.start || r.start as f64 >= coord_h {
+            continue;
+        }
+        let start = (r.start as f64).min(coord_h);
+        let end = (r.end as f64).min(coord_h);
+        let pixel_span = (end - start) * (height as f64 / coord_h);
+        if pixel_span < 12.0 {
+            continue;
+        }
+        let cy = margin as f64 + (start + end) / 2.0 * (height as f64 / coord_h);
+        writeln!(
+            w,
+            "  <text x=\"2\" y=\"{}\" text-anchor=\"start\" \
+             font-family=\"monospace\" font-size=\"11\" font-weight=\"bold\" \
+             fill=\"#222\">{}</text>",
+            cy + 4.0,
+            xml_escape(&r.name),
+        )?;
+    }
+
     writeln!(w, "</svg>")?;
     w.flush()?;
     Ok(())
@@ -216,6 +268,8 @@ mod tests {
             15,
             &pixels,
             40,
+            &[],
+            &[],
             &[("matrix", "BLOSUM62"), ("window", "25")],
         )
         .unwrap();
@@ -231,7 +285,8 @@ mod tests {
     fn dimension_mismatch_errors() {
         let dir = std::env::temp_dir();
         let path = dir.join("dottir_svg_test_mismatch.svg");
-        let err = write_svg(&path, 10, 10, &[0_u8; 50], 30, &[]).unwrap_err();
+        let err =
+            write_svg(&path, 10, 10, &[0_u8; 50], 30, &[], &[], &[]).unwrap_err();
         assert!(matches!(err, SvgError::DimensionMismatch { .. }));
     }
 

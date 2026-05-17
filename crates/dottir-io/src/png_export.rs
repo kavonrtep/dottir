@@ -33,6 +33,7 @@ pub enum PngError {
 /// `height` when the caller has nearest-neighbour upscaled the
 /// pixelmap. For the no-rescale case pass `coord_w = width,
 /// coord_h = height`.
+#[allow(clippy::too_many_arguments)]
 pub fn write_grayscale_png_with_axes<P: AsRef<Path>>(
     path: P,
     width: u32,
@@ -41,6 +42,8 @@ pub fn write_grayscale_png_with_axes<P: AsRef<Path>>(
     coord_h: u32,
     pixels: &[u8],
     margin: u32,
+    axis_records_x: &[crate::text_overlay::AxisRecord],
+    axis_records_y: &[crate::text_overlay::AxisRecord],
     text_chunks: &[(&str, &str)],
 ) -> Result<(), PngError> {
     if pixels.len() != (width as usize).saturating_mul(height as usize) {
@@ -52,7 +55,14 @@ pub fn write_grayscale_png_with_axes<P: AsRef<Path>>(
     }
     let inverted = crate::text_overlay::inverted(pixels);
     let (canvas, total_w, total_h) = crate::text_overlay::compose_image_with_axes(
-        &inverted, width, height, coord_w, coord_h, margin,
+        &inverted,
+        width,
+        height,
+        coord_w,
+        coord_h,
+        margin,
+        axis_records_x,
+        axis_records_y,
     );
     write_grayscale_png_raw(path, total_w, total_h, &canvas, text_chunks)
 }
