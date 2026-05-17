@@ -624,6 +624,11 @@ impl DottirApp {
 
     fn draw_menu(&mut self, ctx: &Context) {
         egui::TopBottomPanel::top("menu").show(ctx, |ui| {
+            // Denser menu bar: smaller text, tighter horizontal
+            // padding. Doesn't affect submenu styling — those still
+            // use the default body size.
+            ui.style_mut().spacing.item_spacing.x = 6.0;
+            ui.style_mut().spacing.button_padding = Vec2::new(4.0, 2.0);
             egui::menu::bar(ui, |ui| {
                 ui.menu_button("File", |ui| {
                     if ui.button("Open query FASTA…").clicked() {
@@ -703,40 +708,79 @@ impl DottirApp {
     }
 
     fn draw_greyramp_panel(&mut self, ctx: &Context) {
-        egui::SidePanel::right("greyramp")
+        egui::SidePanel::right("side_panel")
             .resizable(false)
             .default_width(220.0)
             .show(ctx, |ui| {
-                ui.heading("Greyramp");
-                ui.label("White point");
+                // Compact, information-dense layout per user
+                // feedback: smaller fonts, tighter vertical spacing.
+                ui.style_mut().spacing.item_spacing = Vec2::new(4.0, 3.0);
+                ui.style_mut().spacing.interact_size.y = 18.0;
+
+                // ── Sequences summary ──
+                ui.label(
+                    egui::RichText::new("Sequences")
+                        .strong()
+                        .size(13.0)
+                        .color(Color32::from_gray(50)),
+                );
+                draw_seq_summary(ui, "Query  ", self.query.as_ref());
+                draw_seq_summary(ui, "Subject", self.subject.as_ref());
+                if let Some(p) = &self.plot {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "Pixelmap {}×{}  W={}",
+                            p.width, p.height, p.params.window_size
+                        ))
+                        .size(11.0)
+                        .color(Color32::from_gray(80)),
+                    );
+                }
+                ui.separator();
+
+                // ── Greyramp ──
+                ui.label(
+                    egui::RichText::new("Greyramp")
+                        .strong()
+                        .size(13.0)
+                        .color(Color32::from_gray(50)),
+                );
+                let small = egui::RichText::new("White").size(11.0);
+                ui.label(small);
                 if ui
-                    .add(Slider::new(&mut self.greyramp.white, 0..=255).clamping(egui::SliderClamping::Always))
+                    .add(
+                        Slider::new(&mut self.greyramp.white, 0..=255)
+                            .clamping(egui::SliderClamping::Always),
+                    )
                     .changed()
                 {
                     self.texture_dirty = true;
                 }
-                ui.label("Black point");
+                ui.label(egui::RichText::new("Black").size(11.0));
                 if ui
-                    .add(Slider::new(&mut self.greyramp.black, 0..=255).clamping(egui::SliderClamping::Always))
+                    .add(
+                        Slider::new(&mut self.greyramp.black, 0..=255)
+                            .clamping(egui::SliderClamping::Always),
+                    )
                     .changed()
                 {
                     self.texture_dirty = true;
                 }
                 ui.horizontal(|ui| {
-                    if ui.button("Swap").clicked() {
+                    if ui.small_button("Swap").clicked() {
                         self.greyramp.swap = !self.greyramp.swap;
                         self.texture_dirty = true;
                     }
-                    if ui.button("Reset").clicked() {
+                    if ui.small_button("Reset").clicked() {
                         self.greyramp = Greyramp::default();
                         self.texture_dirty = true;
                     }
                 });
-                ui.separator();
-                ui.label("LUT preview");
+                ui.add_space(2.0);
+                ui.label(egui::RichText::new("LUT").size(10.0));
                 let lut = self.greyramp.lut();
                 let (rect, _) = ui.allocate_exact_size(
-                    Vec2::new(ui.available_width(), 24.0),
+                    Vec2::new(ui.available_width(), 20.0),
                     Sense::hover(),
                 );
                 let painter = ui.painter();
@@ -753,6 +797,11 @@ impl DottirApp {
                         Color32::from_gray(g),
                     );
                 }
+                painter.rect_stroke(
+                    rect,
+                    0.0,
+                    egui::Stroke::new(1.0, Color32::from_gray(120)),
+                );
             });
     }
 
@@ -1076,103 +1125,47 @@ impl DottirApp {
                 let half = window / 2;
                 let q_bytes = q_seq.bytes();
                 let s_bytes = s_seq.bytes();
-
-                // Score matrix for the current mode — used to colour
-                // positive non-identical substitutions.
                 let matrix = self.settings.build_matrix();
 
-                // Pre-compute per-column data: (q_char, s_char, class).
-                let mut cols: Vec<(u8, u8, MatchClass)> =
-                    Vec::with_capacity(window);
-                for i in 0..window {
-                    let off = i as isize - half as isize;
-                    let qp = q_centre as isize + off;
-                    let sp = s_centre as isize + off;
-                    let (qc, q_oob) = lookup(&q_bytes, qp);
-                    let (sc, s_oob) = lookup(&s_bytes, sp);
-                    let class = if q_oob || s_oob {
-                        MatchClass::OutOfBounds
-                    } else {
-                        classify_match(qc, sc, matrix.as_ref(), self.settings.mode)
-                    };
-                    cols.push((qc, sc, class));
-                }
+                // Forward (+/+) alignment columns.
+                let forward_cols =
+                    build_align_columns(q_bytes, s_bytes, q_centre, s_centre, half, window, false, matrix.as_ref(), self.settings.mode);
 
-                // Render the three rows. We compute per-glyph
-                // pixel width from the actual font so backgrounds
-                // and characters line up precisely.
-                let font = egui::FontId::monospace(12.0);
-                let glyph_w = ctx.fonts(|f| {
-                    f.glyph_width(&font, 'A').max(f.glyph_width(&font, 'M'))
+                // Reverse (+/-) alignment columns. BLASTN only —
+                // proteins have no reverse strand. Compares
+                // query[q_c + i - half] against the complement of
+                // subject[s_c + half - i] (i.e. walks the subject
+                // backwards while complementing).
+                let reverse_cols = if self.settings.mode == BlastMode::Blastn {
+                    Some(build_align_columns(
+                        q_bytes, s_bytes, q_centre, s_centre, half, window,
+                        true, matrix.as_ref(), self.settings.mode,
+                    ))
+                } else {
+                    None
+                };
+
+                // Header continuation: Copy button.
+                ui.horizontal(|ui| {
+                    if ui.button("Copy").on_hover_text(
+                        "Copy the alignment block to clipboard as plain text",
+                    ).clicked() {
+                        let text = format_alignment_clipboard(
+                            &forward_cols,
+                            reverse_cols.as_deref(),
+                            q_centre,
+                            s_centre,
+                            self.query.as_ref(),
+                            self.subject.as_ref(),
+                        );
+                        ctx.copy_text(text);
+                    }
                 });
-                let glyph_w = glyph_w.max(7.0); // fall-back if egui can't measure
-                let row_h = 16.0;
-                let total_w = glyph_w * window as f32;
-                let total_h = row_h * 3.0;
-                let (rect, _) = ui.allocate_exact_size(
-                    Vec2::new(total_w, total_h),
-                    Sense::hover(),
-                );
-                let painter = ui.painter_at(rect);
-                let bg_identity = Color32::from_rgb(0xd8, 0xf5, 0xcf);
-                let bg_positive = Color32::from_rgb(0xff, 0xf2, 0xc4);
-                let bg_oob = Color32::from_gray(225);
-                let text_color = ui.style().visuals.text_color();
-                let match_color = Color32::from_gray(60);
 
-                for (i, &(qc, sc, class)) in cols.iter().enumerate() {
-                    let x = rect.left() + i as f32 * glyph_w;
-                    let bg = match class {
-                        MatchClass::Identical => Some(bg_identity),
-                        MatchClass::Positive => Some(bg_positive),
-                        MatchClass::OutOfBounds => Some(bg_oob),
-                        MatchClass::Other => None,
-                    };
-                    // Row 0: query
-                    let r0 =
-                        Rect::from_min_size(Pos2::new(x, rect.top()), Vec2::new(glyph_w, row_h));
-                    if let Some(c) = bg {
-                        painter.rect_filled(r0, 0.0, c);
-                    }
-                    painter.text(
-                        r0.center(),
-                        egui::Align2::CENTER_CENTER,
-                        char_to_string(qc, class, true),
-                        font.clone(),
-                        text_color,
-                    );
-                    // Row 1: match line
-                    let r1 = Rect::from_min_size(
-                        Pos2::new(x, rect.top() + row_h),
-                        Vec2::new(glyph_w, row_h),
-                    );
-                    let match_ch = match class {
-                        MatchClass::Identical => "|",
-                        MatchClass::Positive => ":",
-                        _ => " ",
-                    };
-                    painter.text(
-                        r1.center(),
-                        egui::Align2::CENTER_CENTER,
-                        match_ch,
-                        font.clone(),
-                        match_color,
-                    );
-                    // Row 2: subject
-                    let r2 = Rect::from_min_size(
-                        Pos2::new(x, rect.top() + 2.0 * row_h),
-                        Vec2::new(glyph_w, row_h),
-                    );
-                    if let Some(c) = bg {
-                        painter.rect_filled(r2, 0.0, c);
-                    }
-                    painter.text(
-                        r2.center(),
-                        egui::Align2::CENTER_CENTER,
-                        char_to_string(sc, class, false),
-                        font.clone(),
-                        text_color,
-                    );
+                draw_align_block(ui, ctx, &forward_cols, "+/+");
+                if let Some(rev) = &reverse_cols {
+                    ui.add_space(4.0);
+                    draw_align_block(ui, ctx, rev, "+/-");
                 }
             });
     }
@@ -1560,6 +1553,222 @@ impl DottirApp {
 
 /// Truncate a record name to fit roughly within `max_px` of
 /// monospace 11-px font (~6 px per glyph), with a `…` marker.
+/// One alignment column: query residue, subject residue (already
+/// complemented for the `+/-` view if applicable), and the match
+/// class for colouring.
+#[derive(Debug, Clone, Copy)]
+struct AlignColumn {
+    q: u8,
+    s: u8,
+    class: MatchClass,
+}
+
+/// Walk the diagonal through the crosshair and produce one
+/// `AlignColumn` per output position. `reverse = false` does the
+/// `+/+` walk (`q[q_c + i - half]` vs `s[s_c + i - half]`); `true`
+/// does `+/-` (`q[q_c + i - half]` vs `complement(s[s_c + half - i])`).
+#[allow(clippy::too_many_arguments)]
+fn build_align_columns(
+    q_bytes: &[u8],
+    s_bytes: &[u8],
+    q_centre: usize,
+    s_centre: usize,
+    half: usize,
+    window: usize,
+    reverse: bool,
+    matrix: Option<&dottir_core::ScoreMatrix>,
+    mode: BlastMode,
+) -> Vec<AlignColumn> {
+    let mut cols = Vec::with_capacity(window);
+    for i in 0..window {
+        let off = i as isize - half as isize;
+        let qp = q_centre as isize + off;
+        let sp = if reverse {
+            // Walk the subject backwards from s_centre, taking the
+            // complement so the displayed strand makes biological
+            // sense: at i = half we sit at s_centre; i = half + 1
+            // moves to s_centre - 1 with the base complemented.
+            s_centre as isize - off
+        } else {
+            s_centre as isize + off
+        };
+        let (qc, q_oob) = lookup(q_bytes, qp);
+        let (raw_sc, s_oob) = lookup(s_bytes, sp);
+        let sc = if reverse && !s_oob {
+            dottir_core::alphabet::complement_dna_byte(raw_sc)
+        } else {
+            raw_sc
+        };
+        let class = if q_oob || s_oob {
+            MatchClass::OutOfBounds
+        } else {
+            classify_match(qc, sc, matrix, mode)
+        };
+        cols.push(AlignColumn { q: qc, s: sc, class });
+    }
+    cols
+}
+
+/// Render one 3-row alignment block (query, match line, subject)
+/// with per-column background colour. Prepends a small `label`
+/// (e.g. "+/+" or "+/-") in the left margin so the user can tell
+/// the two blocks apart.
+fn draw_align_block(
+    ui: &mut egui::Ui,
+    ctx: &Context,
+    cols: &[AlignColumn],
+    label: &str,
+) {
+    let font = egui::FontId::monospace(12.0);
+    let glyph_w = ctx
+        .fonts(|f| f.glyph_width(&font, 'A').max(f.glyph_width(&font, 'M')))
+        .max(7.0);
+    let row_h = 16.0;
+    let label_w: f32 = 32.0; // left-margin reserved for the +/+ / +/- tag
+    let total_w = label_w + glyph_w * cols.len() as f32;
+    let total_h = row_h * 3.0;
+    let (rect, _) =
+        ui.allocate_exact_size(Vec2::new(total_w, total_h), Sense::hover());
+    let painter = ui.painter_at(rect);
+
+    let bg_identity = Color32::from_rgb(0xc7, 0xef, 0xb7);
+    let bg_positive = Color32::from_rgb(0xff, 0xea, 0x9c);
+    let bg_oob = Color32::from_gray(218);
+    let text_color = ui.style().visuals.text_color();
+    let label_color = Color32::from_gray(90);
+    let match_color = Color32::from_gray(40);
+
+    // Strand tag in the left margin (centred on the match line).
+    painter.text(
+        Pos2::new(rect.left() + label_w * 0.5, rect.top() + 1.5 * row_h),
+        egui::Align2::CENTER_CENTER,
+        label,
+        egui::FontId::monospace(11.0),
+        label_color,
+    );
+
+    for (i, col) in cols.iter().enumerate() {
+        let x = rect.left() + label_w + i as f32 * glyph_w;
+        let bg = match col.class {
+            MatchClass::Identical => Some(bg_identity),
+            MatchClass::Positive => Some(bg_positive),
+            MatchClass::OutOfBounds => Some(bg_oob),
+            MatchClass::Other => None,
+        };
+        let r0 = Rect::from_min_size(
+            Pos2::new(x, rect.top()),
+            Vec2::new(glyph_w, row_h),
+        );
+        if let Some(c) = bg {
+            painter.rect_filled(r0, 0.0, c);
+        }
+        painter.text(
+            r0.center(),
+            egui::Align2::CENTER_CENTER,
+            char_to_string(col.q, col.class, true),
+            font.clone(),
+            text_color,
+        );
+        let r1 = Rect::from_min_size(
+            Pos2::new(x, rect.top() + row_h),
+            Vec2::new(glyph_w, row_h),
+        );
+        let match_ch = match col.class {
+            MatchClass::Identical => "|",
+            MatchClass::Positive => ":",
+            _ => " ",
+        };
+        painter.text(
+            r1.center(),
+            egui::Align2::CENTER_CENTER,
+            match_ch,
+            font.clone(),
+            match_color,
+        );
+        let r2 = Rect::from_min_size(
+            Pos2::new(x, rect.top() + 2.0 * row_h),
+            Vec2::new(glyph_w, row_h),
+        );
+        if let Some(c) = bg {
+            painter.rect_filled(r2, 0.0, c);
+        }
+        painter.text(
+            r2.center(),
+            egui::Align2::CENTER_CENTER,
+            char_to_string(col.s, col.class, false),
+            font.clone(),
+            text_color,
+        );
+    }
+}
+
+/// Produce a plain-text representation of the alignment block(s)
+/// suitable for clipboard paste. Output shape:
+///
+/// ```text
+/// q = chr4:1234   s = chr5:5678   window = 100
+///
+/// +/+
+/// query    ACGT...
+///          ||::...
+/// subject  ACGT...
+///
+/// +/-
+/// query    ACGT...
+///          |.::...
+/// subject  ACGT...
+/// ```
+fn format_alignment_clipboard(
+    forward: &[AlignColumn],
+    reverse: Option<&[AlignColumn]>,
+    q_centre: usize,
+    s_centre: usize,
+    q_seq: Option<&Sequence>,
+    s_seq: Option<&Sequence>,
+) -> String {
+    let mut out = String::new();
+    use std::fmt::Write as _;
+    let _ = writeln!(
+        out,
+        "q = {}   s = {}   window = {}",
+        format_coord(q_seq, q_centre),
+        format_coord(s_seq, s_centre),
+        forward.len(),
+    );
+    out.push('\n');
+    let _ = writeln!(out, "+/+");
+    write_align_block_text(&mut out, forward);
+    if let Some(rev) = reverse {
+        out.push('\n');
+        let _ = writeln!(out, "+/-");
+        write_align_block_text(&mut out, rev);
+    }
+    out
+}
+
+fn write_align_block_text(out: &mut String, cols: &[AlignColumn]) {
+    use std::fmt::Write as _;
+    let q: String = cols
+        .iter()
+        .map(|c| char_to_string(c.q, c.class, true))
+        .collect();
+    let m: String = cols
+        .iter()
+        .map(|c| match c.class {
+            MatchClass::Identical => "|",
+            MatchClass::Positive => ":",
+            _ => " ",
+        })
+        .collect();
+    let s: String = cols
+        .iter()
+        .map(|c| char_to_string(c.s, c.class, false))
+        .collect();
+    let _ = writeln!(out, "query    {q}");
+    let _ = writeln!(out, "         {m}");
+    let _ = writeln!(out, "subject  {s}");
+}
+
 /// Match class used by the alignment dock to colour columns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MatchClass {
@@ -1676,6 +1885,51 @@ fn format_kb(n: u64) -> String {
     } else {
         format!("{n}")
     }
+}
+
+/// Per-sequence summary row for the right-side panel: name, total
+/// residue count (with thousand separators), and record count.
+fn draw_seq_summary(ui: &mut egui::Ui, label: &str, seq: Option<&Sequence>) {
+    let body = match seq {
+        None => egui::RichText::new(format!("{label}: —"))
+            .size(11.0)
+            .color(Color32::from_gray(120)),
+        Some(s) => {
+            let name = s
+                .source_path
+                .as_ref()
+                .and_then(|p| p.file_name())
+                .map(|f| f.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "(in-memory)".into());
+            let recs = s.records.len();
+            let body = if recs <= 1 {
+                format!("{label}: {name}  {} bp", format_thousands(s.len()))
+            } else {
+                format!(
+                    "{label}: {name}  {} bp · {recs} recs",
+                    format_thousands(s.len())
+                )
+            };
+            egui::RichText::new(body).size(11.0)
+        }
+    };
+    ui.label(body);
+}
+
+/// Format a `usize` with a thin-space-style thousands grouping —
+/// `123456` → `123,456`. Used by the right-panel summary so big
+/// genome sizes are readable at a glance.
+fn format_thousands(n: usize) -> String {
+    let s = n.to_string();
+    let bytes = s.as_bytes();
+    let mut out = String::with_capacity(s.len() + s.len() / 3);
+    for (i, &b) in bytes.iter().enumerate() {
+        if i > 0 && (bytes.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(b as char);
+    }
+    out
 }
 
 /// Status-bar label for the loaded query/subject. Empty case shown
