@@ -122,6 +122,11 @@ struct BatchArgs {
     /// Skip writing the `.params.toml` sidecar.
     #[arg(long, default_value_t = false)]
     no_sidecar: bool,
+
+    /// Also write an SVG version of the plot (with embedded PNG +
+    /// axis labels) to this path.
+    #[arg(long, value_name = "PATH")]
+    svg: Option<PathBuf>,
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -288,6 +293,19 @@ fn run_batch(args: BatchArgs) -> Result<()> {
         &text_chunk_refs,
     )?;
     tracing::info!("wrote {}", args.output.display());
+
+    if let Some(svg_path) = &args.svg {
+        dottir_io::svg_export::write_svg(
+            svg_path,
+            plot.width,
+            plot.height,
+            &plot.pixels,
+            50, // margin
+            &text_chunk_refs,
+        )
+        .context("SVG export failed")?;
+        tracing::info!("wrote {}", svg_path.display());
+    }
 
     if !args.no_sidecar {
         let sidecar_path = sidecar_path(&args.output);

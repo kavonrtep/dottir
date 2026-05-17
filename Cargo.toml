@@ -27,6 +27,7 @@ rayon = "1"
 sha2 = "0.10"
 flate2 = "1"
 png = "0.17"
+base64 = "0.22"
 proptest = "1"
 
 # Internal

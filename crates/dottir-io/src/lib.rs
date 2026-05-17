@@ -22,5 +22,6 @@ pub mod fasta;
 pub mod params;
 pub mod png_export;
 pub mod sequence;
+pub mod svg_export;
 
 pub use sequence::{RecordSpan, Sequence};

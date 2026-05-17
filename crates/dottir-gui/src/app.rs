@@ -469,6 +469,10 @@ impl DottirApp {
                         ui.close_menu();
                         save_png(self);
                     }
+                    if ui.button("Save SVG…").clicked() {
+                        ui.close_menu();
+                        save_svg(self);
+                    }
                     ui.separator();
                     if ui.button("Save session…").clicked() {
                         ui.close_menu();
@@ -1117,6 +1121,36 @@ fn pick_and_load(app: &mut DottirApp, role: SeqRole) {
         .pick_file();
     if let Some(path) = pick {
         app.load_fasta(role, path);
+    }
+}
+
+fn save_svg(app: &mut DottirApp) {
+    let Some(plot) = &app.plot else {
+        app.last_error = Some("nothing to save — compute a plot first".into());
+        return;
+    };
+    let lut = app.greyramp.lut();
+    let pick = rfd::FileDialog::new()
+        .set_title("Save SVG")
+        .add_filter("SVG", &["svg"])
+        .save_file();
+    if let Some(path) = pick {
+        let mapped: Vec<u8> = plot.pixels.iter().map(|&v| lut[v as usize]).collect();
+        match dottir_io::svg_export::write_svg(
+            &path,
+            plot.width,
+            plot.height,
+            &mapped,
+            50,
+            &[
+                ("dottir-gui", env!("CARGO_PKG_VERSION")),
+                ("greyramp-white", &app.greyramp.white.to_string()),
+                ("greyramp-black", &app.greyramp.black.to_string()),
+            ],
+        ) {
+            Ok(()) => {}
+            Err(e) => app.last_error = Some(format!("SVG save failed: {e}")),
+        }
     }
 }
 
