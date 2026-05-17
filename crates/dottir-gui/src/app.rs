@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use dottir_core::{
-    compute_dotplot, BlastMode, DotPlot, PlotConfig, ScoreMatrix, Strand, Triangle,
+    BlastMode, DotPlot, PlotConfig, ScoreMatrix, Strand, Triangle,
 };
 use dottir_io::Sequence;
 use egui::{
@@ -183,6 +183,19 @@ pub struct DottirApp {
     /// True = light theme (the default — matches the greyscale plot
     /// area). False = egui's dark theme.
     light_theme: bool,
+    /// Background worker that owns `compute_dotplot`. UI thread
+    /// dispatches requests and polls results each frame (C2).
+    worker: crate::compute_worker::ComputeWorker,
+    /// Monotonic id assigned to each compute request. Results whose
+    /// id doesn't match `last_dispatched_id` are discarded as stale.
+    last_dispatched_id: u64,
+    /// True while a worker has an in-flight request. Drives the
+    /// status-bar progress indicator.
+    compute_in_flight: bool,
+    /// Suppress recompute during constructor — load_fasta() runs
+    /// during DottirApp::new and would otherwise dispatch multiple
+    /// jobs before the second sequence is loaded.
+    suspend_recompute: bool,
 }
 
 impl DottirApp {
@@ -192,6 +205,14 @@ impl DottirApp {
         // muddles axis labels and panel text. Users who prefer dark
         // can toggle it in the View menu.
         cc.egui_ctx.set_visuals(egui::Visuals::light());
+
+        // Worker thread that owns compute_dotplot. The repaint closure
+        // wakes the UI as soon as a result arrives so we don't have to
+        // spin on try_recv every frame.
+        let ctx_for_repaint = cc.egui_ctx.clone();
+        let worker = crate::compute_worker::ComputeWorker::spawn(move || {
+            ctx_for_repaint.request_repaint();
+        });
 
         let settings = Settings {
             mode: startup.mode,
@@ -222,6 +243,12 @@ impl DottirApp {
             crosshair: None,
             show_settings: false,
             light_theme: true,
+            worker,
+            last_dispatched_id: 0,
+            compute_in_flight: false,
+            // Suspend recompute during the two pre-loads — we only
+            // want one job dispatched once both inputs are settled.
+            suspend_recompute: true,
         };
 
         // Pre-load any sequences supplied on the command line. Errors
@@ -233,6 +260,12 @@ impl DottirApp {
         }
         if let Some(p) = startup.subject {
             app.load_fasta(SeqRole::Subject, p);
+        }
+        // Release the suspend and dispatch one initial compute if
+        // both inputs are present.
+        app.suspend_recompute = false;
+        if app.query.is_some() && app.subject.is_some() {
+            app.recompute();
         }
         app
     }
@@ -260,10 +293,18 @@ impl DottirApp {
         }
     }
 
+    /// Dispatch a new compute request to the background worker.
+    /// Returns immediately; the result arrives via
+    /// [`Self::poll_compute_results`] on a future frame and is applied
+    /// in [`Self::apply_compute_result`].
     fn recompute(&mut self) {
+        if self.suspend_recompute {
+            return;
+        }
         let (Some(q), Some(s)) = (&self.query, &self.subject) else {
             self.plot = None;
             self.texture = None;
+            self.compute_in_flight = false;
             return;
         };
         let matrix = match self.settings.build_matrix() {
@@ -276,7 +317,7 @@ impl DottirApp {
                 return;
             }
         };
-        let cfg = PlotConfig {
+        let mut cfg = PlotConfig {
             mode: self.settings.mode,
             matrix,
             window_size: self.settings.window_size,
@@ -293,30 +334,57 @@ impl DottirApp {
             reverse_query: self.settings.reverse_query,
             reverse_subject: self.settings.reverse_subject,
         };
-        let qs = q.bytes();
-        let ss = s.bytes();
         // BLASTP cannot use reverse strand.
-        let effective_cfg = if cfg.mode == BlastMode::Blastp {
-            let mut c = cfg.clone();
-            c.strand = Strand::Forward;
-            c
-        } else {
-            cfg.clone()
+        if cfg.mode == BlastMode::Blastp {
+            cfg.strand = Strand::Forward;
+        }
+
+        self.last_dispatched_id = self.last_dispatched_id.wrapping_add(1);
+        let id = self.last_dispatched_id;
+        let req = crate::compute_worker::ComputeRequest {
+            id,
+            // Sequences are cloned per request — typically tens of
+            // MiB at worst. The clone is dwarfed by the compute time
+            // it triggers, and lets the worker outlive the borrow.
+            query: q.bytes().to_vec(),
+            subject: s.bytes().to_vec(),
+            config: cfg,
         };
-        match compute_dotplot(qs, ss, &effective_cfg) {
-            Ok(plot) => {
-                tracing::info!(
-                    "computed {}×{} pixelmap (W={})",
-                    plot.width,
-                    plot.height,
-                    plot.params.window_size
-                );
-                self.plot = Some(plot);
-                self.texture_dirty = true;
-                self.last_error = None;
+        tracing::info!("dispatch compute id={id}");
+        self.worker.dispatch(req);
+        self.compute_in_flight = true;
+    }
+
+    /// Drain any completed worker results and apply the latest one
+    /// (discarding stale results whose id is older than
+    /// `last_dispatched_id`). Called once per frame.
+    fn poll_compute_results(&mut self) {
+        let mut latest: Option<crate::compute_worker::ComputeResult> = None;
+        for r in self.worker.drain_results() {
+            if r.id == self.last_dispatched_id {
+                latest = Some(r);
             }
-            Err(e) => {
-                self.last_error = Some(format!("compute_dotplot failed: {e}"));
+            // else: stale, drop silently.
+        }
+        if let Some(r) = latest {
+            self.compute_in_flight = false;
+            match r.plot {
+                Ok(plot) => {
+                    tracing::info!(
+                        "computed {}×{} pixelmap (W={}, zoom={})",
+                        plot.width,
+                        plot.height,
+                        plot.params.window_size,
+                        r.config_zoom,
+                    );
+                    self.plot = Some(plot);
+                    self.texture_dirty = true;
+                    self.last_error = None;
+                }
+                Err(e) => {
+                    self.last_error =
+                        Some(format!("compute_dotplot failed: {e}"));
+                }
             }
         }
     }
@@ -394,6 +462,10 @@ enum SeqRole {
 
 impl eframe::App for DottirApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+        // Drain any completed background-compute results before any
+        // panel reads `self.plot`. Stale results are discarded inside.
+        self.poll_compute_results();
+
         self.handle_keyboard(ctx);
         self.draw_menu(ctx);
         self.draw_greyramp_panel(ctx);
@@ -794,6 +866,11 @@ impl DottirApp {
     fn draw_status_bar(&self, ctx: &Context) {
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             ui.horizontal(|ui| {
+                if self.compute_in_flight {
+                    ui.spinner();
+                    ui.label("Recomputing…");
+                    ui.separator();
+                }
                 if let Some(err) = &self.last_error {
                     ui.colored_label(Color32::from_rgb(220, 90, 70), err);
                     return;

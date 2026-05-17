@@ -22,6 +22,7 @@
 #![forbid(unsafe_code)]
 
 mod app;
+mod compute_worker;
 mod session;
 
 use std::path::PathBuf;
