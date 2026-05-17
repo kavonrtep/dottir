@@ -891,6 +891,9 @@ dependencies = [
  "eframe",
  "egui",
  "rfd",
+ "serde",
+ "thiserror 1.0.69",
+ "toml",
  "tracing",
  "tracing-subscriber",
 ]

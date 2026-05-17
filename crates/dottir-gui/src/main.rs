@@ -22,6 +22,7 @@
 #![forbid(unsafe_code)]
 
 mod app;
+mod session;
 
 use std::path::PathBuf;
 

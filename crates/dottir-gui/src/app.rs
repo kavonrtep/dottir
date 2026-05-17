@@ -411,6 +411,15 @@ impl DottirApp {
                         save_png(self);
                     }
                     ui.separator();
+                    if ui.button("Save session…").clicked() {
+                        ui.close_menu();
+                        save_session(self);
+                    }
+                    if ui.button("Open session…").clicked() {
+                        ui.close_menu();
+                        open_session(self);
+                    }
+                    ui.separator();
                     if ui.button("Quit").clicked() {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     }
@@ -1014,6 +1023,110 @@ fn pick_and_load(app: &mut DottirApp, role: SeqRole) {
     if let Some(path) = pick {
         app.load_fasta(role, path);
     }
+}
+
+fn save_session(app: &mut DottirApp) {
+    use crate::session::{codec, Session, SessionGreyramp, SessionPlot, SessionView, SESSION_VERSION};
+    let session = Session {
+        version: SESSION_VERSION,
+        query: app.query.as_ref().and_then(|s| s.source_path.clone()),
+        subject: app.subject.as_ref().and_then(|s| s.source_path.clone()),
+        plot: SessionPlot {
+            mode: codec::mode_to_str(app.settings.mode).to_string(),
+            matrix_name: app.settings.matrix_name.clone(),
+            window_size: app.settings.window_size,
+            zoom: app.settings.zoom,
+            pixel_fac: app.settings.pixel_fac,
+            strand: codec::strand_to_str(app.settings.strand).to_string(),
+            self_comparison: app.settings.self_comparison,
+            triangle: codec::triangle_to_str(app.settings.triangle).to_string(),
+            memory_limit_mib: app.settings.memory_limit_bytes / (1024 * 1024),
+        },
+        greyramp: SessionGreyramp {
+            white: app.greyramp.white,
+            black: app.greyramp.black,
+            swap: app.greyramp.swap,
+        },
+        view: SessionView {
+            offset_x: app.view_offset.x,
+            offset_y: app.view_offset.y,
+            display_zoom: app.display_zoom,
+            crosshair: app.crosshair.map(|(q, s)| [q, s]),
+            light_theme: app.light_theme,
+        },
+    };
+    let pick = rfd::FileDialog::new()
+        .set_title("Save dottir session")
+        .add_filter("TOML", &["toml"])
+        .set_file_name("dottir-session.toml")
+        .save_file();
+    if let Some(path) = pick {
+        match session.save(&path) {
+            Ok(()) => tracing::info!("wrote session {}", path.display()),
+            Err(e) => app.last_error = Some(format!("session save failed: {e}")),
+        }
+    }
+}
+
+fn open_session(app: &mut DottirApp) {
+    use crate::session::{codec, Session};
+    let pick = rfd::FileDialog::new()
+        .set_title("Open dottir session")
+        .add_filter("TOML", &["toml"])
+        .pick_file();
+    let Some(path) = pick else { return };
+    let s = match Session::load(&path) {
+        Ok(s) => s,
+        Err(e) => {
+            app.last_error = Some(format!("session load failed: {e}"));
+            return;
+        }
+    };
+    // Apply: settings → app.settings, then re-load the FASTAs (paths
+    // recorded in the session), then apply view/greyramp/crosshair.
+    if let Some(m) = codec::mode_from_str(&s.plot.mode) {
+        app.settings.mode = m;
+    }
+    app.settings.matrix_name = s.plot.matrix_name;
+    app.settings.window_size = s.plot.window_size;
+    app.settings.zoom = s.plot.zoom.max(1);
+    app.settings.pixel_fac = s.plot.pixel_fac.max(1);
+    if let Some(st) = codec::strand_from_str(&s.plot.strand) {
+        app.settings.strand = st;
+    }
+    app.settings.self_comparison = s.plot.self_comparison;
+    if let Some(t) = codec::triangle_from_str(&s.plot.triangle) {
+        app.settings.triangle = t;
+    }
+    app.settings.memory_limit_bytes = s.plot.memory_limit_mib * 1024 * 1024;
+    app.greyramp = Greyramp {
+        white: s.greyramp.white,
+        black: s.greyramp.black,
+        swap: s.greyramp.swap,
+    };
+    app.texture_dirty = true;
+    // Re-load sequences from the recorded paths. Errors don't abort
+    // the load; they just leave the relevant slot empty + an error
+    // in the status bar.
+    if let Some(p) = s.query {
+        app.load_fasta(SeqRole::Query, p);
+    } else {
+        app.query = None;
+        app.plot = None;
+    }
+    if let Some(p) = s.subject {
+        app.load_fasta(SeqRole::Subject, p);
+    } else {
+        app.subject = None;
+        app.plot = None;
+    }
+    // Apply view state AFTER the loads (load_fasta calls recompute
+    // which doesn't touch view state, so applying here is safe).
+    app.view_offset = Vec2::new(s.view.offset_x, s.view.offset_y);
+    app.display_zoom = s.view.display_zoom.max(0.1);
+    app.crosshair = s.view.crosshair.map(|[q, s]| (q, s));
+    app.light_theme = s.view.light_theme;
+    tracing::info!("loaded session {}", path.display());
 }
 
 fn save_png(app: &mut DottirApp) {
