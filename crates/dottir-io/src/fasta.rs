@@ -14,8 +14,7 @@
 //! use case (a query/subject pair, plus annotation files) it covers the
 //! ground and avoids a dependency that breaks MSRV-1.75.
 
-use std::fs::File;
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 use flate2::read::MultiGzDecoder;
@@ -47,18 +46,32 @@ pub enum FastaError {
 /// `.gz` extension OR from the file's first two magic bytes (0x1f 0x8b);
 /// callers don't have to special-case it.
 pub fn read_fasta_file<P: AsRef<Path>>(path: P) -> Result<Vec<FastaRecord>, FastaError> {
-    let mut file = File::open(path.as_ref())?;
-    let mut magic = [0_u8; 2];
-    let _ = file.read(&mut magic)?;
-    // Re-open from the start; the magic read consumed from `file`.
-    let file = File::open(path.as_ref())?;
-    let is_gzipped = magic == [0x1f, 0x8b]
+    Ok(load_fasta_file(path)?.records)
+}
+
+/// Result of [`load_fasta_file`]: the parsed records plus the raw
+/// on-disk bytes. Callers that want to hash the input file for a
+/// params sidecar can use `bytes` rather than re-reading the file
+/// (REVIEW.md finding #6 / A4).
+#[derive(Debug, Clone)]
+pub struct LoadedFasta {
+    pub records: Vec<FastaRecord>,
+    pub bytes: Vec<u8>,
+}
+
+/// Single-pass FASTA load: reads the file once, returns both the
+/// parsed records and the raw on-disk bytes for downstream hashing
+/// or re-encoding.
+pub fn load_fasta_file<P: AsRef<Path>>(path: P) -> Result<LoadedFasta, FastaError> {
+    let bytes = std::fs::read(path.as_ref())?;
+    let is_gzipped = bytes.len() >= 2 && bytes[0] == 0x1f && bytes[1] == 0x8b
         || path.as_ref().extension().and_then(|s| s.to_str()) == Some("gz");
-    if is_gzipped {
-        read_fasta(BufReader::new(MultiGzDecoder::new(file)))
+    let records = if is_gzipped {
+        read_fasta(BufReader::new(MultiGzDecoder::new(&bytes[..])))?
     } else {
-        read_fasta(BufReader::new(file))
-    }
+        parse_fasta(&String::from_utf8_lossy(&bytes))?
+    };
+    Ok(LoadedFasta { records, bytes })
 }
 
 /// Parse a FASTA stream into records. Generic over any `BufRead` source.

@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use dottir_core::{
     compute_dotplot, BlastMode, DotPlot, PlotConfig, ScoreMatrix, Strand, Triangle,
 };
-use dottir_io::fasta;
+use dottir_io::Sequence;
 use egui::{
     Color32, ColorImage, Context, Pos2, Rect, Sense, Slider, TextureHandle,
     TextureOptions, Vec2,
@@ -44,11 +44,8 @@ impl Default for StartupConfig {
     }
 }
 
-/// One loaded sequence plus its source path.
-struct LoadedSeq {
-    path: PathBuf,
-    seq: Vec<u8>,
-}
+// `Sequence` itself carries the source path and record metadata, so
+// the GUI just stores it directly — no wrapper needed.
 
 /// User-tunable plot settings exposed in the Settings panel. Mirrors
 /// [`PlotConfig`] with a few GUI-friendly defaults.
@@ -151,8 +148,8 @@ impl Greyramp {
 }
 
 pub struct DottirApp {
-    query: Option<LoadedSeq>,
-    subject: Option<LoadedSeq>,
+    query: Option<Sequence>,
+    subject: Option<Sequence>,
     settings: Settings,
     plot: Option<DotPlot>,
     /// Last error from a compute / load operation. Cleared on next user action.
@@ -224,21 +221,17 @@ impl DottirApp {
     }
 
     fn load_fasta(&mut self, role: SeqRole, path: PathBuf) {
-        match fasta::read_fasta_file(&path) {
-            Ok(recs) => {
-                let seq = fasta::concatenate(&recs);
-                let n_records = recs.len();
+        match Sequence::load(&path) {
+            Ok(seq) => {
                 tracing::info!(
                     "loaded {} ({} residues, {} records)",
                     path.display(),
                     seq.len(),
-                    n_records
+                    seq.records.len(),
                 );
-                let _ = n_records;
-                let loaded = LoadedSeq { path, seq };
                 match role {
-                    SeqRole::Query => self.query = Some(loaded),
-                    SeqRole::Subject => self.subject = Some(loaded),
+                    SeqRole::Query => self.query = Some(seq),
+                    SeqRole::Subject => self.subject = Some(seq),
                 }
                 self.last_error = None;
                 self.recompute();
@@ -279,8 +272,8 @@ impl DottirApp {
             memory_limit_bytes: self.settings.memory_limit_bytes,
             separate_strand_channels: false,
         };
-        let qs = &q.seq;
-        let ss = &s.seq;
+        let qs = q.bytes();
+        let ss = s.bytes();
         // BLASTP cannot use reverse strand.
         let effective_cfg = if cfg.mode == BlastMode::Blastp {
             let mut c = cfg.clone();
@@ -451,25 +444,9 @@ impl DottirApp {
                     }
                 });
                 ui.separator();
-                ui.label(if let Some(q) = &self.query {
-                    format!(
-                        "query: {} ({} bp)",
-                        q.path.file_name().unwrap_or_default().to_string_lossy(),
-                        q.seq.len()
-                    )
-                } else {
-                    "query: —".into()
-                });
+                ui.label(format_seq_label("query", self.query.as_ref()));
                 ui.label("·");
-                ui.label(if let Some(s) = &self.subject {
-                    format!(
-                        "subject: {} ({} bp)",
-                        s.path.file_name().unwrap_or_default().to_string_lossy(),
-                        s.seq.len()
-                    )
-                } else {
-                    "subject: —".into()
-                });
+                ui.label(format_seq_label("subject", self.subject.as_ref()));
             });
         });
     }
@@ -701,14 +678,14 @@ impl DottirApp {
                         let idx = (s as usize) * (plot.width as usize) + (q as usize);
                         let v = plot.pixels.get(idx).copied().unwrap_or(0);
                         // Map pixelmap coord → sequence coord (zoom).
-                        let z = plot.params.zoom as u64;
+                        let z = plot.params.zoom as usize;
+                        let q_seq = (q as usize) * z + z / 2;
+                        let s_seq = (s as usize) * z + z / 2;
                         ui.separator();
                         ui.label(format!(
-                            "q = {} (≈seq {}), s = {} (≈seq {}), value = {}",
-                            q,
-                            (q as u64) * z + z / 2,
-                            s,
-                            (s as u64) * z + z / 2,
+                            "q = {}, s = {}, value = {}",
+                            format_coord(self.query.as_ref(), q_seq),
+                            format_coord(self.subject.as_ref(), s_seq),
                             v,
                         ));
                     } else {
@@ -798,6 +775,46 @@ impl DottirApp {
                 );
             }
         });
+    }
+}
+
+/// Status-bar label for the loaded query/subject. Empty case shown
+/// as e.g. "query: —"; populated as
+/// `"query: chr4.fa (5,123,456 bp, 12 records)"`.
+fn format_seq_label(name: &str, seq: Option<&Sequence>) -> String {
+    let Some(seq) = seq else {
+        return format!("{name}: —");
+    };
+    let fname = seq
+        .source_path
+        .as_ref()
+        .and_then(|p| p.file_name())
+        .map(|f| f.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "(in-memory)".into());
+    if seq.records.len() <= 1 {
+        format!("{name}: {fname} ({} bp)", seq.len())
+    } else {
+        format!(
+            "{name}: {fname} ({} bp, {} records)",
+            seq.len(),
+            seq.records.len()
+        )
+    }
+}
+
+/// Format a concatenated-buffer coord as `record_id:position` when the
+/// sequence has multiple records; falls back to the bare offset
+/// otherwise. Used by the status bar at the crosshair.
+fn format_coord(seq: Option<&Sequence>, coord: usize) -> String {
+    let Some(seq) = seq else {
+        return format!("{coord}");
+    };
+    if seq.records.len() <= 1 {
+        return format!("{coord}");
+    }
+    match seq.record_at(coord) {
+        Some((rec, pos)) => format!("{}:{}", rec.id, pos + 1),
+        None => format!("{coord}"),
     }
 }
 

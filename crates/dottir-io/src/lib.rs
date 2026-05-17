@@ -21,3 +21,6 @@ pub mod alignment;
 pub mod fasta;
 pub mod params;
 pub mod png_export;
+pub mod sequence;
+
+pub use sequence::{RecordSpan, Sequence};

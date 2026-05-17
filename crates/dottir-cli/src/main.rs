@@ -170,23 +170,25 @@ fn run_batch(args: BatchArgs) -> Result<()> {
     let matrix = pick_matrix(args.matrix.as_deref(), mode)?;
 
     tracing::info!("reading query  {}", args.query.display());
-    let query_bytes = std::fs::read(&args.query)
+    let query_loaded = fasta::load_fasta_file(&args.query)
         .with_context(|| format!("reading query {}", args.query.display()))?;
-    let query_recs = fasta::parse_fasta(&String::from_utf8_lossy(&query_bytes))
-        .or_else(|_| fasta::read_fasta_file(&args.query))?;
-    let query_seq = fasta::concatenate(&query_recs);
+    let query = dottir_io::Sequence::from_records(
+        query_loaded.records.clone(),
+        Some(args.query.clone()),
+    );
 
     tracing::info!("reading subject {}", args.subject.display());
-    let subject_bytes = std::fs::read(&args.subject)
+    let subject_loaded = fasta::load_fasta_file(&args.subject)
         .with_context(|| format!("reading subject {}", args.subject.display()))?;
-    let subject_recs = fasta::parse_fasta(&String::from_utf8_lossy(&subject_bytes))
-        .or_else(|_| fasta::read_fasta_file(&args.subject))?;
-    let subject_seq = fasta::concatenate(&subject_recs);
+    let subject = dottir_io::Sequence::from_records(
+        subject_loaded.records.clone(),
+        Some(args.subject.clone()),
+    );
 
     // auto-zoom: pick zoom so max(qlen, slen) / zoom <= auto_zoom.
     let zoom = match args.auto_zoom {
         Some(target) => {
-            let max_dim = query_seq.len().max(subject_seq.len()) as u32;
+            let max_dim = query.len().max(subject.len()) as u32;
             ((max_dim + target - 1) / target).max(1)
         }
         None => args.zoom,
@@ -215,13 +217,13 @@ fn run_batch(args: BatchArgs) -> Result<()> {
 
     tracing::info!(
         "computing {}×{} dotplot, mode={:?}, W={:?}, zoom={}",
-        query_seq.len(),
-        subject_seq.len(),
+        query.len(),
+        subject.len(),
         mode,
         args.window,
         zoom
     );
-    let plot = compute_dotplot(&query_seq, &subject_seq, &cfg)
+    let plot = compute_dotplot(query.bytes(), subject.bytes(), &cfg)
         .context("compute_dotplot failed")?;
     tracing::info!(
         "wrote pixelmap {}x{} ({} bytes)",
@@ -264,9 +266,17 @@ fn run_batch(args: BatchArgs) -> Result<()> {
                 git_sha: option_env!("GIT_SHA").map(|s| s.to_string()),
                 pixelmap_format_version: PIXELMAP_FORMAT_VERSION,
             },
-            query: input_info(&args.query, &query_bytes, &query_recs, &query_seq)?,
+            query: input_info(
+                &args.query,
+                &query_loaded.bytes,
+                &query.records,
+                query.bytes(),
+            )?,
             subject: input_info(
-                &args.subject, &subject_bytes, &subject_recs, &subject_seq,
+                &args.subject,
+                &subject_loaded.bytes,
+                &subject.records,
+                subject.bytes(),
             )?,
             plot: PlotParamsInfo {
                 mode: format!("{:?}", cfg.mode),
@@ -319,7 +329,7 @@ fn pick_matrix(name: Option<&str>, mode: BlastMode) -> Result<ScoreMatrix> {
 fn input_info(
     path: &Path,
     bytes: &[u8],
-    recs: &[fasta::FastaRecord],
+    recs: &[dottir_io::RecordSpan],
     sequence: &[u8],
 ) -> Result<InputInfo> {
     Ok(InputInfo {
