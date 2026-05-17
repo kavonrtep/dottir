@@ -9,9 +9,10 @@ on Linux, macOS, and Windows.
 dottir-gui [OPTIONS] [QUERY] [SUBJECT]
 ```
 
-Mirrors the original `dotter [options] <horizontal> <vertical>`
+Mirrors the original `dotter [options] <horizontal> [<vertical>]`
 invocation. Both positional arguments are optional — run with none to
-open an empty window and load FASTAs via **File → Open**.
+open an empty window and load FASTAs via **File → Open**. Pass only
+one FASTA for a self-comparison.
 
 | Flag | Default | Description |
 |------|---------|-------------|
@@ -21,7 +22,6 @@ open an empty window and load FASTAs via **File → Open**.
 | `--mode {blastn,blastp}` | `blastn` | BLAST mode. |
 | `--matrix NAME` | DNA+5/-4 or BLOSUM62 | Built-in score matrix. |
 | `--strand {forward,reverse,both}` | `both` | BLASTN strand selection. |
-| `--self-comparison` | off | Treat the inputs as a self pair. |
 | `-m, --memory-mib N` | `512` | Pixelmap memory cap, MiB. |
 
 ## Panels

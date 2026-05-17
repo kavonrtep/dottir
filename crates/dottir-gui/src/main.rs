@@ -33,10 +33,10 @@ use clap::Parser;
 use dottir_core::{BlastMode, Strand};
 
 /// Mirror the original `dotter [options] <horizontal_sequence>
-/// <vertical_sequence>` CLI where it makes sense for the GUI.
+/// [<vertical_sequence>]` CLI where it makes sense for the GUI.
 ///
-/// The two positional arguments are FASTA paths for the query
-/// (horizontal axis) and subject (vertical axis). All flags are
+/// One positional FASTA path triggers a self-comparison; two paths
+/// load a query (horizontal) / subject (vertical) pair. All flags are
 /// optional; anything not given falls back to the GUI's defaults and
 /// can be changed from the Settings window.
 #[derive(Parser, Debug)]
@@ -55,7 +55,8 @@ struct Cli {
     #[arg(value_name = "QUERY")]
     query: Option<PathBuf>,
 
-    /// Subject FASTA path — vertical axis. Optional.
+    /// Subject FASTA path — vertical axis. Omit (with QUERY given)
+    /// for a self-comparison.
     #[arg(value_name = "SUBJECT")]
     subject: Option<PathBuf>,
 
@@ -86,10 +87,6 @@ struct Cli {
     /// Strand selection (BLASTN only).
     #[arg(long, value_enum, default_value_t = StrandArg::Both)]
     strand: StrandArg,
-
-    /// Compute as a self-comparison (query == subject).
-    #[arg(long, default_value_t = false)]
-    self_comparison: bool,
 
     /// Memory cap for the pixelmap, in MiB.
     /// Original Dotter equivalent: `-m <float>`.
@@ -134,9 +131,15 @@ impl StrandArg {
 impl Cli {
     fn into_startup(self) -> StartupConfig {
         let mode = self.mode.to_core();
+        // One positional → self-comparison (subject mirrors query).
+        // Two positionals → pairwise as given.
+        let (subject, self_comparison) = match (self.query.as_ref(), self.subject) {
+            (Some(q), None) => (Some(q.clone()), true),
+            (_, sub) => (sub, false),
+        };
         StartupConfig {
             query: self.query,
-            subject: self.subject,
+            subject,
             mode,
             matrix_name: self.matrix.unwrap_or_else(|| match mode {
                 BlastMode::Blastn => "DNA+5/-4".into(),
@@ -146,7 +149,7 @@ impl Cli {
             zoom: self.zoom.max(1),
             pixel_fac: self.pixel_fac.max(1),
             strand: self.strand.to_core(),
-            self_comparison: self.self_comparison,
+            self_comparison,
             memory_limit_bytes: (self.memory_mib as u64) * 1024 * 1024,
         }
     }

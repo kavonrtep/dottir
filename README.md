@@ -64,9 +64,11 @@ A self-comparison of a single sequence — the classic repeat-finding
 plot:
 
 ```sh
-dottir batch chr4.fa chr4.fa -o chr4.png \
-    --self-comparison --auto-zoom 4000
+dottir batch chr4.fa -o chr4.png --auto-zoom 4000
 ```
+
+(Pass a single FASTA for a self-comparison; pass two for a
+pairwise plot.)
 
 A query vs. subject BLASTP at a fixed window:
 
@@ -75,10 +77,12 @@ dottir batch query.faa target.faa -o p.png \
     --mode blastp --matrix BLOSUM45 -W 12
 ```
 
-Open the GUI with both sequences pre-loaded:
+Open the GUI with one sequence pre-loaded (self-comparison) or
+both (pairwise):
 
 ```sh
-dottir-gui chr4.fa chr4.fa --self-comparison -W 25
+dottir-gui chr4.fa -W 25
+dottir-gui query.fa subject.fa
 ```
 
 Full flag reference: `dottir batch --help`, `dottir-gui --help`, or

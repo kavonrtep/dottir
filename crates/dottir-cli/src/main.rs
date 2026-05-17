@@ -38,13 +38,15 @@ enum Command {
 }
 
 #[derive(clap::Args, Debug)]
+#[command(version)]
 struct BatchArgs {
     /// Query FASTA (horizontal axis).
     #[arg(value_name = "QUERY")]
     query: PathBuf,
-    /// Subject FASTA (vertical axis).
+    /// Subject FASTA (vertical axis). Omit for a self-comparison
+    /// (subject = query, mirror enabled).
     #[arg(value_name = "SUBJECT")]
-    subject: PathBuf,
+    subject: Option<PathBuf>,
     /// Output PNG path. The params sidecar is written to
     /// `<output>.params.toml` alongside it.
     #[arg(short = 'o', long, value_name = "PATH")]
@@ -94,10 +96,6 @@ struct BatchArgs {
     /// Original Dotter flag: `-v`.
     #[arg(short = 'v', long, default_value_t = false)]
     reverse_subject: bool,
-
-    /// Compute as a self-comparison (query == subject).
-    #[arg(long, default_value_t = false)]
-    self_comparison: bool,
 
     /// Self-comparison triangle.
     #[arg(long, value_enum, default_value_t = TriangleArg::Both)]
@@ -207,18 +205,29 @@ fn run_batch(args: BatchArgs) -> Result<()> {
     let mode = args.mode.to_core();
     let matrix = pick_matrix(args.matrix.as_deref(), mode)?;
 
+    // One positional → self-comparison. Two → pairwise.
+    let (subject_path, is_self_comparison) = match args.subject {
+        Some(p) => (p, false),
+        None => (args.query.clone(), true),
+    };
+
     tracing::info!("reading query  {}", args.query.display());
     let query_loaded = fasta::load_fasta_file(&args.query)
         .with_context(|| format!("reading query {}", args.query.display()))?;
     let query =
         dottir_io::Sequence::from_records(query_loaded.records.clone(), Some(args.query.clone()));
 
-    tracing::info!("reading subject {}", args.subject.display());
-    let subject_loaded = fasta::load_fasta_file(&args.subject)
-        .with_context(|| format!("reading subject {}", args.subject.display()))?;
+    let subject_loaded = if is_self_comparison {
+        tracing::info!("self-comparison (subject = query)");
+        query_loaded.clone()
+    } else {
+        tracing::info!("reading subject {}", subject_path.display());
+        fasta::load_fasta_file(&subject_path)
+            .with_context(|| format!("reading subject {}", subject_path.display()))?
+    };
     let subject = dottir_io::Sequence::from_records(
         subject_loaded.records.clone(),
-        Some(args.subject.clone()),
+        Some(subject_path.clone()),
     );
 
     // auto-zoom: pick zoom so max(qlen, slen) / zoom <= auto_zoom.
@@ -249,7 +258,7 @@ fn run_batch(args: BatchArgs) -> Result<()> {
         zoom,
         pixel_fac: args.pixel_fac,
         strand,
-        self_comparison: args.self_comparison,
+        self_comparison: is_self_comparison,
         triangle: args.triangle.to_core(),
         disable_mirror: args.disable_mirror,
         memory_limit_bytes: args.memory_limit_bytes,
@@ -429,7 +438,7 @@ fn run_batch(args: BatchArgs) -> Result<()> {
                 query.bytes(),
             )?,
             subject: input_info(
-                &args.subject,
+                &subject_path,
                 &subject_loaded.bytes,
                 &subject.records,
                 subject.bytes(),

@@ -54,7 +54,8 @@ semantics.
 
 ## Self-comparison
 
-When `--self-comparison` is set, the inner loop caps `qmax = s + 1`
+When the user passes only one FASTA (self-comparison), the inner
+loop caps `qmax = s + 1`
 so only the lower triangle is filled. The mirror step then
 populates the other half per the `Triangle` mode (`Both` mirrors
 symmetrically, `Upper` mirrors then zeros the lower, `Lower` leaves

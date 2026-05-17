@@ -1,7 +1,7 @@
 # The `dottir batch` CLI
 
 ```text
-dottir batch <QUERY.fa> <SUBJECT.fa> -o <OUT.png> [FLAGS]
+dottir batch <QUERY.fa> [SUBJECT.fa] -o <OUT.png> [FLAGS]
 ```
 
 ## Required arguments
@@ -9,7 +9,7 @@ dottir batch <QUERY.fa> <SUBJECT.fa> -o <OUT.png> [FLAGS]
 | Argument | Description |
 |----------|-------------|
 | `QUERY` | FASTA path; horizontal axis of the dotplot. |
-| `SUBJECT` | FASTA path; vertical axis. |
+| `SUBJECT` | FASTA path; vertical axis. **Omit for a self-comparison** — subject is set to query and the mirror post-process is enabled. |
 | `-o, --output` | Output PNG path. A `<output>.params.toml` sidecar is written next to it. |
 
 Both FASTA files may be gzipped (`.gz`); the reader auto-detects from
@@ -25,8 +25,7 @@ the file's magic bytes.
 | `-z, --zoom N` | `1` | Pixels per matrix block. Increase to fit larger inputs. |
 | `--pixel-fac N` | `50` | Multiplier in `min(255, score * pixel_fac / W)`. |
 | `--strand {forward,reverse,both}` | `both` | BLASTP ignores this. |
-| `--self-comparison` | off | Query and subject must be identical. |
-| `--triangle {both,upper,lower}` | `both` | Self-comparison mirror mode. |
+| `--triangle {both,upper,lower}` | `both` | Self-comparison mirror mode (only meaningful when SUBJECT is omitted). |
 | `--disable-mirror` | off | Skip the self-comparison post-process entirely. |
 | `--memory-limit-bytes N` | `512 MiB` | Refuse pixelmaps bigger than this. |
 | `--auto-zoom MAX_DIM` | off | Auto-pick `--zoom` so the larger output dim is ≤ this. |
@@ -34,11 +33,11 @@ the file's magic bytes.
 
 ## Examples
 
-Self-comparison of a small repeat region:
+Self-comparison of a small repeat region (just one positional):
 
 ```sh
-dottir batch contig.fa contig.fa -o contig.png \
-    --self-comparison --triangle both --auto-zoom 4000
+dottir batch contig.fa -o contig.png \
+    --triangle both --auto-zoom 4000
 ```
 
 BLASTP between two protein FASTAs at a fixed window:
