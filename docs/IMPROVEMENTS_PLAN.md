@@ -1,8 +1,14 @@
 # dottir — Improvements Plan
 
-Concrete follow-up plan addressing the findings in `REVIEW.md`. Estimates
-are person-days for one focused developer; double for full polish + tests
-+ docs.
+Concrete follow-up plan. Inputs:
+
+* [`REVIEW.md`](./REVIEW.md) — original code review (drives phases A–G).
+* [`reviews/original-dotter-gaps.md`](./reviews/original-dotter-gaps.md) —
+  feature-parity gaps against the original Dotter workflow (drives phase H
+  plus GUI follow-ups).
+
+Estimates are person-days for one focused developer; double for full
+polish + tests + docs.
 
 ## Progress
 
@@ -38,9 +44,31 @@ Status as of 2026-05-17. Items checked here are merged on `master`.
 | F4 | Pixelmap goldens vs C dotter | ☐ | — *(ops; needs GTK2 build)* |
 | G1 | Inverted-repeat colour | ☑ | ffa6118 |
 | G2 | Sub-dotter spawn | ☐ | — |
+| H1 | Seq-name labels on axes (multi-record) | ☐ | — *(see phase H)* |
+| H2 | Alignment view at crosshair | ☐ | — *(see phase H)* |
 
-Tests: 115 workspace tests passing (was 78 at start of these
+Tests: 128 workspace tests passing (was 78 at start of these
 improvements). MSRV 1.85.
+
+### Gap-doc reconciliation
+
+`docs/reviews/original-dotter-gaps.md` was written before several
+items shipped. Mapping its checklist to current state:
+
+| Gap-doc item | Status |
+|--------------|--------|
+| GFF3 annotation overlays | ☐ Pending (E1, E3 here) |
+| PAF / HSP overlays | ☐ Pending (E2, E4) |
+| Alignment view at crosshair | ☐ Pending — **addressed by H2 below** |
+| Sub-dotter spawning from selection | ☐ Pending (G2) |
+| Session save/load | ☑ Shipped — 9362d0d (C5) |
+| SVG export | ☑ Shipped — d83d44b (D1) |
+| PDF export | ☐ Pending (D3) |
+| `.dot` export | ☑ Shipped — b7b5992 (D2) |
+| Selection-region export | ☐ Pending (D4) |
+| BLASTX three-frame | ☑ Shipped — a5b7baa (F1) |
+| Breakline-aware multi-record viewing | ◐ Partial: breaklines (C3) and `record:position` crosshair coords (A3) shipped; **seq-name axis labels still missing — H1 below** |
+| Inverted-repeat visualization parity | ☑ Initial — ffa6118 (G1); further controls per follow-up GUI requests |
 
 Each phase is independently shippable (commit per phase, mirroring how the
 original `IMPLEMENTATION_PLAN.md` was executed). The phases are ordered by
@@ -487,6 +515,120 @@ Option 1 keeps everything in-process and gets state-sharing for free.
 
 ---
 
+## Phase H — Original-Dotter feature parity
+
+Driven by [`docs/reviews/original-dotter-gaps.md`](./reviews/original-dotter-gaps.md)
+plus follow-up user feedback during GUI testing. Two concrete asks that
+together close the "interactive analysis workflow" gap the gaps doc
+calls out.
+
+### H1. Sequence-name labels on axes for multi-record FASTAs
+
+**Problem.** With a multi-record FASTA, the GUI already draws
+breaklines at record boundaries (C3) and the status bar shows the
+crosshair coord as `chr4:1234` (A3), but the axis labels are bare
+concatenated-buffer offsets. Looking at a single tick label, the
+user can't tell which record they're in. The PNG / SVG exports
+have the same problem.
+
+**Fix.**
+
+In `dottir-gui::app::draw_axis_labels`:
+
+* For each `RecordSpan` whose projected on-screen extent is at least
+  ~40 px, draw the record's `id` (truncated to a fixed character
+  cap to keep crowded tracks readable) centred on its slice. Top
+  axis names sit *above* the existing tick label strip; left axis
+  names sit *left of* the residue ticks (or rotated 90° if there's
+  room).
+* For records whose slice is narrower than the label width, skip
+  the name entirely — the breakline + the per-tick coord
+  (`chr4:1234`) on hover is enough.
+* For the PNG / SVG exporters, thread the record metadata through
+  `png_export::write_grayscale_png_with_axes` and
+  `svg_export::write_svg`. New optional parameter
+  `axis_records: &[AxisRecord { name, range }]` for each axis.
+  `text_overlay::compose_image_with_axes` gains the same parameter.
+  Render the record names in the margin alongside the existing tick
+  labels (same 5×7 bitmap font).
+* Single-record inputs render unchanged.
+
+**Files**: `crates/dottir-gui/src/app.rs`,
+`crates/dottir-io/src/{text_overlay,png_export,svg_export}.rs`,
+`crates/dottir-cli/src/main.rs` (pass `Sequence.records` through).
+
+**Acceptance**: a self-comparison of
+`test-data/overlaping_sequences.fasta` (3 records) shows each
+record's ID above the top axis and to the left of the left axis,
+each name centred on its sequence segment in pixelmap coords.
+Single-record inputs (e.g. `inverted_repeat.fasta`) render exactly
+as before.
+
+**Effort**: 0.5–1 day.
+
+### H2. Alignment view at the crosshair
+
+**Problem.** When the user sets the crosshair, the status bar reports
+`q = chr4:1234, s = chr4:1234, value = 200`. They can't see the
+actual residue context — they have to open the FASTA in a separate
+tool. The original Dotter docked an alignment view next to the
+canvas showing ±N residues around the cross with mismatch
+highlighting.
+
+**Fix.**
+
+* Add a `egui::TopBottomPanel::bottom("alignment")` dock to the GUI
+  (next to the existing status bar), with `align_dock_visible: bool`
+  on `DottirApp` (default `true`). View menu gains a "Show alignment
+  view" toggle.
+* `Settings.align_window_size: u32` (default 100, clamp 20..400) —
+  exposed as a small spinner in the dock header.
+* When the crosshair is set:
+  - Heading line: `q = chr4:1234   s = chr5:5678   window = 100`
+  - Two monospace rows of `align_window_size` residues centred on
+    the crosshair: query (top), subject (bottom).
+  - Between them a *match line*: `|` for identical residues, `:`
+    for positive-score substitutions per the loaded `ScoreMatrix`,
+    space otherwise. Stockholm-style.
+  - Per-column background colouring on the residue rows:
+    - light green (`#d8f5cf`) for identity matches
+    - light yellow (`#fff2c4`) for positive non-identical
+    - no background otherwise
+  - Out-of-bounds columns at the slice edges are rendered as `-`
+    on a grey background.
+* Leverages `dottir_io::alignment::slice_pair` (already shipped) for
+  the residue extraction. Extend it to optionally return per-column
+  classifications, OR compute them inline in the GUI from the
+  matrix.
+* For BLASTX, the alignment view shows the **translated** query
+  frame against the protein subject (frame chosen so the crosshair
+  position is in-frame, i.e. `frame = q_idx % 3`). Tooltip notes
+  the frame.
+
+**Files**: `crates/dottir-gui/src/app.rs` (new `draw_alignment_dock`
++ `alignment_classes(seq_a, seq_b, matrix) -> Vec<MatchClass>`
+helper), optionally a small extension to
+`crates/dottir-io/src/alignment.rs` if classification is shared
+with a future CLI export.
+
+**Acceptance**:
+
+* On a self-comparison click near the main diagonal, the two rows
+  match exactly and the match line is a solid string of `|`s.
+* On a click off the diagonal in a divergent region, the match line
+  is mostly spaces with occasional `|`/`:` for spot identities.
+* Disabling the dock via the View menu hides it; setting persists
+  through a session save / load (C5).
+
+**Effort**: 1–1.5 days.
+
+### H3. (deferred) — track-panel sequence headers
+
+A natural extension once GFF3 tracks land (E1/E3): if a track has
+a `Name` attribute, render that as the segment label on the
+relevant axis (instead of or alongside the FASTA record id). Pure
+follow-up; ship after E1 + E3 + H1.
+
 ## Cross-cutting
 
 ### Shared config layer
@@ -518,23 +660,28 @@ on tag push. Move it into `ci.yml` so every PR is gated.
 
 ## Suggested execution order
 
-1. **A1 + A2 + A3 + A4** (3-4 days). Honest memory cap, strict matrix
-   parsing, record-aware sequences. Land each as its own commit.
-2. **B1-B3** (half a day). Docs synced.
-3. **C1 + C2** (2-3 days). Memory limit setting + zoom quality. Most
-   user-visible improvement after Phase A.
-4. **C3 + C4 + C6** (1-2 days). Breaklines, axes, background compute
-   plumbing.
-5. **D1 + D2** (2-3 days). SVG + `.dot`. PDF (D3) is optional.
-6. **E1 + E2 + E3** (3-4 days). GFF3 / PAF / track panel. Last gating
-   feature on §4.4.
-7. **F1 + F4** (3 days). BLASTX + pixelmap goldens for confidence.
-8. **G1 + G2** (1-2 days). Inverted-repeat colour + sub-dotter.
-9. **C5 + D4 + D5 + remainder** as time allows.
+Phases A–C5, D1–D2, F1–F3, G1, and the zoom/pan constraints have all
+landed (see the progress table). The remaining sequence, ordered by
+user-visible value:
 
-After step 6 the project meets the spec §11 "Definition of done for
-v1.0" except for the optional WASM build (Phase 8 of the original plan,
-still mostly free given §C2 already moves compute off the UI thread).
+1. **H1 + H2** (1.5–2.5 days). The two GUI items called out by the
+   gaps doc: seq-name axis labels for multi-record FASTAs, and the
+   inline alignment view at the crosshair. Highest-leverage
+   user-facing improvement left.
+2. **E1 + E2 + E3 + E4** (4–5 days). GFF3 + PAF loaders + GUI track
+   panel + HSP overlay modes. Closes spec §4.4.
+3. **G2** (1–2 days). Sub-dotter spawn from rubber-band selection
+   — pairs naturally with D4.
+4. **D4 + D5** (1–2 days). Selection-region export + alignment-window
+   export CLI flag.
+5. **D3** (1 day). PDF export (rasterise SVG or via `printpdf`).
+6. **F4** (ops). Pixelmap goldens against the real C dotter — needs
+   building the GTK2 binary; not strictly code work.
+
+After step 2 the project meets the spec §11 "Definition of done for
+v1.0" except for the optional WASM build (Phase 8 of the original
+plan, still mostly free given §C2 already moves compute off the UI
+thread).
 
 ## Out of scope (this plan)
 
