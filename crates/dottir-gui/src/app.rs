@@ -1026,6 +1026,34 @@ impl DottirApp {
                     self.last_zoom_event = Some(std::time::Instant::now());
                 }
             }
+
+            // Constrain zoom + pan so the user can't scroll the
+            // pixelmap completely off-screen. Lower bound on zoom is
+            // "fit-to-canvas" (the level at which the entire
+            // pixelmap fits exactly inside the canvas — zooming out
+            // further just leaves grey margin around a shrinking
+            // image, which is wasted space). Pan is clamped so the
+            // plot's edges can't pass the canvas's far edges; when
+            // the plot is smaller than the canvas it's auto-centred.
+            let pw = plot.width as f32;
+            let ph = plot.height as f32;
+            let fit_zoom_x = avail.x / pw.max(1.0);
+            let fit_zoom_y = avail.y / ph.max(1.0);
+            let fit_zoom = fit_zoom_x.min(fit_zoom_y);
+            self.display_zoom = self.display_zoom.max(fit_zoom);
+            let cw = avail.x / self.display_zoom; // canvas width in pixelmap coords
+            let ch = avail.y / self.display_zoom;
+            if pw <= cw {
+                self.view_offset.x = -(cw - pw) / 2.0; // centre horizontally
+            } else {
+                self.view_offset.x = self.view_offset.x.clamp(0.0, pw - cw);
+            }
+            if ph <= ch {
+                self.view_offset.y = -(ch - ph) / 2.0;
+            } else {
+                self.view_offset.y = self.view_offset.y.clamp(0.0, ph - ch);
+            }
+
             // Click sets the crosshair.
             if response.clicked() {
                 if let Some(p) = response.interact_pointer_pos() {
@@ -1043,15 +1071,38 @@ impl DottirApp {
                 }
             }
 
-            // Map view rect → texture UV rect.
-            let world_w = avail.x / self.display_zoom;
-            let world_h = avail.y / self.display_zoom;
-            let u0 = self.view_offset.x / plot.width as f32;
-            let v0 = self.view_offset.y / plot.height as f32;
-            let u1 = (self.view_offset.x + world_w) / plot.width as f32;
-            let v1 = (self.view_offset.y + world_h) / plot.height as f32;
-            let uv = Rect::from_min_max(Pos2::new(u0, v0), Pos2::new(u1, v1));
-            ui.painter().image(tex.id(), rect, uv, Color32::WHITE);
+            // Fill the whole canvas with a light grey first, so the
+            // boundary between the dotplot and the empty area is
+            // visually obvious even when the plot is centred and
+            // surrounded by margin.
+            ui.painter()
+                .rect_filled(rect, 0.0, Color32::from_gray(235));
+
+            // Compute on-screen rect for the pixelmap, then render
+            // it (no UV slicing — egui clips to the panel's
+            // clip_rect, which is fine for our scale).
+            let plot_screen_w = pw * self.display_zoom;
+            let plot_screen_h = ph * self.display_zoom;
+            let plot_screen_x =
+                rect.left() - self.view_offset.x * self.display_zoom;
+            let plot_screen_y =
+                rect.top() - self.view_offset.y * self.display_zoom;
+            let plot_rect = Rect::from_min_size(
+                Pos2::new(plot_screen_x, plot_screen_y),
+                Vec2::new(plot_screen_w, plot_screen_h),
+            );
+            ui.painter().image(
+                tex.id(),
+                plot_rect,
+                Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                Color32::WHITE,
+            );
+            // Boundary frame around the pixelmap.
+            ui.painter().rect_stroke(
+                plot_rect,
+                0.0,
+                egui::Stroke::new(1.0, Color32::from_gray(110)),
+            );
 
             // C3: breaklines for multi-record FASTA inputs. Vertical
             // lines at the query record boundaries; horizontal lines
