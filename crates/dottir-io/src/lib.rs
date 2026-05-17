@@ -18,6 +18,7 @@
 #![forbid(unsafe_code)]
 
 pub mod alignment;
+pub mod dot_format;
 pub mod fasta;
 pub mod params;
 pub mod png_export;

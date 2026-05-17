@@ -127,6 +127,11 @@ struct BatchArgs {
     /// axis labels) to this path.
     #[arg(long, value_name = "PATH")]
     svg: Option<PathBuf>,
+
+    /// Also write a C-dotter compatible `.dot` binary to this path.
+    /// Format 3 (matches the current C-dotter savePlot output).
+    #[arg(long, value_name = "PATH")]
+    dot: Option<PathBuf>,
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -305,6 +310,34 @@ fn run_batch(args: BatchArgs) -> Result<()> {
         )
         .context("SVG export failed")?;
         tracing::info!("wrote {}", svg_path.display());
+    }
+
+    if let Some(dot_path) = &args.dot {
+        // Construct a format-3 .dot. Matrix is only 24×24 for proteins;
+        // for DNA we pad the 4×4 matrix into the top-left of a 24×24
+        // block (the rest stays zero — C-dotter doesn't care about
+        // those cells when reading DNA `.dot` files because the inner
+        // loop only indexes the first 4 rows/cols).
+        let mut matrix24 = vec![0_i32; 24 * 24];
+        let n = cfg.matrix.size();
+        for r in 0..n {
+            for c in 0..n {
+                matrix24[r * 24 + c] = cfg.matrix.get(r, c);
+            }
+        }
+        let dot = dottir_io::dot_format::DotFile {
+            format: 3,
+            zoom: cfg.zoom as f64,
+            width: plot.width,
+            height: plot.height,
+            pixel_fac: Some(cfg.pixel_fac as i32),
+            sliding_window_size: Some(plot.params.window_size as i32),
+            matrix_name: Some(cfg.matrix.name.clone()),
+            matrix: Some(matrix24),
+            pixels: plot.pixels.clone(),
+        };
+        dot.write_format3(dot_path).context(".dot export failed")?;
+        tracing::info!("wrote {}", dot_path.display());
     }
 
     if !args.no_sidecar {
