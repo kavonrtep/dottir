@@ -1,0 +1,8 @@
+# Windows batch files must end with CRLF — cmd.exe silently exits
+# with status 255 on LF-only .bat files. Force CRLF on commit / on
+# checkout, regardless of `core.autocrlf`.
+*.bat text eol=crlf
+
+# Everything else: keep the default (LF in the repo, native on checkout
+# unless core.autocrlf overrides).
+*       text=auto

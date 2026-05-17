@@ -191,5 +191,14 @@ jobs:
             echo "::error::no conda packages found under conda-out/${{ matrix.platform }}/"
             exit 1
           fi
-          anaconda --token "$ANACONDA_API_TOKEN" upload \
+          # setup-miniconda's login-shell hook doesn't always put
+          # anaconda-client's `anaconda` script on PATH for subsequent
+          # steps. Invoke it via the explicit base-env path instead.
+          # $CONDA points at miniconda's install root on both platforms.
+          if [ -x "$CONDA/bin/anaconda" ]; then
+            anaconda_bin="$CONDA/bin/anaconda"
+          else
+            anaconda_bin="$CONDA/Scripts/anaconda.exe"
+          fi
+          "$anaconda_bin" --token "$ANACONDA_API_TOKEN" upload \
             --user petrnovak --force "${pkgs[@]}"
