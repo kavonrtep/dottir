@@ -1,24 +1,50 @@
 //! Pixel max-merge and scaling helpers (spec §4.1.5).
 //!
-//! The pixelmap is a `width × height` `Vec<u8>` row-major; each pixel
-//! covers a `zoom × zoom` block of the underlying score matrix. Multiple
-//! diagonals fall into the same pixel and the maximum value wins.
+//! The pixelmap is a `width × height` row-major buffer; each pixel
+//! covers a `zoom × zoom` block of the underlying score matrix.
+//! Multiple diagonals fall into the same pixel and the maximum value
+//! wins.
+//!
+//! ## Concurrency model (Phase A1)
+//!
+//! `PixelMap` stores its data as `Vec<AtomicU8>` so [`max_merge`] takes
+//! `&self`. The parallel driver in [`crate::plot`] shares one
+//! [`PixelMap`] across all rayon workers — there is no per-chunk
+//! pixelmap allocation, so peak memory equals just the output map plus
+//! each worker's small ping-pong sum buffers. This honours the
+//! `memory_limit_bytes` cap (spec §4.5.2) regardless of thread count.
+//!
+//! Determinism is preserved: integer `max` is associative and
+//! commutative, and the `compare_exchange_weak` loop guarantees every
+//! `max_merge` ultimately leaves the cell at `max(previous, value)`
+//! independent of interleaving (spec §4.1.11).
+
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use crate::error::DottirError;
 
-/// A row-major `Vec<u8>` pixel buffer with explicit width/height. Keeps
-/// the per-call indexing in [`crate::sliding`] readable.
-#[derive(Debug, Clone)]
+/// A row-major byte buffer storing pixelmap values.
+///
+/// Internally `Vec<AtomicU8>` so that [`Self::max_merge`] can be called
+/// concurrently through `&self`. After parallel compute completes,
+/// `&mut self`-taking methods view the same storage as plain `&mut [u8]`
+/// via [`AtomicU8::get_mut_slice`].
+#[derive(Debug)]
 pub struct PixelMap {
     width: u32,
     height: u32,
-    data: Vec<u8>,
+    data: Vec<AtomicU8>,
 }
 
 impl PixelMap {
     /// Allocate a new zero-filled pixelmap. Checked against
     /// `memory_limit_bytes` — refuses to allocate larger and returns
     /// [`DottirError::OutOfMemory`] (spec §4.5.2).
+    ///
+    /// After Phase A1 the cap is honest: the parallel driver shares one
+    /// pixelmap across all workers, so the actual peak is this size plus
+    /// `n_threads × (2 × qlen × 4)` for the ping-pong sum buffers, which
+    /// is negligible.
     pub fn new_checked(
         width: u32,
         height: u32,
@@ -31,11 +57,9 @@ impl PixelMap {
                 limit: memory_limit_bytes,
             });
         }
-        Ok(Self {
-            width,
-            height,
-            data: vec![0_u8; n as usize],
-        })
+        let mut data = Vec::with_capacity(n as usize);
+        data.resize_with(n as usize, || AtomicU8::new(0));
+        Ok(Self { width, height, data })
     }
 
     #[inline]
@@ -55,46 +79,59 @@ impl PixelMap {
         self.height
     }
 
-    /// Consume the pixelmap and return its raw bytes.
+    /// Consume the pixelmap and return its raw bytes. Useful at the end
+    /// of compute when ownership moves into [`crate::plot::DotPlot`]
+    /// — all post-processing (self-comparison mirror, forward/reverse
+    /// combine) runs on `Vec<u8>` rather than through the atomic API.
     pub fn into_vec(self) -> Vec<u8> {
-        self.data
+        self.data.into_iter().map(|a| a.into_inner()).collect()
     }
 
-    /// Borrow the raw bytes.
-    pub fn as_slice(&self) -> &[u8] {
-        &self.data
-    }
-
-    /// Mutable borrow of the raw bytes; used by self-comparison mirror
-    /// post-processing in [`crate::plot`].
-    pub fn as_mut_slice(&mut self) -> &mut [u8] {
-        &mut self.data
-    }
-
-    /// `pixel[y * width + x] = max(pixel[y * width + x], value)`. Out-of-
-    /// bounds coordinates are silently dropped; the caller is expected to
-    /// have gated on bounds already.
+    /// Atomic max-merge: `pixel[y * width + x] = max(pixel[y * width + x],
+    /// value)`. Safe to call concurrently through `&self`. Out-of-bounds
+    /// coordinates are silently dropped; the caller is expected to have
+    /// gated on bounds already.
     #[inline]
-    pub fn max_merge(&mut self, x: usize, y: usize, value: u8) {
+    pub fn max_merge(&self, x: usize, y: usize, value: u8) {
         if x >= self.width() || y >= self.height() {
             return;
         }
         let idx = y * self.width() + x;
-        if value > self.data[idx] {
-            self.data[idx] = value;
+        let cell = &self.data[idx];
+        // `Relaxed` is sufficient: the kernel doesn't need to observe any
+        // memory ordering between max_merge calls — every pixel is
+        // independent of every other pixel, and the post-compute reader
+        // synchronises via Arc::try_unwrap / &mut self anyway.
+        let mut current = cell.load(Ordering::Relaxed);
+        while value > current {
+            match cell.compare_exchange_weak(
+                current,
+                value,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(observed) => current = observed,
+            }
         }
     }
 
-    /// Element-wise max-merge another pixelmap of the same dimensions
-    /// into this one. Used to combine forward and reverse strand passes
-    /// (spec §4.1.7) and to merge parallel-chunked outputs (Phase 3).
-    pub fn merge_from(&mut self, other: &PixelMap) {
-        assert_eq!(self.width, other.width);
-        assert_eq!(self.height, other.height);
-        for (a, b) in self.data.iter_mut().zip(other.data.iter()) {
-            if *b > *a {
-                *a = *b;
-            }
+    /// Snapshot the buffer to an owned `Vec<u8>` without consuming the
+    /// pixelmap. Used by tests for inspection.
+    pub fn to_vec(&self) -> Vec<u8> {
+        self.data.iter().map(|a| a.load(Ordering::Relaxed)).collect()
+    }
+}
+
+/// Element-wise max-merge `src` into `dst` on raw byte slices. Used by
+/// [`crate::plot`] to combine forward and reverse strand passes after
+/// they've been consumed out of their [`PixelMap`]s — see spec §4.1.7
+/// and the Phase A1 notes in this module.
+pub fn merge_max_into(dst: &mut [u8], src: &[u8]) {
+    debug_assert_eq!(dst.len(), src.len());
+    for (a, &b) in dst.iter_mut().zip(src.iter()) {
+        if b > *a {
+            *a = b;
         }
     }
 }
@@ -113,18 +150,18 @@ mod tests {
 
     #[test]
     fn max_merge_keeps_max() {
-        let mut p = PixelMap::new_checked(3, 2, 1024).unwrap();
+        let p = PixelMap::new_checked(3, 2, 1024).unwrap();
         p.max_merge(0, 0, 100);
         p.max_merge(0, 0, 50); // should be ignored
         p.max_merge(0, 0, 200);
-        assert_eq!(p.as_slice()[0], 200);
+        assert_eq!(p.to_vec()[0], 200);
     }
 
     #[test]
     fn out_of_bounds_max_merge_is_noop() {
-        let mut p = PixelMap::new_checked(2, 2, 1024).unwrap();
+        let p = PixelMap::new_checked(2, 2, 1024).unwrap();
         p.max_merge(5, 5, 100); // should not panic
-        assert!(p.as_slice().iter().all(|&v| v == 0));
+        assert!(p.to_vec().iter().all(|&v| v == 0));
     }
 
     #[test]
@@ -140,15 +177,54 @@ mod tests {
     }
 
     #[test]
-    fn merge_from_takes_max_elementwise() {
-        let mut a = PixelMap::new_checked(2, 2, 1024).unwrap();
-        let mut b = PixelMap::new_checked(2, 2, 1024).unwrap();
-        a.max_merge(0, 0, 10);
-        a.max_merge(1, 1, 50);
-        b.max_merge(0, 0, 80);
-        b.max_merge(1, 0, 20);
-        a.merge_from(&b);
-        assert_eq!(a.as_slice(), &[80, 20, 0, 50]);
+    fn merge_max_into_slice() {
+        let mut a = vec![10, 20, 30, 0];
+        let b = [80, 0, 40, 25];
+        merge_max_into(&mut a, &b);
+        assert_eq!(a, vec![80, 20, 40, 25]);
+    }
+
+    /// Concurrent writers calling max_merge through `&self` reach the
+    /// same final state as a serial run.
+    #[test]
+    fn concurrent_max_merge_is_deterministic() {
+        use std::sync::Arc;
+        let pm = Arc::new(PixelMap::new_checked(64, 64, 1 << 20).unwrap());
+        let n_threads = 8;
+        let n_writes_per_thread = 5000;
+        let mut handles = Vec::new();
+        for t in 0..n_threads {
+            let pm = Arc::clone(&pm);
+            handles.push(std::thread::spawn(move || {
+                // Each thread writes a different pattern; the final
+                // value at each pixel must equal the max across all
+                // writers' contributions.
+                for i in 0..n_writes_per_thread {
+                    let x = (i * 7 + t * 3) % 64;
+                    let y = (i * 11 + t) % 64;
+                    let v = ((i ^ t) as u8).wrapping_mul(3);
+                    pm.max_merge(x, y, v);
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        // Re-derive the expected value sequentially.
+        let mut expected = vec![0_u8; 64 * 64];
+        for t in 0..n_threads {
+            for i in 0..n_writes_per_thread {
+                let x = (i * 7 + t * 3) % 64;
+                let y = (i * 11 + t) % 64;
+                let v = ((i ^ t) as u8).wrapping_mul(3);
+                let idx = y * 64 + x;
+                if v > expected[idx] {
+                    expected[idx] = v;
+                }
+            }
+        }
+        let pm = Arc::try_unwrap(pm).expect("only one Arc remaining");
+        assert_eq!(pm.to_vec(), expected);
     }
 
     #[test]

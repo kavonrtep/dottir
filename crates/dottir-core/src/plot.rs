@@ -8,7 +8,7 @@ use crate::alphabet::{complement_encoded, encode, reverse_complement_dna};
 use crate::error::DottirError;
 use crate::karlin::{karlin_window_size, KarlinResult};
 use crate::matrix::{BlastMode, ScoreMatrix};
-use crate::pixel::{image_dimension, PixelMap};
+use crate::pixel::{image_dimension, merge_max_into, PixelMap};
 use crate::score_vec::ScoreVec;
 use crate::sliding::{sliding_window_pass_chunked, Direction};
 
@@ -207,7 +207,10 @@ pub fn compute_dotplot(
     // Per spec §4.4.3, separate-strand channels keep forward and reverse
     // hits distinct (used for inverted-repeat highlighting in the GUI).
     // Otherwise both passes max-merge into a single pixelmap.
-    let mut forward_map = PixelMap::new_checked(width, height, config.memory_limit_bytes)?;
+    //
+    // After Phase A1 these are *atomic* PixelMaps — at most one per
+    // strand for the entire pass, shared across all rayon workers.
+    let forward_map = PixelMap::new_checked(width, height, config.memory_limit_bytes)?;
     let mut reverse_map: Option<PixelMap> = None;
 
     // Decide which passes to run. For BLASTN, Strand::Both = forward +
@@ -227,9 +230,8 @@ pub fn compute_dotplot(
             config.pixel_fac,
             Direction::Forward,
             config.self_comparison,
-            config.memory_limit_bytes,
-            &mut forward_map,
-        )?;
+            &forward_map,
+        );
     }
 
     if do_reverse {
@@ -238,11 +240,15 @@ pub fn compute_dotplot(
         // for the same effect), then scan the subject backwards.
         let q_complement = complement_encoded(&q_encoded);
         let score_vec_rev = ScoreVec::build(&config.matrix, &q_complement);
-        let target_map = if config.separate_strand_channels {
-            reverse_map = Some(PixelMap::new_checked(width, height, config.memory_limit_bytes)?);
-            reverse_map.as_mut().unwrap()
+        let target_map: &PixelMap = if config.separate_strand_channels {
+            reverse_map = Some(PixelMap::new_checked(
+                width,
+                height,
+                config.memory_limit_bytes,
+            )?);
+            reverse_map.as_ref().unwrap()
         } else {
-            &mut forward_map
+            &forward_map
         };
         run_pass(
             &score_vec_rev,
@@ -252,34 +258,48 @@ pub fn compute_dotplot(
             config.pixel_fac,
             Direction::Reverse,
             config.self_comparison,
-            config.memory_limit_bytes,
             target_map,
-        )?;
+        );
     }
+
+    // Compute is done — drop into raw bytes for post-processing. All
+    // workers have completed (rayon::for_each is synchronous), so the
+    // PixelMaps' atomic cells are now exclusive and consume cleanly.
+    let mut forward_pixels = forward_map.into_vec();
+    let mut reverse_pixels = reverse_map.map(|m| m.into_vec());
 
     // Self-comparison post-processing (spec §4.1.8).
     if config.self_comparison {
-        mirror_self_comparison(&mut forward_map, config.triangle, config.disable_mirror);
-        if let Some(ref mut r) = reverse_map {
-            mirror_self_comparison(r, config.triangle, config.disable_mirror);
+        mirror_self_comparison(
+            &mut forward_pixels,
+            width as usize,
+            height as usize,
+            config.triangle,
+            config.disable_mirror,
+        );
+        if let Some(ref mut r) = reverse_pixels {
+            mirror_self_comparison(
+                r,
+                width as usize,
+                height as usize,
+                config.triangle,
+                config.disable_mirror,
+            );
         }
     }
 
-    let (combined, fwd_split, rev_split) = if config.separate_strand_channels && reverse_map.is_some() {
-        // Combined channel: max-merge of forward + reverse for downstream
-        // code that wants the unified view.
-        let mut combined = forward_map.clone();
-        if let Some(ref r) = reverse_map {
-            combined.merge_from(r);
-        }
-        (
-            combined.into_vec(),
-            Some(forward_map.into_vec()),
-            Some(reverse_map.unwrap().into_vec()),
-        )
-    } else {
-        (forward_map.into_vec(), None, None)
-    };
+    let (combined, fwd_split, rev_split) =
+        if config.separate_strand_channels && reverse_pixels.is_some() {
+            // Combined channel: max-merge of forward + reverse for
+            // downstream code that wants the unified view.
+            let mut combined = forward_pixels.clone();
+            if let Some(ref r) = reverse_pixels {
+                merge_max_into(&mut combined, r);
+            }
+            (combined, Some(forward_pixels), reverse_pixels)
+        } else {
+            (forward_pixels, None, None)
+        };
 
     Ok(DotPlot {
         width,
@@ -304,12 +324,21 @@ pub fn reverse_complement(dna: &[u8]) -> Vec<u8> {
 }
 
 /// Run a single sliding-window pass into `out`, chunking on the subject
-/// axis with rayon when the `rayon` feature is enabled. Worker pixelmaps
-/// are merged element-wise back into `out` (`max` is associative and
-/// commutative so the merge order doesn't affect the result).
+/// axis with rayon when the `rayon` feature is enabled.
 ///
-/// At least 4 subject positions per chunk and at least `window * 4` total
-/// subject length to make chunking worthwhile.
+/// Phase A1 model: there is exactly **one** [`PixelMap`] allocated for
+/// the whole pass (regardless of thread count). Workers share `&out`
+/// and emit pixels through [`PixelMap::max_merge`], which uses an
+/// atomic `compare_exchange_weak` loop. Integer `max` is associative
+/// and commutative, so the result is byte-identical to a serial pass
+/// — verified by `tests/parallel_determinism.rs` at thread counts
+/// 1, 2, 4, 8 (spec §4.1.11).
+///
+/// Memory budget: `O(W × H) + O(n_threads × qlen)` for the shared
+/// pixelmap plus each worker's local ping-pong sum buffers
+/// (`sum1`, `sum2` are i32). The previous design allocated
+/// `n_chunks + 1` full pixelmaps; that hard-violated
+/// `memory_limit_bytes` on multi-threaded runs and is fixed here.
 #[allow(clippy::too_many_arguments)]
 fn run_pass(
     score_vec: &ScoreVec,
@@ -319,9 +348,8 @@ fn run_pass(
     pixel_fac: u32,
     direction: Direction,
     self_comp: bool,
-    memory_limit_bytes: u64,
-    out: &mut PixelMap,
-) -> Result<(), DottirError> {
+    out: &PixelMap,
+) {
     #[cfg(feature = "rayon")]
     {
         use rayon::prelude::*;
@@ -329,14 +357,15 @@ fn run_pass(
         let slen = subject.len();
         let n_threads = rayon::current_num_threads().max(1);
         // Skip parallelisation if the input is small. The chunk overhead
-        // dominates and serial is faster.
+        // (rayon scheduling + warm-up of W extra subject positions per
+        // chunk) dominates and serial is faster.
         let min_for_parallel = (window as usize).saturating_mul(64).max(2048);
         if n_threads <= 1 || slen < min_for_parallel {
             sliding_window_pass_chunked(
                 score_vec, subject, window, zoom, pixel_fac, direction,
                 self_comp, 0..slen, out,
             );
-            return Ok(());
+            return;
         }
 
         // Aim for ~4× as many chunks as threads, so straggling workers
@@ -351,37 +380,23 @@ fn run_pass(
             .map(|lo| lo..(lo + chunk_size).min(slen))
             .collect();
 
-        let width = out.width_u32();
-        let height = out.height_u32();
-        let pixmaps: Vec<PixelMap> = chunks
-            .par_iter()
-            .map(|range| {
-                let mut local =
-                    PixelMap::new_checked(width, height, memory_limit_bytes)
-                        .expect("local chunk pixelmap fits if the global one did");
-                sliding_window_pass_chunked(
-                    score_vec,
-                    subject,
-                    window,
-                    zoom,
-                    pixel_fac,
-                    direction,
-                    self_comp,
-                    range.clone(),
-                    &mut local,
-                );
-                local
-            })
-            .collect();
-        for p in pixmaps {
-            out.merge_from(&p);
-        }
-        Ok(())
+        chunks.par_iter().for_each(|range| {
+            sliding_window_pass_chunked(
+                score_vec,
+                subject,
+                window,
+                zoom,
+                pixel_fac,
+                direction,
+                self_comp,
+                range.clone(),
+                out,
+            );
+        });
     }
 
     #[cfg(not(feature = "rayon"))]
     {
-        let _ = memory_limit_bytes;
         sliding_window_pass_chunked(
             score_vec,
             subject,
@@ -393,7 +408,6 @@ fn run_pass(
             0..subject.len(),
             out,
         );
-        Ok(())
     }
 }
 
@@ -407,13 +421,19 @@ fn run_pass(
 ///
 /// `disable_mirror = true` short-circuits to a no-op regardless of mode,
 /// honouring spec §4.1.8 / the original `--disable-mirror` flag.
-fn mirror_self_comparison(map: &mut PixelMap, triangle: Triangle, disable_mirror: bool) {
+fn mirror_self_comparison(
+    data: &mut [u8],
+    width: usize,
+    height: usize,
+    triangle: Triangle,
+    disable_mirror: bool,
+) {
     if disable_mirror {
         return;
     }
-    let stride = map.width();
-    let dim = stride.min(map.height());
-    let data = map.as_mut_slice();
+    debug_assert_eq!(data.len(), width * height);
+    let stride = width;
+    let dim = stride.min(height);
     for s in 0..dim {
         for q in 0..s {
             // (row=s, col=q): row > col → LOWER triangle (filled by kernel).

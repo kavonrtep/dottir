@@ -72,7 +72,7 @@ pub fn sliding_window_pass(
     pixel_fac: u32,
     direction: Direction,
     self_comp: bool,
-    out: &mut PixelMap,
+    out: &PixelMap,
 ) {
     sliding_window_pass_chunked(
         score_vec,
@@ -105,7 +105,7 @@ pub fn sliding_window_pass_chunked(
     direction: Direction,
     self_comp: bool,
     s_emit_range: std::ops::Range<usize>,
-    out: &mut PixelMap,
+    out: &PixelMap,
 ) {
     let qlen = score_vec.qlen;
     let slen = subject_encoded.len();
@@ -244,7 +244,7 @@ fn emit_pixel(
     zoom: usize,
     pixel_fac: u32,
     direction: Direction,
-    out: &mut PixelMap,
+    out: &PixelMap,
 ) {
     // C uses `incrementVal*win2` for the subject offset. Forward: subtract
     // win2; reverse: add win2 (since incrementVal = -1).
