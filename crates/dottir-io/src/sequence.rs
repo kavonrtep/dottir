@@ -1,4 +1,4 @@
-//! Record-aware sequence model (REVIEW.md finding #3 / A3).
+//! Record-aware sequence model (docs/REVIEW.md finding #3 / A3).
 //!
 //! The CLI / GUI used to call [`crate::fasta::concatenate`] right after
 //! parsing and threw away the record metadata, which made spec §4.4.6
@@ -80,7 +80,7 @@ impl Sequence {
     }
 
     /// Load a FASTA file (plain or gzipped) into a [`Sequence`]. Single
-    /// disk read (REVIEW.md finding #6 / A4).
+    /// disk read (docs/REVIEW.md finding #6 / A4).
     pub fn load<P: AsRef<Path>>(
         path: P,
     ) -> Result<Self, crate::fasta::FastaError> {

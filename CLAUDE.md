@@ -15,7 +15,7 @@ sensitivity control. Three goals, in priority order:
 3. New features for repeat-oriented genome analysis (GFF3 overlays, PAF HSP
    overlays, region/alignment export, inverted-repeat highlighting).
 
-Authoritative spec: `dottir_specification.md` at repo root. RFC-2119
+Authoritative spec: `docs/dottir_specification.md`. RFC-2119
 MUST/SHOULD/MAY language applies — treat MUST items in §4.1 as load-bearing
 for scientific correctness.
 
@@ -144,9 +144,12 @@ CI matrix: Linux x86_64 + Windows x86_64. macOS optional. WASM as a separate
 
 ## Documents in this repo
 
-- `dottir_specification.md` — the contract. Read §4 (requirements) before
-  starting any non-trivial task.
-- `IMPLEMENTATION_PLAN.md` — phased task breakdown.
+- `docs/dottir_specification.md` — the contract. Read §4 (requirements)
+  before starting any non-trivial task.
+- `docs/IMPLEMENTATION_PLAN.md` — phased task breakdown.
+- `docs/IMPROVEMENTS_PLAN.md` — follow-up plan addressing the review.
+- `docs/REVIEW.md` — external code review.
+- `docs/CHANGELOG.md` — per-release notes.
 - `docs/adr/` — decisions that deviate from spec defaults or resolve §10 open
   questions. Create one when answering: name/license/FASTA-lib/pixelmap
   container/alignment-on-the-fly choices.

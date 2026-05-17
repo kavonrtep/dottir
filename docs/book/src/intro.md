@@ -49,7 +49,7 @@ priority order:
 ## What's pending
 
 See [Architecture decisions](./adr.md) for context. The remaining
-spec items are tracked in `IMPROVEMENTS_PLAN.md` at the repo root:
+spec items are tracked in `docs/IMPROVEMENTS_PLAN.md`:
 
 * GFF3 / PAF annotation track overlays.
 * SVG / PDF / `.dot` exports.

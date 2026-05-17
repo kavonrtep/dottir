@@ -90,11 +90,12 @@ the [CLI page](./docs/book/src/cli.md) /
 - [User manual](./docs/book/src/intro.md) (mdBook): installation,
   CLI/GUI reference, algorithm overview, score matrices,
   reproducibility format.
-- [Spec](./dottir_specification.md) and
-  [implementation plan](./IMPLEMENTATION_PLAN.md): what's
+- [Spec](./docs/dottir_specification.md) and
+  [implementation plan](./docs/IMPLEMENTATION_PLAN.md): what's
   guaranteed, what's planned.
-- [Improvements plan](./IMPROVEMENTS_PLAN.md): progress against
-  [REVIEW.md](./REVIEW.md) findings.
+- [Improvements plan](./docs/IMPROVEMENTS_PLAN.md): progress against
+  [REVIEW.md](./docs/REVIEW.md) findings.
+- [Changelog](./docs/CHANGELOG.md): per-release notes.
 - [Architecture decisions](./docs/adr/): MADR records.
 
 ## License

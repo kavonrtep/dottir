@@ -27,4 +27,4 @@ Add or update tests alongside behavior changes. Use crate-local tests for fast c
 Recent history uses short, imperative subjects with scoped prefixes such as `Phase 5: ...` or `chore: ...`. Follow that style: keep the subject specific and include context in the body when needed. Pull requests should explain the change, list validation performed, and call out any algorithmic impact. GUI changes should include screenshots or a brief screen recording. Core algorithm changes should mention any ADR updates and golden-file regeneration.
 
 ## Agent-Specific Instructions
-Before changing algorithmic behavior, read `dottir_specification.md` and `CLAUDE.md`. For `dottir-core`, prioritize determinism and scientific correctness over convenience. Do not introduce new dependencies lightly; prefer the workspace’s existing crates unless there is a clear justification.
+Before changing algorithmic behavior, read `docs/dottir_specification.md` and `CLAUDE.md`. For `dottir-core`, prioritize determinism and scientific correctness over convenience. Do not introduce new dependencies lightly; prefer the workspace’s existing crates unless there is a clear justification.

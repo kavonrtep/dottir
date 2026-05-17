@@ -1,6 +1,6 @@
 //! `dottir-gui` — interactive frontend (egui/eframe).
 //!
-//! Phase 5 MVP per IMPLEMENTATION_PLAN.md §5:
+//! Phase 5 MVP per docs/IMPLEMENTATION_PLAN.md §5:
 //!
 //! * Top-level eframe app skeleton.
 //! * Dotplot canvas as a textured quad with pan + scroll-zoom.

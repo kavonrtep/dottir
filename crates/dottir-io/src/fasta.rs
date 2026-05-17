@@ -52,7 +52,7 @@ pub fn read_fasta_file<P: AsRef<Path>>(path: P) -> Result<Vec<FastaRecord>, Fast
 /// Result of [`load_fasta_file`]: the parsed records plus the raw
 /// on-disk bytes. Callers that want to hash the input file for a
 /// params sidecar can use `bytes` rather than re-reading the file
-/// (REVIEW.md finding #6 / A4).
+/// (docs/REVIEW.md finding #6 / A4).
 #[derive(Debug, Clone)]
 pub struct LoadedFasta {
     pub records: Vec<FastaRecord>,

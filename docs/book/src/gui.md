@@ -70,7 +70,7 @@ Behind **View → Settings…**. Changes recompute the dotplot.
 ## Out of scope (this release)
 
 These were called out in the spec but aren't shipped yet — see the
-[ADR index](./adr.md) and `IMPROVEMENTS_PLAN.md`:
+[ADR index](./adr.md) and `docs/IMPROVEMENTS_PLAN.md`:
 
 * GFF3 / PAF annotation track overlays.
 * Recompute-on-zoom-settle for sub-pixel detail.

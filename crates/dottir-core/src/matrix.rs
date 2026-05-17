@@ -550,7 +550,7 @@ fn parse_rows(
         }
     }
     // Every cell of the canonical n×n submatrix must be present —
-    // silent fill-with-default was the bug REVIEW.md called out.
+    // silent fill-with-default was the bug docs/REVIEW.md called out.
     for r in 0..n {
         for c in 0..n {
             if scores[r * n + c].is_none() {

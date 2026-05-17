@@ -50,6 +50,6 @@ cargo build --release
 
 ## From a release binary
 
-Pending Phase 9 of `IMPLEMENTATION_PLAN.md`. The GitHub Actions
+Pending Phase 9 of `docs/IMPLEMENTATION_PLAN.md`. The GitHub Actions
 release workflow at `.github/workflows/release.yml` produces static
 Linux + Windows artifacts on tag push.
