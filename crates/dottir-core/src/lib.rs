@@ -32,6 +32,7 @@ pub mod pixel;
 pub mod plot;
 pub mod score_vec;
 pub mod sliding;
+pub mod translation;
 
 pub use error::DottirError;
 pub use karlin::{karlin_window_size, KarlinConfig, KarlinResult};

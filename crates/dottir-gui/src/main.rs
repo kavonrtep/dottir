@@ -100,6 +100,7 @@ struct Cli {
 enum ModeArg {
     Blastn,
     Blastp,
+    Blastx,
 }
 
 impl ModeArg {
@@ -107,6 +108,7 @@ impl ModeArg {
         match self {
             ModeArg::Blastn => BlastMode::Blastn,
             ModeArg::Blastp => BlastMode::Blastp,
+            ModeArg::Blastx => BlastMode::Blastx,
         }
     }
 }

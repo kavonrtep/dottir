@@ -115,9 +115,9 @@ fn memory_limit_enforced() {
     assert!(s.contains("memory_limit"), "got: {s}");
 }
 
-/// BLASTX is still NotImplemented (Phase 2-extra).
+/// BLASTX rejects a DNA matrix (it needs BLOSUM/PAM).
 #[test]
-fn blastx_returns_not_implemented_error() {
+fn blastx_rejects_dna_matrix() {
     use dottir_core::BlastMode;
     let q = b"ACGTACGTACGT";
     let s = b"MKTAYIAKQRQI";
@@ -125,6 +125,57 @@ fn blastx_returns_not_implemented_error() {
     cfg.mode = BlastMode::Blastx;
     cfg.window_size = Some(3);
     assert!(compute_dotplot(q, s, &cfg).is_err());
+}
+
+/// BLASTX three-frame: a DNA query encoding a protein in frame 0
+/// matched against that same protein lights up the main diagonal.
+#[test]
+fn blastx_three_frame_finds_protein_match() {
+    use dottir_core::BlastMode;
+    // 60 bp encoding `MKLMKLM...` in frame 0.
+    let q: Vec<u8> = (0..20)
+        .flat_map(|i| match i % 4 {
+            0 => b"ATG".to_vec(), // M
+            1 => b"AAA".to_vec(), // K
+            2 => b"CTG".to_vec(), // L
+            _ => b"ATG".to_vec(), // M
+        })
+        .collect();
+    let s = b"MKLMKLMKLMKLMKLMKLMK".to_vec();
+
+    let mut cfg = PlotConfig::default_blastp(ScoreMatrix::blosum62());
+    cfg.mode = BlastMode::Blastx;
+    cfg.window_size = Some(5);
+    cfg.zoom = 1;
+    cfg.pixel_fac = 80;
+
+    let plot = compute_dotplot(&q, &s, &cfg).unwrap();
+    assert_eq!(plot.width, 20);
+    assert_eq!(plot.height, 20);
+
+    let w = cfg.window_size.unwrap() as usize;
+    let mut diag_hits = 0;
+    for i in w..plot.width as usize {
+        if plot.pixels[i * plot.width as usize + i] > 0 {
+            diag_hits += 1;
+        }
+    }
+    assert!(
+        diag_hits > 5,
+        "BLASTX diagonal too dark: {diag_hits} of {}",
+        plot.width as usize - w
+    );
+}
+
+/// Empty or too-short DNA query for BLASTX returns a clear error.
+#[test]
+fn blastx_too_short_query_errors() {
+    use dottir_core::BlastMode;
+    let mut cfg = PlotConfig::default_blastp(ScoreMatrix::blosum62());
+    cfg.mode = BlastMode::Blastx;
+    cfg.window_size = Some(3);
+    let err = compute_dotplot(b"AT", b"MKLM", &cfg).unwrap_err();
+    assert!(format!("{err}").contains("BLASTX"));
 }
 
 /// BLASTP + reverse strand is meaningless and returns InvalidConfig.

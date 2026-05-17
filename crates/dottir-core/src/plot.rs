@@ -173,9 +173,7 @@ pub fn compute_dotplot(
         return Err(DottirError::InvalidConfig("pixel_fac must be >= 1".into()));
     }
     if config.mode == BlastMode::Blastx {
-        return Err(DottirError::NotImplemented(
-            "BLASTX three-frame translation — Phase 2-extra",
-        ));
+        return compute_blastx(query, subject, config);
     }
     if config.self_comparison && query.len() != subject.len() {
         return Err(DottirError::InvalidConfig(
@@ -438,6 +436,104 @@ fn run_pass(
             out,
         );
     }
+}
+
+/// BLASTX: translate the DNA query in three forward reading frames,
+/// run the protein kernel against each, and max-merge into a single
+/// pixelmap. Subject is already in protein space. Self-comparison and
+/// reverse-strand options don't apply to BLASTX (the C dotter
+/// short-circuits the strand machinery for this mode).
+fn compute_blastx(
+    query: &[u8],
+    subject: &[u8],
+    config: &PlotConfig,
+) -> Result<DotPlot, DottirError> {
+    if config.matrix.kind != crate::alphabet::AlphabetKind::Protein {
+        return Err(DottirError::InvalidMatrix(
+            "BLASTX requires a protein score matrix (BLOSUM/PAM)".into(),
+        ));
+    }
+    // Karlin estimate uses the translated frame-0 sequence vs the
+    // protein subject — matches the C dotter's BLASTX choice of
+    // pepQSeqLen for Karlin (it calls winsizeFromlambdak on frame 0).
+    let frame0 = crate::translation::translate_frame(query, 0);
+    if frame0.is_empty() {
+        return Err(DottirError::InvalidConfig(
+            "BLASTX query is too short to translate (<3 bases)".into(),
+        ));
+    }
+    let (window, karlin_result) = match config.window_size {
+        Some(w) => (w, None),
+        None => {
+            let r = karlin_window_size(
+                &config.matrix,
+                &frame0,
+                subject,
+                BlastMode::Blastp,
+            )?;
+            (r.window_size, Some(r))
+        }
+    };
+    if window < 1 {
+        return Err(DottirError::InvalidConfig(
+            "window size must be >= 1".into(),
+        ));
+    }
+
+    // Each frame has length ⌈(qlen − f) / 3⌉; the C dotter sizes the
+    // image to pepQSeqLen = qlen / 3. Match that. Frames whose
+    // translated length is shorter just emit nothing past their tip.
+    let pepqlen = query.len() / 3;
+    let alpha = crate::alphabet::AlphabetKind::Protein;
+    let s_encoded = crate::alphabet::encode(subject, alpha);
+    let width = image_dimension(pepqlen, config.zoom);
+    let height = image_dimension(subject.len(), config.zoom);
+    let pixmap =
+        PixelMap::new_checked(width, height, config.memory_limit_bytes)?;
+
+    for frame_offset in 0..3 {
+        let translated = crate::translation::translate_frame(query, frame_offset);
+        if translated.is_empty() {
+            continue;
+        }
+        let translated_padded = if translated.len() < pepqlen {
+            // Pad with SENTINEL so the score vector has consistent
+            // width across frames. The padding columns score 0 against
+            // any subject residue (the unknown-residue zero row in
+            // ScoreVec handles it).
+            let mut v = translated;
+            v.resize(pepqlen, crate::alphabet::SENTINEL);
+            v
+        } else {
+            translated
+        };
+        let q_encoded = crate::alphabet::encode(&translated_padded, alpha);
+        let score_vec = ScoreVec::build(&config.matrix, &q_encoded);
+        run_pass(
+            &score_vec,
+            &s_encoded,
+            window,
+            config.zoom,
+            config.pixel_fac,
+            Direction::Forward,
+            false, // self-comparison not supported for BLASTX
+            &pixmap,
+        );
+    }
+
+    Ok(DotPlot {
+        width,
+        height,
+        pixels: pixmap.into_vec(),
+        forward_pixels: None,
+        reverse_pixels: None,
+        params: PlotParams {
+            window_size: window,
+            zoom: config.zoom,
+            pixel_fac: config.pixel_fac,
+            karlin: karlin_result,
+        },
+    })
 }
 
 /// Post-process a self-comparison pixelmap according to [`Triangle`].

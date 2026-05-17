@@ -542,6 +542,7 @@ impl DottirApp {
                             for (m, label) in [
                                 (BlastMode::Blastn, "Blastn"),
                                 (BlastMode::Blastp, "Blastp"),
+                                (BlastMode::Blastx, "Blastx"),
                             ] {
                                 if ui
                                     .selectable_value(&mut self.settings.mode, m, label)
