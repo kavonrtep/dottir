@@ -2,13 +2,10 @@
 
 use std::path::PathBuf;
 
-use dottir_core::{
-    BlastMode, DotPlot, PlotConfig, ScoreMatrix, Strand, Triangle,
-};
+use dottir_core::{BlastMode, DotPlot, PlotConfig, ScoreMatrix, Strand, Triangle};
 use dottir_io::{DetectedAlphabet, Sequence};
 use egui::{
-    Color32, ColorImage, Context, Pos2, Rect, Sense, Slider, TextureHandle,
-    TextureOptions, Vec2,
+    Color32, ColorImage, Context, Pos2, Rect, Sense, Slider, TextureHandle, TextureOptions, Vec2,
 };
 
 /// Startup-time configuration assembled from CLI args, applied once
@@ -150,9 +147,17 @@ impl Greyramp {
             // Above `hi`: displayed as black (or white if swapped).
             // Between: linear ramp.
             let displayed = if i <= lo {
-                if self.swap { 0 } else { 255 }
+                if self.swap {
+                    0
+                } else {
+                    255
+                }
             } else if i >= hi {
-                if self.swap { 255 } else { 0 }
+                if self.swap {
+                    255
+                } else {
+                    0
+                }
             } else {
                 let span = (hi - lo) as f32;
                 let frac = (i - lo) as f32 / span;
@@ -307,8 +312,7 @@ impl DottirApp {
                 self.recompute();
             }
             Err(e) => {
-                self.last_error =
-                    Some(format!("failed to load {}: {e}", path.display()));
+                self.last_error = Some(format!("failed to load {}: {e}", path.display()));
             }
         }
     }
@@ -322,23 +326,17 @@ impl DottirApp {
     fn maybe_switch_mode_from_alphabet(&mut self, detected: DetectedAlphabet) {
         let want_protein = matches!(detected, DetectedAlphabet::Protein);
         let want_dna = matches!(detected, DetectedAlphabet::Dna);
-        let is_protein_mode = matches!(
-            self.settings.mode,
-            BlastMode::Blastp | BlastMode::Blastx
-        );
+        let is_protein_mode = matches!(self.settings.mode, BlastMode::Blastp | BlastMode::Blastx);
         if want_protein && !is_protein_mode {
             self.settings.mode = BlastMode::Blastp;
             self.settings.matrix_name = "BLOSUM62".into();
             self.settings.strand = Strand::Forward;
-            self.last_error = Some(
-                "Detected protein sequence — switched to BLASTP / BLOSUM62.".into(),
-            );
+            self.last_error =
+                Some("Detected protein sequence — switched to BLASTP / BLOSUM62.".into());
         } else if want_dna && is_protein_mode {
             self.settings.mode = BlastMode::Blastn;
             self.settings.matrix_name = "DNA+5/-4".into();
-            self.last_error = Some(
-                "Detected DNA sequence — switched to BLASTN.".into(),
-            );
+            self.last_error = Some("Detected DNA sequence — switched to BLASTN.".into());
         }
     }
 
@@ -359,10 +357,7 @@ impl DottirApp {
         let matrix = match self.settings.build_matrix() {
             Some(m) => m,
             None => {
-                self.last_error = Some(format!(
-                    "unknown matrix '{}'",
-                    self.settings.matrix_name
-                ));
+                self.last_error = Some(format!("unknown matrix '{}'", self.settings.matrix_name));
                 return;
             }
         };
@@ -421,24 +416,18 @@ impl DottirApp {
         if self.compute_in_flight {
             // Wait for the in-flight job to land before scheduling
             // another tier change.
-            ctx.request_repaint_after(std::time::Duration::from_millis(
-                ZOOM_SETTLE_MS,
-            ));
+            ctx.request_repaint_after(std::time::Duration::from_millis(ZOOM_SETTLE_MS));
             return;
         }
         if t.elapsed().as_millis() < ZOOM_SETTLE_MS as u128 {
             // Schedule another frame so we re-check after the
             // settle interval, even if no other event fires.
-            ctx.request_repaint_after(std::time::Duration::from_millis(
-                ZOOM_SETTLE_MS,
-            ));
+            ctx.request_repaint_after(std::time::Duration::from_millis(ZOOM_SETTLE_MS));
             return;
         }
 
         let current_zoom = self.settings.zoom.max(1);
-        let (new_zoom, scale) = if self.display_zoom >= ZOOM_IN_THRESHOLD
-            && current_zoom > 1
-        {
+        let (new_zoom, scale) = if self.display_zoom >= ZOOM_IN_THRESHOLD && current_zoom > 1 {
             // Zoomed in past 2× — recompute at a finer tier
             // (half the computation zoom, doubling pixelmap density).
             let n = (current_zoom / 2).max(1);
@@ -467,7 +456,7 @@ impl DottirApp {
         // same screen position. New pixelmap dims = old × (1/scale),
         // so view_offset (in pixelmap coords) scales by 1/scale.
         let inv = 1.0 / scale;
-        self.view_offset = self.view_offset * inv;
+        self.view_offset *= inv;
         self.display_zoom = 1.0;
         if let Some((cq, cs)) = self.crosshair {
             // Crosshair is in pixelmap coords; scale identically.
@@ -506,8 +495,7 @@ impl DottirApp {
                     self.last_error = None;
                 }
                 Err(e) => {
-                    self.last_error =
-                        Some(format!("compute_dotplot failed: {e}"));
+                    self.last_error = Some(format!("compute_dotplot failed: {e}"));
                 }
             }
         }
@@ -526,18 +514,21 @@ impl DottirApp {
         // grey and reverse in magenta (overlapping cells take
         // whichever channel is stronger after the greyramp).
         let mut rgba = Vec::with_capacity(plot.pixels.len() * 4);
-        match (plot.forward_pixels.as_deref(), plot.reverse_pixels.as_deref()) {
+        match (
+            plot.forward_pixels.as_deref(),
+            plot.reverse_pixels.as_deref(),
+        ) {
             (Some(fwd), Some(rev)) if self.settings.inverted_repeat_colour => {
                 for i in 0..plot.pixels.len() {
                     let f = lut[fwd[i] as usize]; // forward strength (0..255)
                     let r = lut[rev[i] as usize]; // reverse strength
-                    // Forward → black on white (so darker means more
-                    // confident); reverse channel uses magenta (255,
-                    // 0, 255).
-                    // Blend: take the channel with the highest "ink"
-                    // (= 255 - lut value, since white = 255 means
-                    // "no ink"). If forward wins, render greyscale; if
-                    // reverse wins, render magenta-tinted.
+                                                  // Forward → black on white (so darker means more
+                                                  // confident); reverse channel uses magenta (255,
+                                                  // 0, 255).
+                                                  // Blend: take the channel with the highest "ink"
+                                                  // (= 255 - lut value, since white = 255 means
+                                                  // "no ink"). If forward wins, render greyscale; if
+                                                  // reverse wins, render magenta-tinted.
                     let f_ink = 255 - f;
                     let r_ink = 255 - r;
                     let (cr, cg, cb) = if f_ink >= r_ink {
@@ -564,15 +555,9 @@ impl DottirApp {
                 }
             }
         }
-        let image = ColorImage::from_rgba_unmultiplied(
-            [plot.width as usize, plot.height as usize],
-            &rgba,
-        );
-        let handle = ctx.load_texture(
-            "dottir-pixelmap",
-            image,
-            TextureOptions::NEAREST,
-        );
+        let image =
+            ColorImage::from_rgba_unmultiplied([plot.width as usize, plot.height as usize], &rgba);
+        let handle = ctx.load_texture("dottir-pixelmap", image, TextureOptions::NEAREST);
         self.texture = Some(handle);
         self.texture_dirty = false;
     }
@@ -629,7 +614,10 @@ impl DottirApp {
         let mut s_i = s as i64;
         ctx.input(|i| {
             for ev in &i.events {
-                if let egui::Event::Key { key, pressed: true, .. } = ev {
+                if let egui::Event::Key {
+                    key, pressed: true, ..
+                } = ev
+                {
                     match key {
                         // Single-axis (original GUI behaviour).
                         egui::Key::ArrowLeft => {
@@ -706,8 +694,12 @@ impl DottirApp {
     /// search at ±64 pixelmap pixels around the current
     /// crosshair).
     fn snap_crosshair_to_line(&mut self) {
-        let Some(plot) = self.plot.as_ref() else { return };
-        let Some((cq, cs)) = self.crosshair else { return };
+        let Some(plot) = self.plot.as_ref() else {
+            return;
+        };
+        let Some((cq, cs)) = self.crosshair else {
+            return;
+        };
         const RADIUS: i64 = 64;
         let pw = plot.width as i64;
         let ph = plot.height as i64;
@@ -822,12 +814,12 @@ impl DottirApp {
                     ui.menu_button("Keyboard shortcuts…", |ui| {
                         let style = egui::FontId::monospace(11.0);
                         for (keys, desc) in [
-                            ("← → ↑ ↓",   "nudge crosshair (Shift ×10, Ctrl ×100)"),
-                            (",   .",      "step along main diagonal"),
-                            ("[   ]",      "step along anti-diagonal"),
-                            ("Space",      "snap crosshair to nearest strong dot"),
-                            ("scroll",     "zoom on cursor"),
-                            ("drag",       "pan"),
+                            ("← → ↑ ↓", "nudge crosshair (Shift ×10, Ctrl ×100)"),
+                            (",   .", "step along main diagonal"),
+                            ("[   ]", "step along anti-diagonal"),
+                            ("Space", "snap crosshair to nearest strong dot"),
+                            ("scroll", "zoom on cursor"),
+                            ("drag", "pan"),
                         ] {
                             ui.horizontal(|ui| {
                                 ui.label(
@@ -924,13 +916,10 @@ impl DottirApp {
                 ui.add_space(2.0);
                 ui.label(egui::RichText::new("LUT").size(10.0));
                 let lut = self.greyramp.lut();
-                let (rect, _) = ui.allocate_exact_size(
-                    Vec2::new(ui.available_width(), 20.0),
-                    Sense::hover(),
-                );
+                let (rect, _) =
+                    ui.allocate_exact_size(Vec2::new(ui.available_width(), 20.0), Sense::hover());
                 let painter = ui.painter();
-                for x in 0..256 {
-                    let g = lut[x];
+                for (x, &g) in lut.iter().enumerate() {
                     let xp = rect.left() + (x as f32 / 256.0) * rect.width();
                     let xw = (rect.width() / 256.0).max(1.0);
                     painter.rect_filled(
@@ -942,11 +931,7 @@ impl DottirApp {
                         Color32::from_gray(g),
                     );
                 }
-                painter.rect_stroke(
-                    rect,
-                    0.0,
-                    egui::Stroke::new(1.0, Color32::from_gray(120)),
-                );
+                painter.rect_stroke(rect, 0.0, egui::Stroke::new(1.0, Color32::from_gray(120)));
             });
     }
 
@@ -991,8 +976,8 @@ impl DottirApp {
                             .selected_text(&self.settings.matrix_name)
                             .show_ui(ui, |ui| {
                                 for name in [
-                                    "BLOSUM45", "BLOSUM50", "BLOSUM62", "BLOSUM80",
-                                    "BLOSUM90", "PAM30", "PAM70", "PAM250",
+                                    "BLOSUM45", "BLOSUM50", "BLOSUM62", "BLOSUM80", "BLOSUM90",
+                                    "PAM30", "PAM70", "PAM250",
                                 ] {
                                     if ui
                                         .selectable_value(
@@ -1055,11 +1040,7 @@ impl DottirApp {
                             (Strand::Both, "Both"),
                         ] {
                             if ui
-                                .selectable_value(
-                                    &mut self.settings.strand,
-                                    val,
-                                    label,
-                                )
+                                .selectable_value(&mut self.settings.strand, val, label)
                                 .changed()
                             {
                                 changed = true;
@@ -1118,11 +1099,7 @@ impl DottirApp {
                             (Triangle::Lower, "Lower"),
                         ] {
                             if ui
-                                .selectable_value(
-                                    &mut self.settings.triangle,
-                                    val,
-                                    label,
-                                )
+                                .selectable_value(&mut self.settings.triangle, val, label)
                                 .changed()
                             {
                                 changed = true;
@@ -1148,11 +1125,11 @@ impl DottirApp {
                         changed = true;
                     }
                 });
-                ui.weak(format!(
+                ui.weak(
                     "Refuses to allocate a pixelmap larger than this. \
                      1 GiB suits ~32k × 32k at zoom 1. Halve the cap when \
-                     zoom doubles."
-                ));
+                     zoom doubles.",
+                );
                 ui.separator();
                 if ui.button("Apply").clicked() {
                     changed = true;
@@ -1179,9 +1156,7 @@ impl DottirApp {
                 if let Some(plot) = &self.plot {
                     ui.label(format!(
                         "pixelmap {}×{}, W={}",
-                        plot.width,
-                        plot.height,
-                        plot.params.window_size
+                        plot.width, plot.height, plot.params.window_size
                     ));
                     if let Some((q, s)) = self.crosshair {
                         let idx = (s as usize) * (plot.width as usize) + (q as usize);
@@ -1236,8 +1211,12 @@ impl DottirApp {
                     ui.label("Alignment view: click on the plot to set the crosshair.");
                     return;
                 };
-                let Some(q_seq) = self.query.as_ref() else { return };
-                let Some(s_seq) = self.subject.as_ref() else { return };
+                let Some(q_seq) = self.query.as_ref() else {
+                    return;
+                };
+                let Some(s_seq) = self.subject.as_ref() else {
+                    return;
+                };
 
                 // Centre coordinates in *residue* space (translate
                 // pixelmap coords back through the kernel zoom).
@@ -1265,16 +1244,24 @@ impl DottirApp {
                     );
                 });
 
-                let window =
-                    self.settings.align_window_size.clamp(20, 400) as usize;
+                let window = self.settings.align_window_size.clamp(20, 400) as usize;
                 let half = window / 2;
                 let q_bytes = q_seq.bytes();
                 let s_bytes = s_seq.bytes();
                 let matrix = self.settings.build_matrix();
 
                 // Forward (+/+) alignment columns.
-                let forward_block =
-                    build_align_columns(q_bytes, s_bytes, q_centre, s_centre, half, window, false, matrix.as_ref(), self.settings.mode);
+                let forward_block = build_align_columns(
+                    q_bytes,
+                    s_bytes,
+                    q_centre,
+                    s_centre,
+                    half,
+                    window,
+                    false,
+                    matrix.as_ref(),
+                    self.settings.mode,
+                );
 
                 // Reverse (+/-) alignment columns. BLASTN only —
                 // proteins have no reverse strand. Compares
@@ -1283,8 +1270,15 @@ impl DottirApp {
                 // backwards while complementing).
                 let reverse_block = if self.settings.mode == BlastMode::Blastn {
                     Some(build_align_columns(
-                        q_bytes, s_bytes, q_centre, s_centre, half, window,
-                        true, matrix.as_ref(), self.settings.mode,
+                        q_bytes,
+                        s_bytes,
+                        q_centre,
+                        s_centre,
+                        half,
+                        window,
+                        true,
+                        matrix.as_ref(),
+                        self.settings.mode,
                     ))
                 } else {
                     None
@@ -1292,9 +1286,11 @@ impl DottirApp {
 
                 // Header continuation: Copy button.
                 ui.horizontal(|ui| {
-                    if ui.button("Copy").on_hover_text(
-                        "Copy the alignment block to clipboard as plain text",
-                    ).clicked() {
+                    if ui
+                        .button("Copy")
+                        .on_hover_text("Copy the alignment block to clipboard as plain text")
+                        .clicked()
+                    {
                         let text = format_alignment_clipboard(
                             &forward_block,
                             reverse_block.as_ref(),
@@ -1336,8 +1332,16 @@ impl DottirApp {
             // is `rect` with these margins removed. Multi-record
             // FASTAs need extra space for the record-name label
             // strip above the tick labels.
-            let multi_q = self.query.as_ref().map(|q| q.records.len() > 1).unwrap_or(false);
-            let multi_s = self.subject.as_ref().map(|s| s.records.len() > 1).unwrap_or(false);
+            let multi_q = self
+                .query
+                .as_ref()
+                .map(|q| q.records.len() > 1)
+                .unwrap_or(false);
+            let multi_s = self
+                .subject
+                .as_ref()
+                .map(|s| s.records.len() > 1)
+                .unwrap_or(false);
             let top_margin: f32 = if multi_q { 44.0 } else { 24.0 };
             let left_margin: f32 = if multi_s { 70.0 } else { 56.0 };
             let plot_area = Rect::from_min_max(
@@ -1362,10 +1366,8 @@ impl DottirApp {
                         let cursor_local = cursor - plot_area.left_top();
                         let world_under_cursor =
                             self.view_offset + cursor_local / self.display_zoom;
-                        self.display_zoom =
-                            (self.display_zoom * factor).clamp(0.1, 100.0);
-                        self.view_offset =
-                            world_under_cursor - cursor_local / self.display_zoom;
+                        self.display_zoom = (self.display_zoom * factor).clamp(0.1, 100.0);
+                        self.view_offset = world_under_cursor - cursor_local / self.display_zoom;
                         // Stamp for the C2 zoom-settle recompute trigger.
                         self.last_zoom_event = Some(std::time::Instant::now());
                     }
@@ -1410,11 +1412,7 @@ impl DottirApp {
                         let world = self.view_offset + local / self.display_zoom;
                         let q = world.x.floor() as i64;
                         let s = world.y.floor() as i64;
-                        if q >= 0
-                            && q < plot.width as i64
-                            && s >= 0
-                            && s < plot.height as i64
-                        {
+                        if q >= 0 && q < plot.width as i64 && s >= 0 && s < plot.height as i64 {
                             self.crosshair = Some((q as u32, s as u32));
                         }
                     }
@@ -1424,18 +1422,15 @@ impl DottirApp {
             // Fill the whole canvas (margins + plot area) with light
             // grey first. The margin band is left as-is; the plot
             // area gets the texture painted over it.
-            ui.painter()
-                .rect_filled(rect, 0.0, Color32::from_gray(235));
+            ui.painter().rect_filled(rect, 0.0, Color32::from_gray(235));
 
             // Compute on-screen rect for the pixelmap, then render
             // it. Clip to `plot_area` so over-pan doesn't leak the
             // texture into the margin.
             let plot_screen_w = pw * self.display_zoom;
             let plot_screen_h = ph * self.display_zoom;
-            let plot_screen_x =
-                plot_area.left() - self.view_offset.x * self.display_zoom;
-            let plot_screen_y =
-                plot_area.top() - self.view_offset.y * self.display_zoom;
+            let plot_screen_x = plot_area.left() - self.view_offset.x * self.display_zoom;
+            let plot_screen_y = plot_area.top() - self.view_offset.y * self.display_zoom;
             let plot_rect = Rect::from_min_size(
                 Pos2::new(plot_screen_x, plot_screen_y),
                 Vec2::new(plot_screen_w, plot_screen_h),
@@ -1473,7 +1468,10 @@ impl DottirApp {
                         continue;
                     }
                     clip_painter.line_segment(
-                        [Pos2::new(sx, plot_area.top()), Pos2::new(sx, plot_area.bottom())],
+                        [
+                            Pos2::new(sx, plot_area.top()),
+                            Pos2::new(sx, plot_area.bottom()),
+                        ],
                         break_stroke,
                     );
                 }
@@ -1490,7 +1488,10 @@ impl DottirApp {
                         continue;
                     }
                     clip_painter.line_segment(
-                        [Pos2::new(plot_area.left(), sy), Pos2::new(plot_area.right(), sy)],
+                        [
+                            Pos2::new(plot_area.left(), sy),
+                            Pos2::new(plot_area.right(), sy),
+                        ],
                         break_stroke,
                     );
                 }
@@ -1503,17 +1504,23 @@ impl DottirApp {
             // Crosshair overlay + coord label — clipped to the plot
             // area so the lines never run into the axis margin.
             if let Some((cq, cs)) = self.crosshair {
-                let cx = plot_area.left()
-                    + ((cq as f32 + 0.5) - self.view_offset.x) * self.display_zoom;
-                let cy = plot_area.top()
-                    + ((cs as f32 + 0.5) - self.view_offset.y) * self.display_zoom;
+                let cx =
+                    plot_area.left() + ((cq as f32 + 0.5) - self.view_offset.x) * self.display_zoom;
+                let cy =
+                    plot_area.top() + ((cs as f32 + 0.5) - self.view_offset.y) * self.display_zoom;
                 let stroke = egui::Stroke::new(1.0, Color32::from_rgb(255, 80, 80));
                 clip_painter.line_segment(
-                    [Pos2::new(plot_area.left(), cy), Pos2::new(plot_area.right(), cy)],
+                    [
+                        Pos2::new(plot_area.left(), cy),
+                        Pos2::new(plot_area.right(), cy),
+                    ],
                     stroke,
                 );
                 clip_painter.line_segment(
-                    [Pos2::new(cx, plot_area.top()), Pos2::new(cx, plot_area.bottom())],
+                    [
+                        Pos2::new(cx, plot_area.top()),
+                        Pos2::new(cx, plot_area.bottom()),
+                    ],
                     stroke,
                 );
 
@@ -1597,8 +1604,7 @@ impl DottirApp {
         let label_y = tick_baseline_y - 16.0; // text top
         let span_x = seq_q_hi.saturating_sub(seq_q_lo) as f32;
         let pixels_per_residue_x = self.display_zoom / zoom_us;
-        let step_x =
-            nice_tick_step(span_x as f64, MIN_LABEL_SPACING_PX / pixels_per_residue_x);
+        let step_x = nice_tick_step(span_x as f64, MIN_LABEL_SPACING_PX / pixels_per_residue_x);
         let mut t = (seq_q_lo / step_x as u64) * step_x as u64;
         while t < seq_q_hi.saturating_add(step_x as u64) {
             if t >= seq_q_lo && t <= seq_q_hi {
@@ -1638,15 +1644,12 @@ impl DottirApp {
         let tick_baseline_x = plot_area.left();
         let label_x = tick_baseline_x - 8.0; // text right edge
         let span_y = seq_s_hi.saturating_sub(seq_s_lo) as f32;
-        let step_y = nice_tick_step(
-            span_y as f64,
-            MIN_LABEL_SPACING_PX / pixels_per_residue_x,
-        );
+        let step_y = nice_tick_step(span_y as f64, MIN_LABEL_SPACING_PX / pixels_per_residue_x);
         let mut t = (seq_s_lo / step_y as u64) * step_y as u64;
         while t < seq_s_hi.saturating_add(step_y as u64) {
             if t >= seq_s_lo && t <= seq_s_hi {
-                let sy = plot_area.top()
-                    + (t as f32 / zoom_us - self.view_offset.y) * self.display_zoom;
+                let sy =
+                    plot_area.top() + (t as f32 / zoom_us - self.view_offset.y) * self.display_zoom;
                 if sy < plot_area.top() - 1.0 || sy > plot_area.bottom() + 1.0 {
                     t = t.saturating_add(step_y as u64);
                     if step_y == 0.0 {
@@ -1691,17 +1694,14 @@ impl DottirApp {
                         continue;
                     }
                     let x0 = plot_area.left()
-                        + (r_start as f32 / zoom_us - self.view_offset.x)
-                            * self.display_zoom;
+                        + (r_start as f32 / zoom_us - self.view_offset.x) * self.display_zoom;
                     let x1 = plot_area.left()
-                        + (r_end as f32 / zoom_us - self.view_offset.x)
-                            * self.display_zoom;
+                        + (r_end as f32 / zoom_us - self.view_offset.x) * self.display_zoom;
                     let span = (x1 - x0).max(0.0);
                     if span < 18.0 {
                         continue;
                     }
-                    let cx = ((x0 + x1) * 0.5)
-                        .clamp(plot_area.left(), plot_area.right());
+                    let cx = ((x0 + x1) * 0.5).clamp(plot_area.left(), plot_area.right());
                     painter.text(
                         Pos2::new(cx, rec_y),
                         egui::Align2::CENTER_TOP,
@@ -1722,17 +1722,14 @@ impl DottirApp {
                         continue;
                     }
                     let y0 = plot_area.top()
-                        + (r_start as f32 / zoom_us - self.view_offset.y)
-                            * self.display_zoom;
+                        + (r_start as f32 / zoom_us - self.view_offset.y) * self.display_zoom;
                     let y1 = plot_area.top()
-                        + (r_end as f32 / zoom_us - self.view_offset.y)
-                            * self.display_zoom;
+                        + (r_end as f32 / zoom_us - self.view_offset.y) * self.display_zoom;
                     let span = (y1 - y0).max(0.0);
                     if span < 14.0 {
                         continue;
                     }
-                    let cy = ((y0 + y1) * 0.5)
-                        .clamp(plot_area.top(), plot_area.bottom());
+                    let cy = ((y0 + y1) * 0.5).clamp(plot_area.top(), plot_area.bottom());
                     painter.text(
                         Pos2::new(rec_x, cy),
                         egui::Align2::LEFT_CENTER,
@@ -1831,7 +1828,12 @@ fn build_align_columns(
             score = sc_val;
             c
         };
-        cols.push(AlignColumn { q: qc, s: sc, class, score });
+        cols.push(AlignColumn {
+            q: qc,
+            s: sc,
+            class,
+            score,
+        });
     }
     // Row coordinates: 1-based first/last residue indices for the
     // query and subject rows. For +/- the subject row is *displayed*
@@ -1881,8 +1883,7 @@ fn draw_align_block(ui: &mut egui::Ui, ctx: &Context, block: &AlignBlock) {
     // 3 alignment rows + 1 caret row above.
     let caret_h = 10.0;
     let total_h = caret_h + row_h * 3.0;
-    let (rect, _) =
-        ui.allocate_exact_size(Vec2::new(total_w, total_h), Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(total_w, total_h), Sense::hover());
     let painter = ui.painter_at(rect);
 
     let bg_identity = Color32::from_rgb(0x9c, 0xdc, 0x7b);
@@ -1899,7 +1900,10 @@ fn draw_align_block(ui: &mut egui::Ui, ctx: &Context, block: &AlignBlock) {
     let alignment_top = rect.top() + caret_h;
     let strand_label = if block.reverse { "+/-" } else { "+/+" };
     painter.text(
-        Pos2::new(rect.left() + strand_label_w * 0.5, alignment_top + 1.5 * row_h),
+        Pos2::new(
+            rect.left() + strand_label_w * 0.5,
+            alignment_top + 1.5 * row_h,
+        ),
         egui::Align2::CENTER_CENTER,
         strand_label,
         egui::FontId::monospace(11.0),
@@ -1970,17 +1974,8 @@ fn draw_align_block(ui: &mut egui::Ui, ctx: &Context, block: &AlignBlock) {
 
     for (i, col) in block.cols.iter().enumerate() {
         let x = cols_left + i as f32 * glyph_w;
-        let bg = column_background(
-            col,
-            bg_identity,
-            bg_strong,
-            bg_weak,
-            bg_oob,
-        );
-        let r0 = Rect::from_min_size(
-            Pos2::new(x, alignment_top),
-            Vec2::new(glyph_w, row_h),
-        );
+        let bg = column_background(col, bg_identity, bg_strong, bg_weak, bg_oob);
+        let r0 = Rect::from_min_size(Pos2::new(x, alignment_top), Vec2::new(glyph_w, row_h));
         if let Some(c) = bg {
             painter.rect_filled(r0, 0.0, c);
         }
@@ -2108,11 +2103,13 @@ fn format_alignment_clipboard(
 
 fn write_align_block_text(out: &mut String, block: &AlignBlock) {
     use std::fmt::Write as _;
-    let q: String = block.cols
+    let q: String = block
+        .cols
         .iter()
         .map(|c| char_to_string(c.q, c.class, true))
         .collect();
-    let m: String = block.cols
+    let m: String = block
+        .cols
         .iter()
         .map(|c| match c.class {
             MatchClass::Identical => "|",
@@ -2120,13 +2117,22 @@ fn write_align_block_text(out: &mut String, block: &AlignBlock) {
             _ => " ",
         })
         .collect();
-    let s: String = block.cols
+    let s: String = block
+        .cols
         .iter()
         .map(|c| char_to_string(c.s, c.class, false))
         .collect();
-    let _ = writeln!(out, "query    5' {:>8} {} {:<8} 3'", block.q_start, q, block.q_end);
+    let _ = writeln!(
+        out,
+        "query    5' {:>8} {} {:<8} 3'",
+        block.q_start, q, block.q_end
+    );
     let _ = writeln!(out, "                    {}", m);
-    let _ = writeln!(out, "subject  5' {:>8} {} {:<8} 3'", block.s_start, s, block.s_end);
+    let _ = writeln!(
+        out,
+        "subject  5' {:>8} {} {:<8} 3'",
+        block.s_start, s, block.s_end
+    );
 }
 
 /// Match class used by the alignment dock to colour columns.
@@ -2422,7 +2428,9 @@ fn save_svg(app: &mut DottirApp) {
 }
 
 fn save_session(app: &mut DottirApp) {
-    use crate::session::{codec, Session, SessionGreyramp, SessionPlot, SessionView, SESSION_VERSION};
+    use crate::session::{
+        codec, Session, SessionGreyramp, SessionPlot, SessionView, SESSION_VERSION,
+    };
     let session = Session {
         version: SESSION_VERSION,
         query: app.query.as_ref().and_then(|s| s.source_path.clone()),
@@ -2559,4 +2567,3 @@ fn save_png(app: &mut DottirApp) {
         }
     }
 }
-

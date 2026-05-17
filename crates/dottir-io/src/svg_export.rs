@@ -78,7 +78,10 @@ pub fn write_svg<P: AsRef<Path>>(
     // string, so we use `write!` with `{}` placeholders rather than
     // raw strings (raw-string delimiters interact badly with the
     // literal `"#` in `fill="#222"`).
-    writeln!(w, "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\"?>")?;
+    writeln!(
+        w,
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\"?>"
+    )?;
     writeln!(
         w,
         "<svg xmlns=\"http://www.w3.org/2000/svg\" \
@@ -91,11 +94,7 @@ pub fn write_svg<P: AsRef<Path>>(
     if !metadata.is_empty() {
         writeln!(w, "  <metadata>")?;
         for (k, v) in metadata {
-            writeln!(
-                w,
-                "    <dottir:{k}>{}</dottir:{k}>",
-                xml_escape(v)
-            )?;
+            writeln!(w, "    <dottir:{k}>{}</dottir:{k}>", xml_escape(v))?;
         }
         writeln!(w, "  </metadata>")?;
     }
@@ -285,8 +284,7 @@ mod tests {
     fn dimension_mismatch_errors() {
         let dir = std::env::temp_dir();
         let path = dir.join("dottir_svg_test_mismatch.svg");
-        let err =
-            write_svg(&path, 10, 10, &[0_u8; 50], 30, &[], &[], &[]).unwrap_err();
+        let err = write_svg(&path, 10, 10, &[0_u8; 50], 30, &[], &[], &[]).unwrap_err();
         assert!(matches!(err, SvgError::DimensionMismatch { .. }));
     }
 

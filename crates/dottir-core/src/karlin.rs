@@ -20,6 +20,15 @@
 //!   Statistical Significance of Molecular Sequence Features by Using
 //!   General Scoring Schemes." PNAS 87, 2264–2268.
 //! * `dotterApp/dotterKarlin.c:144` (`karlin`), `:343` (`winsizeFromlambdak`).
+//!
+//! ## Lints
+//!
+//! `needless_range_loop` is allowed for the doubly-nested matrix walks —
+//! the C source uses the same `for (i = 0; i < n; ++i)` shape and a
+//! pair of `matrix.get(i, j)` calls reads more naturally than the
+//! enumerated-iterator alternative when both indices are used.
+
+#![allow(clippy::needless_range_loop)]
 
 use crate::alphabet::{encode_dna, encode_protein, SENTINEL};
 use crate::error::DottirError;
@@ -49,7 +58,11 @@ pub struct KarlinConfig {
 
 impl Default for KarlinConfig {
     fn default() -> Self {
-        Self { min_window: 3, max_window: 50, nominal_matrix_dim: NOMINAL_MATRIX_DIM }
+        Self {
+            min_window: 3,
+            max_window: 50,
+            nominal_matrix_dim: NOMINAL_MATRIX_DIM,
+        }
     }
 }
 
@@ -240,7 +253,10 @@ fn residue_frequencies(
         return Err(DottirError::NoScorableResidues);
     }
     let denom = total as f64;
-    Ok((counts.into_iter().map(|c| c as f64 / denom).collect(), total))
+    Ok((
+        counts.into_iter().map(|c| c as f64 / denom).collect(),
+        total,
+    ))
 }
 
 /// The Karlin/Altschul λ/K/H solver.
@@ -276,7 +292,9 @@ fn karlin(low: i64, high: i64, pr: &mut [f64]) -> Result<(f64, f64, f64), Dottir
     let mut sum_raw = 0.0_f64;
     for &v in pr.iter() {
         if v < 0.0 {
-            return Err(DottirError::KarlinFailure("negative score probability".into()));
+            return Err(DottirError::KarlinFailure(
+                "negative score probability".into(),
+            ));
         }
         sum_raw += v;
     }
@@ -338,7 +356,11 @@ fn karlin(low: i64, high: i64, pr: &mut [f64]) -> Result<(f64, f64, f64), Dottir
     // -------------------------------------------------------------- K ---
     // Short-circuit cases from the C source.
     if low == -1 || high == 1 {
-        let mut k = if high == 1 { av } else { s_expected * s_expected / av };
+        let mut k = if high == 1 {
+            av
+        } else {
+            s_expected * s_expected / av
+        };
         k *= 1.0 - 1.0 / beta;
         return Ok((lambda, k, h));
     }
@@ -360,7 +382,7 @@ fn karlin(low: i64, high: i64, pr: &mut [f64]) -> Result<(f64, f64, f64), Dottir
         // Walk the running window: lo += low, hi += high (low is negative).
         lo += low;
         hi += high;
-        let p_top = (hi - lo) as i64; // index of the last element written this iteration
+        let p_top = hi - lo; // index of the last element written this iteration
 
         // Inner DP: for each output position from p_top down to 0,
         //   big_p[k] = Σ big_p[k - first..=k - first - (last-first)] * p[first..=last]
@@ -484,6 +506,13 @@ fn karlin(low: i64, high: i64, pr: &mut [f64]) -> Result<(f64, f64, f64), Dottir
 /// `exp(x) - 1`. We use this rather than [`f64::exp_m1`] because the
 /// libm implementation is correctly rounded but a different bit pattern
 /// from the C reference — and Karlin K is sensitive to that last ULP.
+//
+// `rustfmt::skip`: the 13-deep Horner nest below triggers exponential
+// time in rustfmt 1.9.0 (the function never returns). The expression
+// is a verbatim port of the C reference and we preserve its shape
+// anyway, so skipping the formatter here is both a workaround and the
+// right call on its own merits.
+#[rustfmt::skip]
 fn fct_expm1(x: f64) -> f64 {
     let absx = if x < 0.0 { -x } else { x };
     if absx > 0.33 {
@@ -550,7 +579,11 @@ mod tests {
         let s = b"GTGTACGAGCATCGTCTACTGAGCTACGTATCGATCGTAGCTACGATG".repeat(40);
         let m = ScoreMatrix::dna_identity();
         let res = karlin_window_size(&m, &q, &s, BlastMode::Blastn).unwrap();
-        assert!(res.lambda > 0.0, "lambda must be positive, got {}", res.lambda);
+        assert!(
+            res.lambda > 0.0,
+            "lambda must be positive, got {}",
+            res.lambda
+        );
         assert!(res.k > 0.0, "k must be positive, got {}", res.k);
         assert!(res.h > 0.0, "h must be positive, got {}", res.h);
         assert!(
@@ -570,7 +603,11 @@ mod tests {
                   AREAFEQLLDKLEEHLRYAEELQEKFAKLERELAEHRLEEIEGRLAQAEEEFVEQHRRLENEL";
         let m = ScoreMatrix::blosum62();
         let res = karlin_window_size(&m, q, s, BlastMode::Blastp).unwrap();
-        assert!(res.lambda > 0.1 && res.lambda < 1.0, "lambda={}", res.lambda);
+        assert!(
+            res.lambda > 0.1 && res.lambda < 1.0,
+            "lambda={}",
+            res.lambda
+        );
         assert!(res.k > 0.0 && res.k < 1.0, "k={}", res.k);
         assert!(
             (3..=50).contains(&res.window_size),
@@ -599,8 +636,8 @@ mod tests {
     fn matrix_mode_mismatch_errors() {
         // Pass a DNA matrix in blastp mode.
         let m = ScoreMatrix::dna_identity();
-        let err = karlin_window_size(&m, b"ACDEFGHIK", b"ACDEFGHIK", BlastMode::Blastp)
-            .unwrap_err();
+        let err =
+            karlin_window_size(&m, b"ACDEFGHIK", b"ACDEFGHIK", BlastMode::Blastp).unwrap_err();
         assert!(matches!(err, DottirError::InvalidMatrix(_)));
     }
 

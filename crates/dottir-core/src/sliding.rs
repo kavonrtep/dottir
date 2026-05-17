@@ -202,11 +202,7 @@ pub fn sliding_window_pass_chunked(
             // get the same gate locally.
             let s_valid = iter_idx >= w;
             // C self-comp cap: `qmax = min(sIdx + 1, pepQSeqLen)`.
-            let q_end = if self_comp {
-                qlen.min(s + 1)
-            } else {
-                qlen
-            };
+            let q_end = if self_comp { qlen.min(s + 1) } else { qlen };
 
             for q in w..q_end {
                 let new_val = oldsum[q - 1] + add_row[q] - del_row[q - w];

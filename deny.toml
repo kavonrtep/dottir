@@ -10,8 +10,11 @@ targets = [
 
 [licenses]
 # dottir is GPL-3.0-or-later (ADR 0002). Allow only GPL-compatible deps.
-unlicensed = "deny"
-copyleft = "allow"
+# Note: `unlicensed` and `copyleft` keys were removed in cargo-deny 0.16
+# (EmbarkStudios/cargo-deny#611). The new model is "license must be in
+# `allow` OR an explicit exception" — so the copyleft GPL/MPL licenses
+# we want stay in the list below, and an unknown / no-license crate is
+# rejected by default.
 allow = [
     "MIT",
     "Apache-2.0",

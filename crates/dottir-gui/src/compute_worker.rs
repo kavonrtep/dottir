@@ -80,7 +80,11 @@ impl ComputeWorker {
                 }
             })
             .expect("spawn compute worker thread");
-        Self { request_tx, result_rx, _handle: handle }
+        Self {
+            request_tx,
+            result_rx,
+            _handle: handle,
+        }
     }
 
     /// Dispatch a new request. Returns the id assigned. Never blocks.

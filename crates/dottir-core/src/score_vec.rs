@@ -118,7 +118,7 @@ mod tests {
         assert_eq!(sv.row(1), &[-4, 5, -4, -4]); // subject C
         assert_eq!(sv.row(2), &[-4, -4, 5, -4]); // subject G
         assert_eq!(sv.row(3), &[-4, -4, -4, 5]); // subject T
-        // Row 4 (unknown) is all zero.
+                                                 // Row 4 (unknown) is all zero.
         assert_eq!(sv.row(4), &[0, 0, 0, 0]);
     }
 

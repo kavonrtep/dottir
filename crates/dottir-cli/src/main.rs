@@ -10,14 +10,12 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 
 use dottir_core::{
-    compute_dotplot, BlastMode, PlotConfig, ScoreMatrix, Strand, Triangle,
-    PIXELMAP_FORMAT_VERSION,
+    compute_dotplot, BlastMode, PlotConfig, ScoreMatrix, Strand, Triangle, PIXELMAP_FORMAT_VERSION,
 };
 use dottir_io::{
     fasta,
     params::{
-        sha256_bytes, ParamsSidecar, DottirInfo, HostInfo, InputInfo,
-        KarlinInfo, PlotParamsInfo,
+        sha256_bytes, DottirInfo, HostInfo, InputInfo, KarlinInfo, ParamsSidecar, PlotParamsInfo,
     },
     png_export,
 };
@@ -212,10 +210,8 @@ fn run_batch(args: BatchArgs) -> Result<()> {
     tracing::info!("reading query  {}", args.query.display());
     let query_loaded = fasta::load_fasta_file(&args.query)
         .with_context(|| format!("reading query {}", args.query.display()))?;
-    let query = dottir_io::Sequence::from_records(
-        query_loaded.records.clone(),
-        Some(args.query.clone()),
-    );
+    let query =
+        dottir_io::Sequence::from_records(query_loaded.records.clone(), Some(args.query.clone()));
 
     tracing::info!("reading subject {}", args.subject.display());
     let subject_loaded = fasta::load_fasta_file(&args.subject)
@@ -229,7 +225,7 @@ fn run_batch(args: BatchArgs) -> Result<()> {
     let zoom = match args.auto_zoom {
         Some(target) => {
             let max_dim = query.len().max(subject.len()) as u32;
-            ((max_dim + target - 1) / target).max(1)
+            max_dim.div_ceil(target).max(1)
         }
         None => args.zoom,
     };
@@ -274,8 +270,8 @@ fn run_batch(args: BatchArgs) -> Result<()> {
         args.window,
         zoom
     );
-    let plot = compute_dotplot(query.bytes(), subject.bytes(), &cfg)
-        .context("compute_dotplot failed")?;
+    let plot =
+        compute_dotplot(query.bytes(), subject.bytes(), &cfg).context("compute_dotplot failed")?;
     tracing::info!(
         "wrote pixelmap {}x{} ({} bytes)",
         plot.width,
@@ -287,18 +283,18 @@ fn run_batch(args: BatchArgs) -> Result<()> {
     let dottir_version = env!("CARGO_PKG_VERSION");
     let resolved = format!(
         "mode={:?};matrix={};W={};zoom={};pixel_fac={};strand={:?}",
-        cfg.mode, cfg.matrix.name, plot.params.window_size, cfg.zoom,
-        cfg.pixel_fac, cfg.strand
+        cfg.mode, cfg.matrix.name, plot.params.window_size, cfg.zoom, cfg.pixel_fac, cfg.strand
     );
     let text_chunks = [
         ("dottir-version", dottir_version),
-        ("dottir-pixelmap-format-version", &PIXELMAP_FORMAT_VERSION.to_string()),
+        (
+            "dottir-pixelmap-format-version",
+            &PIXELMAP_FORMAT_VERSION.to_string(),
+        ),
         ("dottir-parameters", &resolved),
     ];
-    let text_chunk_refs: Vec<(&str, &str)> = text_chunks
-        .iter()
-        .map(|(a, b)| (*a, *b as &str))
-        .collect();
+    let text_chunk_refs: Vec<(&str, &str)> =
+        text_chunks.iter().map(|(a, b)| (*a, *b as &str)).collect();
 
     // Resize the pixelmap to the requested PNG width (preserving
     // aspect ratio). `--width 0` is the opt-out. Cap at a generous
@@ -307,25 +303,21 @@ fn run_batch(args: BatchArgs) -> Result<()> {
     const MAX_PNG_WIDTH: u32 = 16384;
     let requested_w = args.width.min(MAX_PNG_WIDTH);
     if requested_w != args.width {
-        tracing::warn!(
-            "PNG width {} clamped to {MAX_PNG_WIDTH}",
-            args.width
-        );
+        tracing::warn!("PNG width {} clamped to {MAX_PNG_WIDTH}", args.width);
     }
     let (png_pixels, png_w, png_h) = if requested_w > 0 {
-        dottir_io::text_overlay::resize_nearest(
-            &plot.pixels,
-            plot.width,
-            plot.height,
-            requested_w,
-        )
+        dottir_io::text_overlay::resize_nearest(&plot.pixels, plot.width, plot.height, requested_w)
     } else {
         (plot.pixels.clone(), plot.width, plot.height)
     };
     if png_w != plot.width {
         tracing::info!(
             "PNG resized {}×{} → {}×{} (--width {})",
-            plot.width, plot.height, png_w, png_h, args.width
+            plot.width,
+            plot.height,
+            png_w,
+            png_h,
+            args.width
         );
     }
     // Coord-space dims for axis labels are the sequence lengths
@@ -339,20 +331,24 @@ fn run_batch(args: BatchArgs) -> Result<()> {
     let axis_records_x: Vec<dottir_io::text_overlay::AxisRecord> = query
         .records
         .iter()
-        .map(|r| dottir_io::text_overlay::AxisRecord::new(
-            r.id.clone(),
-            r.range.start as u32,
-            r.range.end as u32,
-        ))
+        .map(|r| {
+            dottir_io::text_overlay::AxisRecord::new(
+                r.id.clone(),
+                r.range.start as u32,
+                r.range.end as u32,
+            )
+        })
         .collect();
     let axis_records_y: Vec<dottir_io::text_overlay::AxisRecord> = subject
         .records
         .iter()
-        .map(|r| dottir_io::text_overlay::AxisRecord::new(
-            r.id.clone(),
-            r.range.start as u32,
-            r.range.end as u32,
-        ))
+        .map(|r| {
+            dottir_io::text_overlay::AxisRecord::new(
+                r.id.clone(),
+                r.range.start as u32,
+                r.range.end as u32,
+            )
+        })
         .collect();
     // Larger margin when we have record names to draw, so the extra
     // label row above the ticks has breathing room.
@@ -481,8 +477,9 @@ fn pick_matrix(name: Option<&str>, mode: BlastMode) -> Result<ScoreMatrix> {
                 anyhow::bail!("matrix {n:?} not valid for BLASTN — use DNA+5/-4")
             }
         }
-        (Some(n), _) => ScoreMatrix::by_name(n)
-            .ok_or_else(|| anyhow::anyhow!("unknown matrix {n:?}")),
+        (Some(n), _) => {
+            ScoreMatrix::by_name(n).ok_or_else(|| anyhow::anyhow!("unknown matrix {n:?}"))
+        }
     }
 }
 

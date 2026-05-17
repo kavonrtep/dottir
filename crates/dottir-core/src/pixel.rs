@@ -59,7 +59,11 @@ impl PixelMap {
         }
         let mut data = Vec::with_capacity(n as usize);
         data.resize_with(n as usize, || AtomicU8::new(0));
-        Ok(Self { width, height, data })
+        Ok(Self {
+            width,
+            height,
+            data,
+        })
     }
 
     #[inline]
@@ -104,12 +108,7 @@ impl PixelMap {
         // synchronises via Arc::try_unwrap / &mut self anyway.
         let mut current = cell.load(Ordering::Relaxed);
         while value > current {
-            match cell.compare_exchange_weak(
-                current,
-                value,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            ) {
+            match cell.compare_exchange_weak(current, value, Ordering::Relaxed, Ordering::Relaxed) {
                 Ok(_) => break,
                 Err(observed) => current = observed,
             }
@@ -119,7 +118,10 @@ impl PixelMap {
     /// Snapshot the buffer to an owned `Vec<u8>` without consuming the
     /// pixelmap. Used by tests for inspection.
     pub fn to_vec(&self) -> Vec<u8> {
-        self.data.iter().map(|a| a.load(Ordering::Relaxed)).collect()
+        self.data
+            .iter()
+            .map(|a| a.load(Ordering::Relaxed))
+            .collect()
     }
 }
 
@@ -141,7 +143,7 @@ pub fn merge_max_into(dst: &mut [u8], src: &[u8]) {
 /// `ceil(seq_len / zoom)`.
 pub fn image_dimension(seq_len: usize, zoom: u32) -> u32 {
     let zoom = zoom.max(1) as usize;
-    ((seq_len + zoom - 1) / zoom) as u32
+    seq_len.div_ceil(zoom) as u32
 }
 
 #[cfg(test)]

@@ -32,6 +32,7 @@ pub enum SliceFormat {
 /// `min(window*2 + 1, qlen - q_lo, slen - s_lo)`, where
 /// `lo = max(0, idx - window)`. The caller can recover the alignment of
 /// the slice in the original sequence coordinates from `q_lo` / `s_lo`.
+#[allow(clippy::too_many_arguments)]
 pub fn slice_pair(
     q_full: &[u8],
     s_full: &[u8],
@@ -71,11 +72,30 @@ pub struct SlicedAlignment {
     pub text: String,
 }
 
-fn format_fasta_pair(q_name: &str, q: &[u8], s_name: &str, s: &[u8], q_lo: usize, s_lo: usize) -> String {
+fn format_fasta_pair(
+    q_name: &str,
+    q: &[u8],
+    s_name: &str,
+    s: &[u8],
+    q_lo: usize,
+    s_lo: usize,
+) -> String {
     let mut out = String::new();
-    let _ = writeln!(out, ">{q_name}:{}..{} (length {})", q_lo + 1, q_lo + q.len(), q.len());
+    let _ = writeln!(
+        out,
+        ">{q_name}:{}..{} (length {})",
+        q_lo + 1,
+        q_lo + q.len(),
+        q.len()
+    );
     out.push_str(&wrap_fasta_seq(q, 60));
-    let _ = writeln!(out, ">{s_name}:{}..{} (length {})", s_lo + 1, s_lo + s.len(), s.len());
+    let _ = writeln!(
+        out,
+        ">{s_name}:{}..{} (length {})",
+        s_lo + 1,
+        s_lo + s.len(),
+        s.len()
+    );
     out.push_str(&wrap_fasta_seq(s, 60));
     out
 }

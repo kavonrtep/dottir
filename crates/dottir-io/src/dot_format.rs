@@ -150,20 +150,14 @@ impl DotFile {
         w.write_all(&(self.height as i32).to_le_bytes())?;
         w.write_all(&self.pixel_fac.unwrap_or(50).to_le_bytes())?;
         w.write_all(&self.sliding_window_size.unwrap_or(25).to_le_bytes())?;
-        let name = self
-            .matrix_name
-            .as_deref()
-            .unwrap_or("UNKNOWN");
+        let name = self.matrix_name.as_deref().unwrap_or("UNKNOWN");
         let name_bytes = name.as_bytes();
         if name_bytes.len() > MAX_MATRIX_NAME_LENGTH {
             return Err(DotError::MatrixNameTooLong(name_bytes.len() as u32));
         }
         w.write_all(&(name_bytes.len() as i32).to_le_bytes())?;
         w.write_all(name_bytes)?;
-        let matrix = self
-            .matrix
-            .clone()
-            .unwrap_or_else(|| vec![0_i32; 24 * 24]);
+        let matrix = self.matrix.clone().unwrap_or_else(|| vec![0_i32; 24 * 24]);
         for v in matrix.iter().take(24 * 24) {
             w.write_all(&v.to_le_bytes())?;
         }
@@ -213,7 +207,7 @@ mod tests {
             pixel_fac: Some(60),
             sliding_window_size: Some(20),
             matrix_name: Some("TOY".into()),
-            matrix: Some((0..(24 * 24)).map(|i| i as i32).collect()),
+            matrix: Some((0..(24 * 24)).collect()),
             pixels: vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
         }
     }

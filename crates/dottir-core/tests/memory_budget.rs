@@ -33,10 +33,8 @@ where
 /// A non-trivial input that's large enough to trigger chunking
 /// (the driver only splits when slen >= window*64).
 fn make_input() -> (Vec<u8>, Vec<u8>) {
-    let q = b"AAACCCGGGTAACTGAACCTTAGGCAAATTTGGCCAAGGTTACAACTGAACCTTAGGCAAATTTGGCC"
-        .repeat(48); // ~3.2 kb
-    let s = b"TAACTGAACCTTAGGCAAATTTGGCCAAGGTTAAACCCGGGTAACTGAACCTTAGGCAAATTTGGCCAA"
-        .repeat(48);
+    let q = b"AAACCCGGGTAACTGAACCTTAGGCAAATTTGGCCAAGGTTACAACTGAACCTTAGGCAAATTTGGCC".repeat(48); // ~3.2 kb
+    let s = b"TAACTGAACCTTAGGCAAATTTGGCCAAGGTTAAACCCGGGTAACTGAACCTTAGGCAAATTTGGCCAA".repeat(48);
     (q, s)
 }
 

@@ -46,12 +46,20 @@ jobs:
     # Verify dottir-core compiles to wasm32 with rayon disabled. This is
     # the only piece we promise WASM compatibility for in this release
     # (the GUI is deferred per ADR 0003).
+    #
+    # `rust-toolchain.toml` pins the channel to 1.95.0, so the
+    # `dtolnay/rust-toolchain@stable` step's `targets:` add the wasm32
+    # std to the wrong toolchain (the latest `stable`). Add the target
+    # explicitly to the pinned toolchain after rustup has read the
+    # override file. Without this step the build fails with
+    # `error[E0463]: can't find crate for std`.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
+      - run: rustup target add wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
       - run: cargo check -p dottir-core --target wasm32-unknown-unknown --no-default-features --locked
 

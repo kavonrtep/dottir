@@ -38,51 +38,129 @@ fn glyph(c: char) -> Option<&'static [u8; FONT_H]> {
         c
     };
     // Each row is 5 bits; '1' means "ink", '0' means "background".
-    static G0: [u8; 7] = [0b01110, 0b10001, 0b10011, 0b10101, 0b11001, 0b10001, 0b01110];
-    static G1: [u8; 7] = [0b00100, 0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110];
-    static G2: [u8; 7] = [0b01110, 0b10001, 0b00001, 0b00010, 0b00100, 0b01000, 0b11111];
-    static G3: [u8; 7] = [0b11110, 0b00001, 0b00001, 0b01110, 0b00001, 0b00001, 0b11110];
-    static G4: [u8; 7] = [0b00010, 0b00110, 0b01010, 0b10010, 0b11111, 0b00010, 0b00010];
-    static G5: [u8; 7] = [0b11111, 0b10000, 0b11110, 0b00001, 0b00001, 0b10001, 0b01110];
-    static G6: [u8; 7] = [0b00110, 0b01000, 0b10000, 0b11110, 0b10001, 0b10001, 0b01110];
-    static G7: [u8; 7] = [0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b01000, 0b01000];
-    static G8: [u8; 7] = [0b01110, 0b10001, 0b10001, 0b01110, 0b10001, 0b10001, 0b01110];
-    static G9: [u8; 7] = [0b01110, 0b10001, 0b10001, 0b01111, 0b00001, 0b00010, 0b01100];
+    static G0: [u8; 7] = [
+        0b01110, 0b10001, 0b10011, 0b10101, 0b11001, 0b10001, 0b01110,
+    ];
+    static G1: [u8; 7] = [
+        0b00100, 0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110,
+    ];
+    static G2: [u8; 7] = [
+        0b01110, 0b10001, 0b00001, 0b00010, 0b00100, 0b01000, 0b11111,
+    ];
+    static G3: [u8; 7] = [
+        0b11110, 0b00001, 0b00001, 0b01110, 0b00001, 0b00001, 0b11110,
+    ];
+    static G4: [u8; 7] = [
+        0b00010, 0b00110, 0b01010, 0b10010, 0b11111, 0b00010, 0b00010,
+    ];
+    static G5: [u8; 7] = [
+        0b11111, 0b10000, 0b11110, 0b00001, 0b00001, 0b10001, 0b01110,
+    ];
+    static G6: [u8; 7] = [
+        0b00110, 0b01000, 0b10000, 0b11110, 0b10001, 0b10001, 0b01110,
+    ];
+    static G7: [u8; 7] = [
+        0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b01000, 0b01000,
+    ];
+    static G8: [u8; 7] = [
+        0b01110, 0b10001, 0b10001, 0b01110, 0b10001, 0b10001, 0b01110,
+    ];
+    static G9: [u8; 7] = [
+        0b01110, 0b10001, 0b10001, 0b01111, 0b00001, 0b00010, 0b01100,
+    ];
     static GDOT: [u8; 7] = [0, 0, 0, 0, 0, 0b00110, 0b00110];
-    static GM_LO: [u8; 7] = [0b10000, 0b10000, 0b10010, 0b10100, 0b11000, 0b10100, 0b10010]; // lowercase 'k' shape kept as legacy
+    static GM_LO: [u8; 7] = [
+        0b10000, 0b10000, 0b10010, 0b10100, 0b11000, 0b10100, 0b10010,
+    ]; // lowercase 'k' shape kept as legacy
     static GDASH: [u8; 7] = [0, 0, 0, 0b11111, 0, 0, 0];
     static GSPACE: [u8; 7] = [0; 7];
     static GUSCORE: [u8; 7] = [0, 0, 0, 0, 0, 0, 0b11111];
-    static GPIPE: [u8; 7] = [0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100];
+    static GPIPE: [u8; 7] = [
+        0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100,
+    ];
     static GCOLON: [u8; 7] = [0, 0b00110, 0b00110, 0, 0b00110, 0b00110, 0];
-    static GSLASH: [u8; 7] = [0b00001, 0b00010, 0b00010, 0b00100, 0b01000, 0b01000, 0b10000];
+    static GSLASH: [u8; 7] = [
+        0b00001, 0b00010, 0b00010, 0b00100, 0b01000, 0b01000, 0b10000,
+    ];
     // Uppercase A–Z.
-    static GA: [u8; 7] = [0b01110, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001];
-    static GB: [u8; 7] = [0b11110, 0b10001, 0b10001, 0b11110, 0b10001, 0b10001, 0b11110];
-    static GC: [u8; 7] = [0b01110, 0b10001, 0b10000, 0b10000, 0b10000, 0b10001, 0b01110];
-    static GD: [u8; 7] = [0b11100, 0b10010, 0b10001, 0b10001, 0b10001, 0b10010, 0b11100];
-    static GE: [u8; 7] = [0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b11111];
-    static GF: [u8; 7] = [0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b10000];
-    static GG: [u8; 7] = [0b01110, 0b10001, 0b10000, 0b10111, 0b10001, 0b10001, 0b01110];
-    static GH: [u8; 7] = [0b10001, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001];
-    static GI: [u8; 7] = [0b01110, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110];
-    static GJ: [u8; 7] = [0b00111, 0b00010, 0b00010, 0b00010, 0b00010, 0b10010, 0b01100];
-    static GK: [u8; 7] = [0b10001, 0b10010, 0b10100, 0b11000, 0b10100, 0b10010, 0b10001];
-    static GL: [u8; 7] = [0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b11111];
-    static GM: [u8; 7] = [0b10001, 0b11011, 0b10101, 0b10001, 0b10001, 0b10001, 0b10001];
-    static GN: [u8; 7] = [0b10001, 0b10001, 0b11001, 0b10101, 0b10011, 0b10001, 0b10001];
-    static GO: [u8; 7] = [0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110];
-    static GP: [u8; 7] = [0b11110, 0b10001, 0b10001, 0b11110, 0b10000, 0b10000, 0b10000];
-    static GQ: [u8; 7] = [0b01110, 0b10001, 0b10001, 0b10001, 0b10101, 0b10010, 0b01101];
-    static GR: [u8; 7] = [0b11110, 0b10001, 0b10001, 0b11110, 0b10100, 0b10010, 0b10001];
-    static GS: [u8; 7] = [0b01110, 0b10001, 0b10000, 0b01110, 0b00001, 0b10001, 0b01110];
-    static GT: [u8; 7] = [0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100];
-    static GU: [u8; 7] = [0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110];
-    static GV: [u8; 7] = [0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01010, 0b00100];
-    static GW: [u8; 7] = [0b10001, 0b10001, 0b10001, 0b10001, 0b10101, 0b10101, 0b01010];
-    static GX: [u8; 7] = [0b10001, 0b10001, 0b01010, 0b00100, 0b01010, 0b10001, 0b10001];
-    static GY: [u8; 7] = [0b10001, 0b10001, 0b10001, 0b01010, 0b00100, 0b00100, 0b00100];
-    static GZ: [u8; 7] = [0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b10000, 0b11111];
+    static GA: [u8; 7] = [
+        0b01110, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001,
+    ];
+    static GB: [u8; 7] = [
+        0b11110, 0b10001, 0b10001, 0b11110, 0b10001, 0b10001, 0b11110,
+    ];
+    static GC: [u8; 7] = [
+        0b01110, 0b10001, 0b10000, 0b10000, 0b10000, 0b10001, 0b01110,
+    ];
+    static GD: [u8; 7] = [
+        0b11100, 0b10010, 0b10001, 0b10001, 0b10001, 0b10010, 0b11100,
+    ];
+    static GE: [u8; 7] = [
+        0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b11111,
+    ];
+    static GF: [u8; 7] = [
+        0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b10000,
+    ];
+    static GG: [u8; 7] = [
+        0b01110, 0b10001, 0b10000, 0b10111, 0b10001, 0b10001, 0b01110,
+    ];
+    static GH: [u8; 7] = [
+        0b10001, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001,
+    ];
+    static GI: [u8; 7] = [
+        0b01110, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110,
+    ];
+    static GJ: [u8; 7] = [
+        0b00111, 0b00010, 0b00010, 0b00010, 0b00010, 0b10010, 0b01100,
+    ];
+    static GK: [u8; 7] = [
+        0b10001, 0b10010, 0b10100, 0b11000, 0b10100, 0b10010, 0b10001,
+    ];
+    static GL: [u8; 7] = [
+        0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b11111,
+    ];
+    static GM: [u8; 7] = [
+        0b10001, 0b11011, 0b10101, 0b10001, 0b10001, 0b10001, 0b10001,
+    ];
+    static GN: [u8; 7] = [
+        0b10001, 0b10001, 0b11001, 0b10101, 0b10011, 0b10001, 0b10001,
+    ];
+    static GO: [u8; 7] = [
+        0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110,
+    ];
+    static GP: [u8; 7] = [
+        0b11110, 0b10001, 0b10001, 0b11110, 0b10000, 0b10000, 0b10000,
+    ];
+    static GQ: [u8; 7] = [
+        0b01110, 0b10001, 0b10001, 0b10001, 0b10101, 0b10010, 0b01101,
+    ];
+    static GR: [u8; 7] = [
+        0b11110, 0b10001, 0b10001, 0b11110, 0b10100, 0b10010, 0b10001,
+    ];
+    static GS: [u8; 7] = [
+        0b01110, 0b10001, 0b10000, 0b01110, 0b00001, 0b10001, 0b01110,
+    ];
+    static GT: [u8; 7] = [
+        0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100,
+    ];
+    static GU: [u8; 7] = [
+        0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110,
+    ];
+    static GV: [u8; 7] = [
+        0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01010, 0b00100,
+    ];
+    static GW: [u8; 7] = [
+        0b10001, 0b10001, 0b10001, 0b10001, 0b10101, 0b10101, 0b01010,
+    ];
+    static GX: [u8; 7] = [
+        0b10001, 0b10001, 0b01010, 0b00100, 0b01010, 0b10001, 0b10001,
+    ];
+    static GY: [u8; 7] = [
+        0b10001, 0b10001, 0b10001, 0b01010, 0b00100, 0b00100, 0b00100,
+    ];
+    static GZ: [u8; 7] = [
+        0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b10000, 0b11111,
+    ];
     let _ = GM_LO; // legacy shape kept for parity; no character maps here
     match c {
         '0' => Some(&G0),
@@ -190,7 +268,11 @@ pub struct AxisRecord {
 
 impl AxisRecord {
     pub fn new(name: impl Into<String>, start: u32, end: u32) -> Self {
-        Self { name: name.into(), start, end }
+        Self {
+            name: name.into(),
+            start,
+            end,
+        }
     }
 }
 
@@ -210,6 +292,7 @@ impl AxisRecord {
 /// is also greyscale, with the same convention (0 = black ink,
 /// 255 = white). The caller is expected to have already applied any
 /// colour inversion / greyramp it wants.
+#[allow(clippy::too_many_arguments)]
 pub fn compose_image_with_axes(
     pixels: &[u8],
     plot_w: u32,
@@ -254,10 +337,12 @@ pub fn compose_image_with_axes(
     let coord_h_safe = coord_h.max(1);
     let px_per_coord_x = plot_w as f64 / coord_w_safe as f64;
     let px_per_coord_y = plot_h as f64 / coord_h_safe as f64;
-    let min_coord_step_x =
-        (60.0 / px_per_coord_x.max(f64::MIN_POSITIVE)).ceil().max(1.0) as u32;
-    let min_coord_step_y =
-        (60.0 / px_per_coord_y.max(f64::MIN_POSITIVE)).ceil().max(1.0) as u32;
+    let min_coord_step_x = (60.0 / px_per_coord_x.max(f64::MIN_POSITIVE))
+        .ceil()
+        .max(1.0) as u32;
+    let min_coord_step_y = (60.0 / px_per_coord_y.max(f64::MIN_POSITIVE))
+        .ceil()
+        .max(1.0) as u32;
     let step_x = nice_tick_step(coord_w_safe as u64, min_coord_step_x);
     let mut t = 0_u64;
     while t <= coord_w_safe as u64 {
@@ -265,12 +350,27 @@ pub fn compose_image_with_axes(
         if x >= stride_out {
             break;
         }
-        draw_vline(&mut canvas, stride_out, x, top.saturating_sub(5), top, frame_ink);
+        draw_vline(
+            &mut canvas,
+            stride_out,
+            x,
+            top.saturating_sub(5),
+            top,
+            frame_ink,
+        );
         let label = format_kb(t);
         let lw = text_width(&label);
         let lx = x.saturating_sub(lw / 2);
         let ly = top.saturating_sub(5 + FONT_H + 2);
-        draw_text(&mut canvas, stride_out, total_h as usize, lx, ly, &label, 30);
+        draw_text(
+            &mut canvas,
+            stride_out,
+            total_h as usize,
+            lx,
+            ly,
+            &label,
+            30,
+        );
         t = t.saturating_add(step_x);
     }
     // Left axis (subject).
@@ -281,12 +381,27 @@ pub fn compose_image_with_axes(
         if y >= total_h as usize {
             break;
         }
-        draw_hline(&mut canvas, stride_out, left.saturating_sub(5), left, y, frame_ink);
+        draw_hline(
+            &mut canvas,
+            stride_out,
+            left.saturating_sub(5),
+            left,
+            y,
+            frame_ink,
+        );
         let label = format_kb(t);
         let lw = text_width(&label);
         let lx = left.saturating_sub(5 + lw + 2);
         let ly = y.saturating_sub(FONT_H / 2);
-        draw_text(&mut canvas, stride_out, total_h as usize, lx, ly, &label, 30);
+        draw_text(
+            &mut canvas,
+            stride_out,
+            total_h as usize,
+            lx,
+            ly,
+            &label,
+            30,
+        );
         t = t.saturating_add(step_y);
     }
 
@@ -363,7 +478,7 @@ fn draw_axis_record_labels_x(
         let x0 = plot_left + (start as f64 * px_per_coord).round() as usize;
         let x1 = plot_left + (end as f64 * px_per_coord).round() as usize;
         let span = x1.saturating_sub(x0);
-        let max_chars = if FONT_ADVANCE > 0 { span / FONT_ADVANCE } else { 0 };
+        let max_chars = span.checked_div(FONT_ADVANCE).unwrap_or(0);
         if max_chars < 3 {
             continue;
         }
@@ -395,8 +510,7 @@ fn draw_axis_record_labels_y(
     // they don't collide with the tick labels (which sit a bit to
     // the right). Truncate to the available char count between
     // x=2 and the tick-label area.
-    let avail_chars =
-        plot_left.saturating_sub(5 + 4 * FONT_ADVANCE + 2) / FONT_ADVANCE;
+    let avail_chars = plot_left.saturating_sub(5 + 4 * FONT_ADVANCE + 2) / FONT_ADVANCE;
     for r in records {
         if r.end <= r.start || r.start >= coord_h {
             continue;
@@ -515,12 +629,7 @@ pub fn format_kb(n: u64) -> String {
 /// 6.97×; integer ceil gave 7× = 2009 px). Fractional NN is fine
 /// for dotplots — most pixels are 0 / 255 so block-quantisation is
 /// either invisible or the desired pixel-perfect look.
-pub fn resize_nearest(
-    pixels: &[u8],
-    src_w: u32,
-    src_h: u32,
-    dst_w: u32,
-) -> (Vec<u8>, u32, u32) {
+pub fn resize_nearest(pixels: &[u8], src_w: u32, src_h: u32, dst_w: u32) -> (Vec<u8>, u32, u32) {
     if dst_w == 0 || src_w == 0 || src_h == 0 {
         return (pixels.to_vec(), src_w, src_h);
     }
@@ -612,8 +721,7 @@ mod tests {
     #[test]
     fn compose_writes_pixelmap_into_interior() {
         let pixels = vec![100_u8; 4 * 3];
-        let (canvas, tw, th) =
-            compose_image_with_axes(&pixels, 4, 3, 4, 3, 10, &[], &[]);
+        let (canvas, tw, th) = compose_image_with_axes(&pixels, 4, 3, 4, 3, 10, &[], &[]);
         assert_eq!(tw, 24);
         assert_eq!(th, 23);
         // The interior pixel block should still read 100 (no
@@ -685,7 +793,7 @@ mod tests {
         assert_eq!((w, h), (5, 5));
         // Each output row maps to a single input row: row y maps to
         // input row (y * 10 / 5) = 2y. So out[2*5+0] should equal 4.
-        assert_eq!(out[2 * 5 + 0], 4);
+        assert_eq!(out[2 * 5], 4);
     }
 
     #[test]
@@ -695,7 +803,7 @@ mod tests {
         // through to the writer.
         let mut canvas = vec![255_u8; 20 * 10];
         draw_text(&mut canvas, 20, 10, 2, 1, "0", 0);
-        let any_dark = canvas.iter().any(|&v| v == 0);
+        let any_dark = canvas.contains(&0);
         assert!(any_dark, "draw_text did not emit any ink");
     }
 }

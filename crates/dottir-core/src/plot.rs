@@ -182,9 +182,7 @@ pub fn compute_dotplot(
     }
     // BLASTP only does a single forward pass; reverse-strand options
     // are meaningless on proteins.
-    if config.mode == BlastMode::Blastp
-        && matches!(config.strand, Strand::Reverse | Strand::Both)
-    {
+    if config.mode == BlastMode::Blastp && matches!(config.strand, Strand::Reverse | Strand::Both) {
         return Err(DottirError::InvalidConfig(
             "BLASTP only supports Strand::Forward (proteins have no reverse strand)".into(),
         ));
@@ -209,20 +207,18 @@ pub fn compute_dotplot(
     // axis sequence before computation. Only meaningful for BLASTN
     // (protein has no reverse strand). We do this on raw ASCII bytes
     // via reverse_complement_dna, then encode.
-    let query_buf: std::borrow::Cow<[u8]> = if config.reverse_query
-        && config.mode == BlastMode::Blastn
-    {
-        std::borrow::Cow::Owned(reverse_complement_dna(query))
-    } else {
-        std::borrow::Cow::Borrowed(query)
-    };
-    let subject_buf: std::borrow::Cow<[u8]> = if config.reverse_subject
-        && config.mode == BlastMode::Blastn
-    {
-        std::borrow::Cow::Owned(reverse_complement_dna(subject))
-    } else {
-        std::borrow::Cow::Borrowed(subject)
-    };
+    let query_buf: std::borrow::Cow<[u8]> =
+        if config.reverse_query && config.mode == BlastMode::Blastn {
+            std::borrow::Cow::Owned(reverse_complement_dna(query))
+        } else {
+            std::borrow::Cow::Borrowed(query)
+        };
+    let subject_buf: std::borrow::Cow<[u8]> =
+        if config.reverse_subject && config.mode == BlastMode::Blastn {
+            std::borrow::Cow::Owned(reverse_complement_dna(subject))
+        } else {
+            std::borrow::Cow::Borrowed(subject)
+        };
     let q_encoded = encode(&query_buf, alpha);
     let s_encoded_forward = encode(&subject_buf, alpha);
 
@@ -243,10 +239,10 @@ pub fn compute_dotplot(
     // Decide which passes to run. For BLASTN, Strand::Both = forward +
     // reverse; Strand::Forward = forward only; Strand::Reverse = reverse
     // only. For BLASTP, always Forward.
-    let do_forward = matches!(config.strand, Strand::Forward | Strand::Both)
-        || config.mode == BlastMode::Blastp;
-    let do_reverse = config.mode == BlastMode::Blastn
-        && matches!(config.strand, Strand::Reverse | Strand::Both);
+    let do_forward =
+        matches!(config.strand, Strand::Forward | Strand::Both) || config.mode == BlastMode::Blastp;
+    let do_reverse =
+        config.mode == BlastMode::Blastn && matches!(config.strand, Strand::Reverse | Strand::Both);
 
     if do_forward {
         run_pass(
@@ -389,8 +385,15 @@ fn run_pass(
         let min_for_parallel = (window as usize).saturating_mul(64).max(2048);
         if n_threads <= 1 || slen < min_for_parallel {
             sliding_window_pass_chunked(
-                score_vec, subject, window, zoom, pixel_fac, direction,
-                self_comp, 0..slen, out,
+                score_vec,
+                subject,
+                window,
+                zoom,
+                pixel_fac,
+                direction,
+                self_comp,
+                0..slen,
+                out,
             );
             return;
         }
@@ -465,12 +468,7 @@ fn compute_blastx(
     let (window, karlin_result) = match config.window_size {
         Some(w) => (w, None),
         None => {
-            let r = karlin_window_size(
-                &config.matrix,
-                &frame0,
-                subject,
-                BlastMode::Blastp,
-            )?;
+            let r = karlin_window_size(&config.matrix, &frame0, subject, BlastMode::Blastp)?;
             (r.window_size, Some(r))
         }
     };
@@ -488,8 +486,7 @@ fn compute_blastx(
     let s_encoded = crate::alphabet::encode(subject, alpha);
     let width = image_dimension(pepqlen, config.zoom);
     let height = image_dimension(subject.len(), config.zoom);
-    let pixmap =
-        PixelMap::new_checked(width, height, config.memory_limit_bytes)?;
+    let pixmap = PixelMap::new_checked(width, height, config.memory_limit_bytes)?;
 
     for frame_offset in 0..3 {
         let translated = crate::translation::translate_frame(query, frame_offset);

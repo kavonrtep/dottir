@@ -7,6 +7,13 @@
 //! from the C control flow was introduced; if a real algorithmic change is
 //! made, regenerate the goldens AND bump `PIXELMAP_FORMAT_VERSION` (see
 //! CLAUDE.md).
+//!
+//! The golden literals carry more decimal digits than an `f64` can
+//! represent — intentionally, to round-trip through whatever the C
+//! reference printed. `excessive_precision` is allowed here so the
+//! values stay byte-identical to the capture.
+
+#![allow(clippy::excessive_precision)]
 
 use dottir_core::karlin::{karlin_window_size, KarlinResult};
 use dottir_core::matrix::{BlastMode, ScoreMatrix};
@@ -78,10 +85,8 @@ fn dna_s1_long() -> Vec<u8> {
     seed.repeat(40)
 }
 
-const DNA_AT_VS_GC_Q: &[u8] =
-    b"AAAACCCGGGTTTAACAGCTAGCTACGATCGATCGATCGTAGCTAGCTAGCT";
-const DNA_AT_VS_GC_S: &[u8] =
-    b"TTTTGGGCCCAATTGCTAGCTACGATCGATCGATCGTAGCTAGCTAGCTACG";
+const DNA_AT_VS_GC_Q: &[u8] = b"AAAACCCGGGTTTAACAGCTAGCTACGATCGATCGATCGTAGCTAGCTAGCT";
+const DNA_AT_VS_GC_S: &[u8] = b"TTTTGGGCCCAATTGCTAGCTACGATCGATCGATCGTAGCTAGCTAGCTACG";
 
 const DNA_SELF: &[u8] = b"ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT";
 

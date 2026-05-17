@@ -46,10 +46,10 @@ mod tests {
         // Expected mask: true iff s_local >= q_local.
         let expected: [[bool; 4]; 4] = [
             // s = 0    1     2     3
-            [true,  true,  true,  true],  // q = 0
-            [false, true,  true,  true],  // q = 1
-            [false, false, true,  true],  // q = 2
-            [false, false, false, true],  // q = 3
+            [true, true, true, true],    // q = 0
+            [false, true, true, true],   // q = 1
+            [false, false, true, true],  // q = 2
+            [false, false, false, true], // q = 3
         ];
         for q in 0..zoom {
             for s in 0..zoom {
@@ -68,10 +68,10 @@ mod tests {
         let zoom = 4;
         let expected: [[bool; 4]; 4] = [
             // s = 0    1     2     3
-            [true,  true,  true,  true],  // q = 0
-            [true,  true,  true,  false], // q = 1
-            [true,  true,  false, false], // q = 2
-            [true,  false, false, false], // q = 3
+            [true, true, true, true],    // q = 0
+            [true, true, true, false],   // q = 1
+            [true, true, false, false],  // q = 2
+            [true, false, false, false], // q = 3
         ];
         for q in 0..zoom {
             for s in 0..zoom {

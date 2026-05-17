@@ -81,9 +81,7 @@ impl Sequence {
 
     /// Load a FASTA file (plain or gzipped) into a [`Sequence`]. Single
     /// disk read (docs/REVIEW.md finding #6 / A4).
-    pub fn load<P: AsRef<Path>>(
-        path: P,
-    ) -> Result<Self, crate::fasta::FastaError> {
+    pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, crate::fasta::FastaError> {
         let p = path.as_ref().to_path_buf();
         let records = crate::fasta::read_fasta_file(&p)?;
         Ok(Self::from_records(records, Some(p)))
@@ -119,9 +117,7 @@ impl Sequence {
     /// coordinates rather than the opaque concatenated offset.
     pub fn record_at(&self, coord: usize) -> Option<(&RecordSpan, usize)> {
         // Binary search by end; records are sorted by range.
-        let i = self
-            .records
-            .partition_point(|r| r.range.end <= coord);
+        let i = self.records.partition_point(|r| r.range.end <= coord);
         let r = self.records.get(i)?;
         if coord >= r.range.start && coord < r.range.end {
             Some((r, coord - r.range.start))
@@ -268,10 +264,7 @@ mod tests {
     #[test]
     fn detect_alphabet_recognises_dna_protein_and_empty() {
         assert_eq!(detect_alphabet(b""), DetectedAlphabet::Unknown);
-        assert_eq!(
-            detect_alphabet(b"ACGTACGTNACGT"),
-            DetectedAlphabet::Dna,
-        );
+        assert_eq!(detect_alphabet(b"ACGTACGTNACGT"), DetectedAlphabet::Dna,);
         // Real protein (P00533 prefix) — has K, T, I, etc.
         assert_eq!(
             detect_alphabet(b"MRPSGTAGAALLALLAALCPASRALEEKKVCQGTSNKLT"),

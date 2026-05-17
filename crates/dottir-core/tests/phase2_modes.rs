@@ -1,16 +1,14 @@
 //! Phase 2 integration tests: dual strand, BLASTP, self-comparison.
 
 use dottir_core::{
-    compute_dotplot, reverse_complement, BlastMode, PlotConfig, ScoreMatrix, Strand,
-    Triangle,
+    compute_dotplot, reverse_complement, BlastMode, PlotConfig, ScoreMatrix, Strand, Triangle,
 };
 
 /// Pick a sequence that is *not* self-reverse-complementary so the
 /// forward vs reverse passes produce visibly different plots. ACGT
 /// repeats are palindromic under reverse-complement, which makes them
 /// useless for these tests.
-const NONPAL_DNA: &[u8] =
-    b"AAACCCGGGTAACTGAACCTTAGGCAAATTTGGCCAAGGTTACAACTGAACCTTAGGCAAATTTGGCC";
+const NONPAL_DNA: &[u8] = b"AAACCCGGGTAACTGAACCTTAGGCAAATTTGGCCAAGGTTACAACTGAACCTTAGGCAAATTTGGCC";
 
 /// Both-strand BLASTN: query vs reverse_complement(query) should light
 /// up the anti-diagonal (a reverse-strand self-match).
@@ -74,8 +72,7 @@ fn reverse_only_skips_forward_diagonal() {
 /// diagonal at scores ≈ matrix diagonal sums.
 #[test]
 fn blastp_self_comparison_diagonal() {
-    let p = b"MKTAYIAKQRQISFVKSHFSRQLEERLGLIEVQAPILSRVGDGTQDNLSGAEKAVQVKVKAL"
-        .to_vec();
+    let p = b"MKTAYIAKQRQISFVKSHFSRQLEERLGLIEVQAPILSRVGDGTQDNLSGAEKAVQVKVKAL".to_vec();
     let mut cfg = PlotConfig::default_blastp(ScoreMatrix::blosum62());
     cfg.mode = BlastMode::Blastp;
     cfg.strand = Strand::Forward;

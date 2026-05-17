@@ -103,7 +103,7 @@ mod tests {
         // 7 bases → 2 codons in frame 0.
         let p = translate_frame(b"ATGGCATG", 0);
         assert_eq!(p, b"MA"); // ATG | GCA | "TG" dropped
-        // Frame 1: shift by 1, 6 usable bases → 2 codons.
+                              // Frame 1: shift by 1, 6 usable bases → 2 codons.
         let p = translate_frame(b"ATGGCATG", 1);
         assert_eq!(p, b"WH"); // TGG | CAT, last base dropped
     }
