@@ -8,7 +8,9 @@ source:
   # Build from the checkout the workflow already has. This keeps the
   # recipe self-contained and avoids the chicken-and-egg of needing
   # the GitHub release to exist before we can build the conda package.
-  path: ../..
+  # `path:` is relative to this meta.yaml; `recipe/` lives at the
+  # repo root so `..` is the workspace.
+  path: ..
 
 build:
   number: 0
