@@ -650,6 +650,29 @@ impl DottirApp {
                     });
                 }
 
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.label("Memory cap (MiB):");
+                    let mut mib: u32 = (self.settings.memory_limit_bytes / (1024 * 1024))
+                        .clamp(8, u32::MAX as u64) as u32;
+                    if ui
+                        .add(
+                            Slider::new(&mut mib, 8..=16_384)
+                                .logarithmic(true)
+                                .clamping(egui::SliderClamping::Always),
+                        )
+                        .changed()
+                    {
+                        self.settings.memory_limit_bytes = (mib as u64) * 1024 * 1024;
+                        changed = true;
+                    }
+                });
+                ui.weak(format!(
+                    "Refuses to allocate a pixelmap larger than this. \
+                     1 GiB suits ~32k × 32k at zoom 1. Halve the cap when \
+                     zoom doubles."
+                ));
+                ui.separator();
                 if ui.button("Apply").clicked() {
                     changed = true;
                 }
@@ -758,6 +781,53 @@ impl DottirApp {
             let uv = Rect::from_min_max(Pos2::new(u0, v0), Pos2::new(u1, v1));
             ui.painter().image(tex.id(), rect, uv, Color32::WHITE);
 
+            // C3: breaklines for multi-record FASTA inputs. Vertical
+            // lines at the query record boundaries; horizontal lines
+            // at the subject record boundaries. Drawn underneath the
+            // crosshair so it stays visible.
+            let zoom_us = plot.params.zoom.max(1) as usize;
+            let break_stroke =
+                egui::Stroke::new(1.0, Color32::from_rgba_unmultiplied(80, 160, 80, 220));
+            if let Some(q_seq) = &self.query {
+                for &break_coord in &q_seq.breaks() {
+                    let pixel_x = break_coord / zoom_us;
+                    if pixel_x >= plot.width as usize {
+                        continue;
+                    }
+                    let sx = rect.left()
+                        + ((pixel_x as f32) - self.view_offset.x) * self.display_zoom;
+                    if sx < rect.left() || sx > rect.right() {
+                        continue;
+                    }
+                    ui.painter().line_segment(
+                        [Pos2::new(sx, rect.top()), Pos2::new(sx, rect.bottom())],
+                        break_stroke,
+                    );
+                }
+            }
+            if let Some(s_seq) = &self.subject {
+                for &break_coord in &s_seq.breaks() {
+                    let pixel_y = break_coord / zoom_us;
+                    if pixel_y >= plot.height as usize {
+                        continue;
+                    }
+                    let sy = rect.top()
+                        + ((pixel_y as f32) - self.view_offset.y) * self.display_zoom;
+                    if sy < rect.top() || sy > rect.bottom() {
+                        continue;
+                    }
+                    ui.painter().line_segment(
+                        [Pos2::new(rect.left(), sy), Pos2::new(rect.right(), sy)],
+                        break_stroke,
+                    );
+                }
+            }
+
+            // C4: tick labels along the canvas edges in sequence
+            // coordinates. Anchored to sequence coords so they stay
+            // crisp under viewport zoom.
+            self.draw_axis_labels(ui, rect, plot);
+
             // Crosshair overlay.
             if let Some((cq, cs)) = self.crosshair {
                 let cx = rect.left()
@@ -775,6 +845,120 @@ impl DottirApp {
                 );
             }
         });
+    }
+
+    /// Draw tick marks and coordinate labels in *sequence* coords
+    /// along the top (query) and left (subject) edges of the canvas.
+    ///
+    /// Tick spacing is picked so each adjacent label is at least
+    /// `MIN_LABEL_SPACING_PX` apart in screen space, and the value
+    /// step is a "nice" power-of-10 multiple (`1, 2, 5 × 10^k`).
+    fn draw_axis_labels(&self, ui: &mut egui::Ui, rect: Rect, plot: &dottir_core::DotPlot) {
+        const MIN_LABEL_SPACING_PX: f32 = 80.0;
+        let zoom_us = plot.params.zoom.max(1) as f32;
+        // World-pixel range visible in this view.
+        let world_x_lo = self.view_offset.x;
+        let world_x_hi = world_x_lo + rect.width() / self.display_zoom;
+        let world_y_lo = self.view_offset.y;
+        let world_y_hi = world_y_lo + rect.height() / self.display_zoom;
+        // Convert to sequence-residue range.
+        let seq_q_lo = (world_x_lo * zoom_us).max(0.0) as u64;
+        let seq_q_hi = (world_x_hi * zoom_us) as u64;
+        let seq_s_lo = (world_y_lo * zoom_us).max(0.0) as u64;
+        let seq_s_hi = (world_y_hi * zoom_us) as u64;
+
+        let painter = ui.painter();
+        let tick_color = Color32::from_rgba_unmultiplied(80, 80, 80, 180);
+        let label_color = ui.style().visuals.text_color();
+        let font = egui::FontId::monospace(11.0);
+
+        // Top axis (query).
+        let span_x = seq_q_hi.saturating_sub(seq_q_lo) as f32;
+        let pixels_per_residue_x = self.display_zoom / zoom_us;
+        let step_x =
+            nice_tick_step(span_x as f64, MIN_LABEL_SPACING_PX / pixels_per_residue_x as f32);
+        let mut t = (seq_q_lo / step_x as u64) * step_x as u64;
+        while t < seq_q_hi.saturating_add(step_x as u64) {
+            if t >= seq_q_lo && t <= seq_q_hi {
+                let sx = rect.left()
+                    + (t as f32 / zoom_us - self.view_offset.x) * self.display_zoom;
+                painter.line_segment(
+                    [Pos2::new(sx, rect.top()), Pos2::new(sx, rect.top() + 6.0)],
+                    egui::Stroke::new(1.0, tick_color),
+                );
+                painter.text(
+                    Pos2::new(sx + 3.0, rect.top() + 2.0),
+                    egui::Align2::LEFT_TOP,
+                    format_kb(t),
+                    font.clone(),
+                    label_color,
+                );
+            }
+            t = t.saturating_add(step_x as u64);
+            if step_x == 0.0 {
+                break;
+            }
+        }
+
+        // Left axis (subject).
+        let span_y = seq_s_hi.saturating_sub(seq_s_lo) as f32;
+        let step_y = nice_tick_step(
+            span_y as f64,
+            MIN_LABEL_SPACING_PX / pixels_per_residue_x as f32,
+        );
+        let mut t = (seq_s_lo / step_y as u64) * step_y as u64;
+        while t < seq_s_hi.saturating_add(step_y as u64) {
+            if t >= seq_s_lo && t <= seq_s_hi {
+                let sy = rect.top()
+                    + (t as f32 / zoom_us - self.view_offset.y) * self.display_zoom;
+                painter.line_segment(
+                    [
+                        Pos2::new(rect.left(), sy),
+                        Pos2::new(rect.left() + 6.0, sy),
+                    ],
+                    egui::Stroke::new(1.0, tick_color),
+                );
+                painter.text(
+                    Pos2::new(rect.left() + 8.0, sy + 1.0),
+                    egui::Align2::LEFT_TOP,
+                    format_kb(t),
+                    font.clone(),
+                    label_color,
+                );
+            }
+            t = t.saturating_add(step_y as u64);
+            if step_y == 0.0 {
+                break;
+            }
+        }
+    }
+}
+
+/// Pick a "nice" tick step (1, 2, or 5 × 10^k) so each tick is at
+/// least `min_step` residues apart when projected to the screen.
+fn nice_tick_step(span: f64, min_step: f32) -> f64 {
+    if span <= 0.0 || !min_step.is_finite() || min_step <= 0.0 {
+        return 1.0;
+    }
+    let target = min_step as f64;
+    let exp = target.log10().floor();
+    let base = 10f64.powf(exp);
+    for &m in &[1.0, 2.0, 5.0, 10.0] {
+        if m * base >= target {
+            return m * base;
+        }
+    }
+    10.0 * base
+}
+
+/// Format a residue coord with a `kb`/`Mb` suffix when large.
+fn format_kb(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{}k", n / 1_000)
+    } else {
+        format!("{n}")
     }
 }
 
