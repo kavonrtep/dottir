@@ -4,6 +4,44 @@ Concrete follow-up plan addressing the findings in `REVIEW.md`. Estimates
 are person-days for one focused developer; double for full polish + tests
 + docs.
 
+## Progress
+
+Status as of 2026-05-17. Items checked here are merged on `master`.
+
+| ID | Item | Status | Commit |
+|----|------|--------|--------|
+| A1 | Bounded-memory parallel kernel | ☑ | d88d6b2 |
+| A2 | Strict matrix parsing | ☑ | 0c2da28 |
+| A3 | Record-aware Sequence model | ☑ | 10fe13f |
+| A4 | Single-pass FASTA read | ☑ | 10fe13f |
+| B  | Docs refresh | ☑ | 4c3481e |
+| C1 | GUI memory cap slider | ☑ | ebeaa38 |
+| C2 | Zoom quality / background recompute | ☐ | — |
+| C3 | Breaklines | ☑ | ebeaa38 |
+| C4 | Sequence-coord axes | ☑ | ebeaa38 |
+| C5 | Session save/load | ☑ | 9362d0d |
+| C6 | Background-compute machinery | ☐ | — *(subsumed by C2)* |
+| C7 | `dottir-gui` CLI pre-load | ☑ | 436a809 |
+| C8 | Light theme default | ☑ | 0de5f72 |
+| D1 | SVG export | ☑ | d83d44b |
+| D2 | `.dot` binary read/write | ☑ | b7b5992 |
+| D3 | PDF export | ☐ | — |
+| D4 | Selection-region export | ☐ | — |
+| D5 | Alignment-window export CLI flag | ☐ | — |
+| E1 | GFF3 loader (noodles-gff) | ☐ | — |
+| E2 | PAF loader (noodles-paf) | ☐ | — |
+| E3 | GUI track panel | ☐ | — |
+| E4 | HSP overlay modes | ☐ | — |
+| F1 | BLASTX three-frame | ☑ | a5b7baa |
+| F2 | `-r`/`-v` rev-complement | ☑ | 5110f02 |
+| F3 | watson-only / crick-only | ☑ | 5110f02 |
+| F4 | Pixelmap goldens vs C dotter | ☐ | — *(ops; needs GTK2 build)* |
+| G1 | Inverted-repeat colour | ☑ | ffa6118 |
+| G2 | Sub-dotter spawn | ☐ | — |
+
+Tests: 115 workspace tests passing (was 78 at start of these
+improvements). MSRV 1.85.
+
 Each phase is independently shippable (commit per phase, mirroring how the
 original `IMPLEMENTATION_PLAN.md` was executed). The phases are ordered by
 priority: A is correctness/scalability we shouldn't ship without; B–C is
