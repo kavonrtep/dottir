@@ -47,6 +47,13 @@ open an empty window and load FASTAs via **File → Open**.
 | Arrow keys | Nudge crosshair by 1 |
 | Shift + arrow keys | Nudge by 10 |
 | Ctrl + arrow keys | Nudge by 100 |
+| `,` / `.` | Step along the main diagonal (both axes ±1). Matches original Dotter. |
+| `[` / `]` | Step along the anti-diagonal (q±1, s∓1). Matches original Dotter. |
+| `Space` | Snap crosshair to the brightest pixel within ±64 px |
+
+Shift / Ctrl multiply the diagonal and anti-diagonal steps the same
+way as the arrow keys (×10 / ×100). The full keymap is also visible
+in the GUI under **View → Keyboard shortcuts…**.
 
 ## Theme
 

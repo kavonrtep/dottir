@@ -588,29 +588,63 @@ impl DottirApp {
         let Some(plot) = &self.plot else {
             return;
         };
+        let pw = plot.width as i64;
+        let ph = plot.height as i64;
         let mut nudged = false;
+        let mut snap = false;
         let (mut q, mut s) = self.crosshair.unwrap_or((plot.width / 2, plot.height / 2));
+        let mut q_i = q as i64;
+        let mut s_i = s as i64;
         ctx.input(|i| {
             for ev in &i.events {
                 if let egui::Event::Key { key, pressed: true, .. } = ev {
                     match key {
+                        // Single-axis (original GUI behaviour).
                         egui::Key::ArrowLeft => {
-                            q = q.saturating_sub(step as u32);
+                            q_i -= step as i64;
                             nudged = true;
                         }
                         egui::Key::ArrowRight => {
-                            q = (q as i64 + step as i64)
-                                .clamp(0, plot.width as i64 - 1) as u32;
+                            q_i += step as i64;
                             nudged = true;
                         }
                         egui::Key::ArrowUp => {
-                            s = s.saturating_sub(step as u32);
+                            s_i -= step as i64;
                             nudged = true;
                         }
                         egui::Key::ArrowDown => {
-                            s = (s as i64 + step as i64)
-                                .clamp(0, plot.height as i64 - 1) as u32;
+                            s_i += step as i64;
                             nudged = true;
+                        }
+                        // Main diagonal: both coords step together.
+                        // Matches the original Dotter `,` / `.` keys.
+                        egui::Key::Comma => {
+                            q_i -= step as i64;
+                            s_i -= step as i64;
+                            nudged = true;
+                        }
+                        egui::Key::Period => {
+                            q_i += step as i64;
+                            s_i += step as i64;
+                            nudged = true;
+                        }
+                        // Anti-diagonal: q and s step in opposite
+                        // directions. Matches original Dotter `[`/`]`.
+                        egui::Key::OpenBracket => {
+                            q_i -= step as i64;
+                            s_i += step as i64;
+                            nudged = true;
+                        }
+                        egui::Key::CloseBracket => {
+                            q_i += step as i64;
+                            s_i -= step as i64;
+                            nudged = true;
+                        }
+                        // Snap to the brightest pixel within a
+                        // search radius — quick jump to whatever
+                        // diagonal the crosshair is near.
+                        egui::Key::Space => {
+                            snap = true;
                         }
                         _ => {}
                     }
@@ -618,6 +652,62 @@ impl DottirApp {
             }
         });
         if nudged {
+            q = q_i.clamp(0, pw - 1) as u32;
+            s = s_i.clamp(0, ph - 1) as u32;
+            self.crosshair = Some((q, s));
+        }
+        if snap {
+            self.snap_crosshair_to_line();
+        }
+    }
+
+    /// Snap the crosshair to the brightest pixel within a search
+    /// disc, with current position as the tie-breaker (closest
+    /// pixel wins on equal value). Bound to **Space**.
+    ///
+    /// This is the simplest design that actually does what users
+    /// want: most strong dots on a dotplot belong to a diagonal
+    /// run, so "grab the local max" lands you on the nearest line.
+    /// A more sophisticated version would aggregate scores per
+    /// diagonal offset, but the simple local max is robust and
+    /// fast enough for arbitrarily large pixelmaps (we cap the
+    /// search at ±64 pixelmap pixels around the current
+    /// crosshair).
+    fn snap_crosshair_to_line(&mut self) {
+        let Some(plot) = self.plot.as_ref() else { return };
+        let Some((cq, cs)) = self.crosshair else { return };
+        const RADIUS: i64 = 64;
+        let pw = plot.width as i64;
+        let ph = plot.height as i64;
+        let stride = plot.width as usize;
+        let q_lo = (cq as i64 - RADIUS).max(0);
+        let q_hi = (cq as i64 + RADIUS).min(pw - 1);
+        let s_lo = (cs as i64 - RADIUS).max(0);
+        let s_hi = (cs as i64 + RADIUS).min(ph - 1);
+        // Track the best (value, -distance², q, s) tuple. Tuple
+        // ordering gives us "max value, then min distance" for free.
+        let mut best: Option<(u8, i64, u32, u32)> = None;
+        for sp in s_lo..=s_hi {
+            let row = sp as usize * stride;
+            for qp in q_lo..=q_hi {
+                let v = plot.pixels[row + qp as usize];
+                if v == 0 {
+                    continue;
+                }
+                let dq = qp - cq as i64;
+                let ds = sp - cs as i64;
+                let dist_sq = dq * dq + ds * ds;
+                let candidate = (v, -dist_sq, qp as u32, sp as u32);
+                match best {
+                    None => best = Some(candidate),
+                    Some(cur) if (candidate.0, candidate.1) > (cur.0, cur.1) => {
+                        best = Some(candidate)
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if let Some((_, _, q, s)) = best {
             self.crosshair = Some((q, s));
         }
     }
@@ -694,6 +784,29 @@ impl DottirApp {
                     if ui.button(dock_label).clicked() {
                         self.align_dock_visible = !self.align_dock_visible;
                     }
+                    ui.separator();
+                    // Compact shortcut crib so users can discover
+                    // the keyboard map without reading the docs.
+                    ui.menu_button("Keyboard shortcuts…", |ui| {
+                        let style = egui::FontId::monospace(11.0);
+                        for (keys, desc) in [
+                            ("← → ↑ ↓",   "nudge crosshair (Shift ×10, Ctrl ×100)"),
+                            (",   .",      "step along main diagonal"),
+                            ("[   ]",      "step along anti-diagonal"),
+                            ("Space",      "snap crosshair to nearest strong dot"),
+                            ("scroll",     "zoom on cursor"),
+                            ("drag",       "pan"),
+                        ] {
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new(format!("{keys:<10}"))
+                                        .font(style.clone())
+                                        .color(Color32::from_gray(70)),
+                                );
+                                ui.label(desc);
+                            });
+                        }
+                    });
                     ui.separator();
                     if ui.button("Settings…").clicked() {
                         self.show_settings = true;
