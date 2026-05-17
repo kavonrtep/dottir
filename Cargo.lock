@@ -885,6 +885,7 @@ name = "dottir-gui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "clap",
  "dottir-core",
  "dottir-io",
  "eframe",

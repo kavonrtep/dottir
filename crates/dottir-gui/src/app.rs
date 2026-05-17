@@ -11,6 +11,39 @@ use egui::{
     TextureOptions, Vec2,
 };
 
+/// Startup-time configuration assembled from CLI args, applied once
+/// by [`DottirApp::new`].
+#[derive(Debug, Clone)]
+pub struct StartupConfig {
+    pub query: Option<PathBuf>,
+    pub subject: Option<PathBuf>,
+    pub mode: BlastMode,
+    pub matrix_name: String,
+    pub window_size: Option<u32>,
+    pub zoom: u32,
+    pub pixel_fac: u32,
+    pub strand: Strand,
+    pub self_comparison: bool,
+    pub memory_limit_bytes: u64,
+}
+
+impl Default for StartupConfig {
+    fn default() -> Self {
+        Self {
+            query: None,
+            subject: None,
+            mode: BlastMode::Blastn,
+            matrix_name: "DNA+5/-4".into(),
+            window_size: None,
+            zoom: 1,
+            pixel_fac: 50,
+            strand: Strand::Both,
+            self_comparison: false,
+            memory_limit_bytes: 512 * 1024 * 1024,
+        }
+    }
+}
+
 /// One loaded sequence plus its source path.
 struct LoadedSeq {
     path: PathBuf,
@@ -30,6 +63,10 @@ struct Settings {
     strand: Strand,
     self_comparison: bool,
     triangle: Triangle,
+    /// Memory cap for the pixelmap, in bytes. Plumbed through to
+    /// `PlotConfig::memory_limit_bytes` on every recompute. Default
+    /// 512 MiB, matching the CLI default.
+    memory_limit_bytes: u64,
 }
 
 impl Default for Settings {
@@ -43,6 +80,7 @@ impl Default for Settings {
             strand: Strand::Both,
             self_comparison: false,
             triangle: Triangle::Both,
+            memory_limit_bytes: 512 * 1024 * 1024,
         }
     }
 }
@@ -137,16 +175,29 @@ pub struct DottirApp {
 }
 
 impl DottirApp {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, startup: StartupConfig) -> Self {
         // Default to a light theme — the plotting area is a greyscale
         // pixelmap on a near-white background, so a dark surround
         // muddles axis labels and panel text. Users who prefer dark
         // can toggle it in the View menu.
         cc.egui_ctx.set_visuals(egui::Visuals::light());
-        Self {
+
+        let settings = Settings {
+            mode: startup.mode,
+            matrix_name: startup.matrix_name.clone(),
+            window_size: startup.window_size,
+            zoom: startup.zoom.max(1),
+            pixel_fac: startup.pixel_fac.max(1),
+            strand: startup.strand,
+            self_comparison: startup.self_comparison,
+            triangle: Triangle::Both,
+            memory_limit_bytes: startup.memory_limit_bytes,
+        };
+
+        let mut app = Self {
             query: None,
             subject: None,
-            settings: Settings::default(),
+            settings,
             plot: None,
             last_error: None,
             greyramp: Greyramp::default(),
@@ -157,7 +208,19 @@ impl DottirApp {
             crosshair: None,
             show_settings: false,
             light_theme: true,
+        };
+
+        // Pre-load any sequences supplied on the command line. Errors
+        // are stashed in `last_error` and surfaced in the status bar
+        // instead of aborting the GUI — the user can still recover via
+        // File → Open.
+        if let Some(p) = startup.query {
+            app.load_fasta(SeqRole::Query, p);
         }
+        if let Some(p) = startup.subject {
+            app.load_fasta(SeqRole::Subject, p);
+        }
+        app
     }
 
     fn load_fasta(&mut self, role: SeqRole, path: PathBuf) {
@@ -213,7 +276,7 @@ impl DottirApp {
             self_comparison: self.settings.self_comparison,
             triangle: self.settings.triangle,
             disable_mirror: false,
-            memory_limit_bytes: 1_024 * 1_024 * 1_024,
+            memory_limit_bytes: self.settings.memory_limit_bytes,
             separate_strand_channels: false,
         };
         let qs = &q.seq;
