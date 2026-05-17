@@ -96,6 +96,61 @@ impl ScoreMatrix {
         self.scores[row * n + col]
     }
 
+    /// Build a custom DNA matrix with the given match / mismatch scores.
+    /// Convenient for users who want `+1 / -1`, `+2 / -3`, etc. without
+    /// hand-writing a BLAST-format file.
+    ///
+    /// Both diagonals are filled with `match_score`, all off-diagonals
+    /// with `mismatch_score`. The matrix is 4×4 over the canonical ACGT
+    /// ordering (matches [`crate::alphabet::DNA_LETTERS`]).
+    pub fn custom_dna(match_score: i32, mismatch_score: i32) -> Self {
+        let n = DNA_KARLIN_SIZE;
+        let mut scores = vec![mismatch_score; n * n];
+        for i in 0..n {
+            scores[i * n + i] = match_score;
+        }
+        ScoreMatrix {
+            name: format!("DNA+{match_score}/{mismatch_score}"),
+            kind: AlphabetKind::Dna,
+            scores,
+        }
+    }
+
+    /// Validate the matrix against the Karlin/Altschul prerequisites:
+    /// at least one negative score, at least one positive score, and
+    /// dimensions consistent with the declared alphabet. Returns an
+    /// error rather than a corrupted result so callers can fail loudly
+    /// on hand-written matrices that wouldn't produce useful goldens.
+    pub fn validate(&self) -> Result<(), DottirError> {
+        let n = self.size();
+        if self.scores.len() != n * n {
+            return Err(DottirError::InvalidMatrix(format!(
+                "matrix '{}': scores len {} != n×n = {}",
+                self.name,
+                self.scores.len(),
+                n * n
+            )));
+        }
+        let any_neg = self.scores.iter().any(|&s| s < 0);
+        let any_pos = self.scores.iter().any(|&s| s > 0);
+        if !any_neg {
+            return Err(DottirError::InvalidMatrix(format!(
+                "matrix '{}' has no negative scores — Karlin/Altschul \
+                 statistics require at least one (otherwise λ doesn't \
+                 converge). Most BLAST matrices have mismatch ≤ -1.",
+                self.name
+            )));
+        }
+        if !any_pos {
+            return Err(DottirError::InvalidMatrix(format!(
+                "matrix '{}' has no positive scores — there's no way to \
+                 score a match. The diagonal should be > 0.",
+                self.name
+            )));
+        }
+        Ok(())
+    }
+
     /// Built-in BLOSUM62. Source: `dotterApp/dotter.c:354` (the same table
     /// shipped with C dotter, which in turn matches NCBI's blast/data/
     /// BLOSUM62 file dated 930809).
@@ -258,7 +313,11 @@ impl ScoreMatrix {
         self.scores.iter().copied().max().unwrap()
     }
 
-    /// Parse a protein score matrix in the standard NCBI BLAST text format.
+    /// Parse a protein score matrix in the standard NCBI BLAST text
+    /// format. **Strict** — every cell of the 24×24 protein submatrix
+    /// must be covered, and any header letter not in dottir's 24-letter
+    /// alphabet causes a parse error unless it appears in
+    /// `extra_letters`.
     ///
     /// The grammar is:
     ///
@@ -272,112 +331,255 @@ impl ScoreMatrix {
     ///
     /// Whitespace separation. The header determines the column ordering;
     /// rows may be in any order — the row letter is the first non-space
-    /// token. The returned matrix is *always* re-ordered into the canonical
-    /// `ARNDCQEGHILKMFPSTWYVBZX*` ordering used elsewhere in dottir, so the
-    /// caller does not need to know the file's internal ordering. Missing
-    /// letters are an error.
-    pub fn parse_blast_format(name: &str, text: &str) -> Result<Self, DottirError> {
-        // Read header.
-        let mut lines = text
-            .lines()
-            .filter(|l| !l.trim_start().starts_with('#') && !l.trim().is_empty());
-
-        let header_line = lines.next().ok_or_else(|| {
-            DottirError::InvalidMatrix("matrix file has no header row".into())
-        })?;
-        let header_letters: Vec<u8> = header_line
-            .split_whitespace()
-            .map(|tok| {
-                if tok.len() != 1 {
-                    Err(DottirError::InvalidMatrix(format!(
-                        "header column '{tok}' is not a single residue letter"
-                    )))
-                } else {
-                    Ok(tok.as_bytes()[0])
-                }
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-
-        if header_letters.is_empty() {
-            return Err(DottirError::InvalidMatrix("empty header row".into()));
-        }
-        // Map each header letter to its canonical index. Letters outside the
-        // 24-residue C-dotter alphabet (e.g. NCBI's 'J' for Leu/Ile) are
-        // silently dropped — recorded as `None` so the row parser knows to
-        // skip the corresponding column entries.
-        let col_to_canon: Vec<Option<usize>> = header_letters
-            .iter()
-            .map(|&b| {
-                let idx = encode_protein(b);
-                if idx == SENTINEL {
-                    None
-                } else {
-                    Some(idx as usize)
-                }
-            })
-            .collect();
-
+    /// token. The returned matrix is *always* re-ordered into the
+    /// canonical `ARNDCQEGHILKMFPSTWYVBZX*` ordering used elsewhere in
+    /// dottir.
+    ///
+    /// `extra_letters` lets the caller opt into header columns that are
+    /// outside the 24-letter dottir alphabet — pass `&["J"]` for current
+    /// NCBI BLOSUM/PAM files, which include 'J' (Leu/Ile ambiguity).
+    /// Anything in `extra_letters` is silently dropped from the row/col
+    /// data; an unexpected letter not in `extra_letters` is an error.
+    ///
+    /// After parsing the matrix is checked with [`Self::validate`].
+    pub fn parse_blast_protein(
+        name: &str,
+        text: &str,
+        extra_letters: &[&str],
+    ) -> Result<Self, DottirError> {
         let n = PROTEIN_KARLIN_SIZE;
-        let mut scores: Vec<Option<i32>> = vec![None; n * n];
-        for row in lines {
-            let mut toks = row.split_whitespace();
-            let row_letter_tok = match toks.next() {
-                Some(t) => t,
-                None => continue, // skip blank
-            };
-            if row_letter_tok.len() != 1 {
-                return Err(DottirError::InvalidMatrix(format!(
-                    "row label '{row_letter_tok}' is not a single letter"
-                )));
-            }
-            let row_b = row_letter_tok.as_bytes()[0];
-            let row_canon = encode_protein(row_b);
-            let row_canon_opt = if row_canon == SENTINEL { None } else { Some(row_canon as usize) };
-            let mut col = 0;
-            for tok in toks {
-                if col >= header_letters.len() {
-                    return Err(DottirError::InvalidMatrix(format!(
-                        "row '{}' has too many columns",
-                        row_b as char
-                    )));
-                }
-                let v: i32 = tok.parse().map_err(|_| {
-                    DottirError::InvalidMatrix(format!(
-                        "non-integer entry '{tok}' in row '{}'",
-                        row_b as char
-                    ))
-                })?;
-                if let (Some(r), Some(c)) = (row_canon_opt, col_to_canon[col]) {
-                    scores[r * n + c] = Some(v);
-                }
-                col += 1;
-            }
-            if col != header_letters.len() {
-                return Err(DottirError::InvalidMatrix(format!(
-                    "row '{}' has {col} columns, expected {}",
-                    row_b as char,
-                    header_letters.len()
-                )));
-            }
-        }
-
-        // Any score the header / rows didn't cover stays None. Allow it only
-        // if every covered (row, col) pair lies inside the abetsize = 24
-        // protein submatrix; we don't insist on covering the '*' row unless
-        // the header included it. Cells with no entry get a deeply-negative
-        // sentinel mirroring C dotter's "*-column = -4" convention.
-        let filled: Vec<i32> = scores
-            .into_iter()
-            .map(|s| s.unwrap_or(-4))
-            .collect();
-
-        Ok(ScoreMatrix {
+        let (header_letters, body) = read_header_and_body(text)?;
+        let col_to_canon = map_header(&header_letters, extra_letters, encode_protein, n)?;
+        let scores =
+            parse_rows(body, &header_letters, &col_to_canon, n, extra_letters, encode_protein)?;
+        let m = ScoreMatrix {
             name: name.to_string(),
             kind: AlphabetKind::Protein,
-            scores: filled,
-        })
+            scores,
+        };
+        m.validate()?;
+        Ok(m)
     }
 
+    /// Parse a DNA score matrix in BLAST text format over the 4-letter
+    /// `ACGT` alphabet. Strict in the same way as
+    /// [`Self::parse_blast_protein`]: every 4×4 cell must be covered;
+    /// extra header letters (e.g. `N`) must be passed in
+    /// `extra_letters` and are silently dropped.
+    pub fn parse_blast_dna(
+        name: &str,
+        text: &str,
+        extra_letters: &[&str],
+    ) -> Result<Self, DottirError> {
+        let n = DNA_KARLIN_SIZE;
+        let (header_letters, body) = read_header_and_body(text)?;
+        let col_to_canon = map_header(
+            &header_letters,
+            extra_letters,
+            |b| crate::alphabet::encode_dna(b),
+            n,
+        )?;
+        let scores = parse_rows(
+            body,
+            &header_letters,
+            &col_to_canon,
+            n,
+            extra_letters,
+            |b| crate::alphabet::encode_dna(b),
+        )?;
+        let m = ScoreMatrix {
+            name: name.to_string(),
+            kind: AlphabetKind::Dna,
+            scores,
+        };
+        m.validate()?;
+        Ok(m)
+    }
+
+    /// Back-compat alias: parse a protein matrix accepting NCBI's `J`
+    /// column. Pre-existing callers (the built-in BLOSUM/PAM
+    /// constructors) used this signature.
+    pub fn parse_blast_format(name: &str, text: &str) -> Result<Self, DottirError> {
+        Self::parse_blast_protein(name, text, &["J"])
+    }
+
+}
+
+/// Helpers shared by the protein and DNA parsers.
+type EncodeFn = fn(u8) -> u8;
+
+/// Split a BLAST text matrix into its header letters and the remainder
+/// lines (comments stripped). The body lines are owned `String`s
+/// because the iterator passes through the input twice in
+/// [`parse_rows`] otherwise — owned is simpler than juggling lifetimes.
+fn read_header_and_body(text: &str) -> Result<(Vec<u8>, Vec<String>), DottirError> {
+    let mut lines = text
+        .lines()
+        .filter(|l| !l.trim_start().starts_with('#') && !l.trim().is_empty());
+    let header_line = lines
+        .next()
+        .ok_or_else(|| DottirError::InvalidMatrix("matrix file has no header row".into()))?;
+    let header_letters: Vec<u8> = header_line
+        .split_whitespace()
+        .map(|tok| {
+            if tok.len() != 1 {
+                Err(DottirError::InvalidMatrix(format!(
+                    "header column '{tok}' is not a single residue letter"
+                )))
+            } else {
+                Ok(tok.as_bytes()[0])
+            }
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if header_letters.is_empty() {
+        return Err(DottirError::InvalidMatrix("empty header row".into()));
+    }
+    Ok((header_letters, lines.map(|l| l.to_string()).collect()))
+}
+
+/// Map each header column to its canonical alphabet index, or `None`
+/// for letters that the caller explicitly allowlisted as "extra"
+/// (e.g. NCBI's J for protein). Letters that don't encode AND aren't
+/// in `extra_letters` are a parse error.
+fn map_header(
+    header_letters: &[u8],
+    extra_letters: &[&str],
+    encode: EncodeFn,
+    n: usize,
+) -> Result<Vec<Option<usize>>, DottirError> {
+    let extras = extras_set(extra_letters);
+    header_letters
+        .iter()
+        .map(|&b| {
+            let idx = encode(b);
+            // "In the Karlin alphabet" = encoded AND inside the n×n
+            // submatrix we score against. DNA's 'N' encodes to 4 but
+            // the matrix is only 4×4 (ACGT), so it falls in the
+            // `extra_letters` path.
+            if idx != SENTINEL && (idx as usize) < n {
+                Ok(Some(idx as usize))
+            } else if extras.contains(&b) {
+                Ok(None)
+            } else {
+                Err(DottirError::InvalidMatrix(format!(
+                    "header has unknown residue letter '{}'. \
+                     Pass it in `extra_letters` to ignore.",
+                    b as char
+                )))
+            }
+        })
+        .collect()
+}
+
+fn extras_set(extra_letters: &[&str]) -> std::collections::HashSet<u8> {
+    extra_letters
+        .iter()
+        .filter_map(|s| {
+            if s.len() == 1 {
+                Some(s.as_bytes()[0])
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// Parse the body of a BLAST matrix file into a `n × n` row-major
+/// score vector. Every cell of the canonical alphabet must be covered,
+/// otherwise an [`DottirError::InvalidMatrix`] names the missing
+/// (row, col).
+fn parse_rows(
+    body: Vec<String>,
+    header_letters: &[u8],
+    col_to_canon: &[Option<usize>],
+    n: usize,
+    extra_letters: &[&str],
+    encode: EncodeFn,
+) -> Result<Vec<i32>, DottirError> {
+    let extras = extras_set(extra_letters);
+    let mut scores: Vec<Option<i32>> = vec![None; n * n];
+    for row in body {
+        let mut toks = row.split_whitespace();
+        let row_letter_tok = match toks.next() {
+            Some(t) => t,
+            None => continue,
+        };
+        if row_letter_tok.len() != 1 {
+            return Err(DottirError::InvalidMatrix(format!(
+                "row label '{row_letter_tok}' is not a single letter"
+            )));
+        }
+        let row_b = row_letter_tok.as_bytes()[0];
+        let row_canon = encode(row_b);
+        let row_canon_opt = if row_canon != SENTINEL && (row_canon as usize) < n {
+            Some(row_canon as usize)
+        } else if extras.contains(&row_b) {
+            None
+        } else {
+            return Err(DottirError::InvalidMatrix(format!(
+                "row label '{}' is not in the alphabet. Pass it in \
+                 `extra_letters` to ignore.",
+                row_b as char
+            )));
+        };
+        let mut col = 0;
+        for tok in toks {
+            if col >= header_letters.len() {
+                return Err(DottirError::InvalidMatrix(format!(
+                    "row '{}' has too many columns",
+                    row_b as char
+                )));
+            }
+            let v: i32 = tok.parse().map_err(|_| {
+                DottirError::InvalidMatrix(format!(
+                    "non-integer entry '{tok}' in row '{}'",
+                    row_b as char
+                ))
+            })?;
+            if let (Some(r), Some(c)) = (row_canon_opt, col_to_canon[col]) {
+                scores[r * n + c] = Some(v);
+            }
+            col += 1;
+        }
+        if col != header_letters.len() {
+            return Err(DottirError::InvalidMatrix(format!(
+                "row '{}' has {col} columns, expected {}",
+                row_b as char,
+                header_letters.len()
+            )));
+        }
+    }
+    // Every cell of the canonical n×n submatrix must be present —
+    // silent fill-with-default was the bug REVIEW.md called out.
+    for r in 0..n {
+        for c in 0..n {
+            if scores[r * n + c].is_none() {
+                return Err(DottirError::InvalidMatrix(format!(
+                    "matrix has no entry for ({}, {}) — every cell of the \
+                     {}×{} submatrix must be covered",
+                    canonical_letter(r, n) as char,
+                    canonical_letter(c, n) as char,
+                    n,
+                    n
+                )));
+            }
+        }
+    }
+    Ok(scores.into_iter().map(|s| s.unwrap()).collect())
+}
+
+/// Map a canonical alphabet index back to its ASCII letter for error
+/// messages. The protein alphabet (n=24) uses [`crate::alphabet::PROTEIN_LETTERS`];
+/// DNA (n=4) uses [`crate::alphabet::DNA_LETTERS`].
+fn canonical_letter(idx: usize, n: usize) -> u8 {
+    if n == PROTEIN_KARLIN_SIZE {
+        crate::alphabet::PROTEIN_LETTERS[idx]
+    } else {
+        crate::alphabet::DNA_LETTERS[idx]
+    }
+}
+
+impl ScoreMatrix {
     /// Reformat a matrix as the canonical NCBI BLAST text format. Round-trip
     /// guarantee: `parse_blast_format(_, &m.to_blast_format()).scores == m.scores`.
     pub fn to_blast_format(&self) -> String {
@@ -468,33 +670,117 @@ mod tests {
     }
 
     #[test]
-    fn parse_blast_format_with_permuted_header() {
-        // A 4-letter toy matrix in a non-canonical ordering. After parsing
-        // it must come back in the canonical ARNDCQEG... ordering.
+    fn parse_blast_dna_with_permuted_header() {
+        // 4-letter DNA matrix in non-canonical column ordering.
+        // After parsing it must come back in the canonical ACGT order.
         let text = "\
-#  toy 4-letter matrix
-   R  A  C  N
-A -1  4  0 -2
-R  5 -1 -3  0
-C -3  0  9 -3
-N  0 -2 -3  6
+#  toy DNA matrix in non-canonical column ordering
+   T  A  C  G
+A -4  5 -4 -4
+C -4 -4  5 -4
+G -4 -4 -4  5
+T  5 -4 -4 -4
 ";
-        let m = ScoreMatrix::parse_blast_format("toy", text).unwrap();
-        // Canonical order is A R N D C Q E G H ...
-        assert_eq!(m.get(0, 0), 4); // A/A
-        assert_eq!(m.get(0, 1), -1); // A/R
-        assert_eq!(m.get(1, 0), -1); // R/A
-        assert_eq!(m.get(1, 1), 5); // R/R
-        assert_eq!(m.get(2, 2), 6); // N/N
-        assert_eq!(m.get(4, 4), 9); // C/C
-        // Uncovered cells default to -4 sentinel (mirrors C dotter '*' column).
-        assert_eq!(m.get(3, 3), -4); // D/D
+        let m = ScoreMatrix::parse_blast_dna("toy_dna", text, &[]).unwrap();
+        // Canonical order is A C G T.
+        assert_eq!(m.get(0, 0), 5); // A/A
+        assert_eq!(m.get(1, 1), 5); // C/C
+        assert_eq!(m.get(2, 2), 5); // G/G
+        assert_eq!(m.get(3, 3), 5); // T/T
+        // Off-diagonal sample.
+        assert_eq!(m.get(0, 3), -4); // A/T
+        assert_eq!(m.get(3, 0), -4); // T/A
+    }
+
+    #[test]
+    fn parse_blast_dna_with_extra_n_column() {
+        // The 'N' ambiguity column must be passed via extra_letters
+        // or it's an error. With extra_letters = &["N"] it's dropped.
+        let text = "\
+   A  C  G  T  N
+A  5 -4 -4 -4  0
+C -4  5 -4 -4  0
+G -4 -4  5 -4  0
+T -4 -4 -4  5  0
+N  0  0  0  0  0
+";
+        // Without the N allow-list, the parser refuses.
+        let err = ScoreMatrix::parse_blast_dna("dna_with_n", text, &[]).unwrap_err();
+        assert!(format!("{err}").contains("unknown residue letter"));
+        // With the allow-list, the matrix loads cleanly.
+        let m = ScoreMatrix::parse_blast_dna("dna_with_n", text, &["N"]).unwrap();
+        assert_eq!(m.size(), 4);
+        assert_eq!(m.get(0, 0), 5);
+    }
+
+    #[test]
+    fn parse_blast_protein_rejects_unknown_header_letter() {
+        // 'J' is in NCBI matrices but not in dottir's 24-letter alphabet;
+        // strict mode rejects unless allowlisted.
+        let bad = "\
+   A  R  J
+A  4 -1  0
+R -1  5  0
+J  0  0  0
+";
+        let err = ScoreMatrix::parse_blast_protein("bad", bad, &[]).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("unknown residue letter"), "got: {msg}");
+    }
+
+    #[test]
+    fn parse_blast_protein_rejects_missing_cell() {
+        // A protein matrix that omits 'D' from the header → D row/column
+        // entries aren't covered → strict parse refuses.
+        let bad = "\
+   A  R
+A  4 -1
+R -1  5
+";
+        let err = ScoreMatrix::parse_blast_protein("bad", bad, &[]).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("no entry for"), "got: {msg}");
     }
 
     #[test]
     fn parse_blast_rejects_bad_header() {
         let bad = "AA BB\nA  4 -1\n";
         assert!(ScoreMatrix::parse_blast_format("bad", bad).is_err());
+    }
+
+    #[test]
+    fn custom_dna_diagonal_and_off_diagonal() {
+        let m = ScoreMatrix::custom_dna(2, -3);
+        assert_eq!(m.size(), 4);
+        for i in 0..4 {
+            for j in 0..4 {
+                assert_eq!(m.get(i, j), if i == j { 2 } else { -3 });
+            }
+        }
+        assert!(m.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_all_positive_or_all_negative() {
+        let mut m = ScoreMatrix::dna_identity();
+        // Make everything positive (no mismatch penalty) → validate fails.
+        for s in &mut m.scores {
+            if *s < 0 {
+                *s = 1;
+            }
+        }
+        let err = m.validate().unwrap_err();
+        assert!(format!("{err}").contains("no negative scores"));
+
+        // All-negative: no way to score a match.
+        let mut m = ScoreMatrix::dna_identity();
+        for s in &mut m.scores {
+            if *s > 0 {
+                *s = -1;
+            }
+        }
+        let err = m.validate().unwrap_err();
+        assert!(format!("{err}").contains("no positive scores"));
     }
 
     #[test]
