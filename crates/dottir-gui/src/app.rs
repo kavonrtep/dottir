@@ -196,6 +196,12 @@ pub struct DottirApp {
     /// during DottirApp::new and would otherwise dispatch multiple
     /// jobs before the second sequence is loaded.
     suspend_recompute: bool,
+    /// Timestamp of the most recent scroll-wheel zoom event, used by
+    /// the C2 zoom-settle recompute: when no scroll has fired for
+    /// 200ms and `display_zoom` is far enough from 1.0 to warrant
+    /// finer-grained computation, the kernel re-runs at a new
+    /// `PlotConfig::zoom` tier.
+    last_zoom_event: Option<std::time::Instant>,
 }
 
 impl DottirApp {
@@ -249,6 +255,7 @@ impl DottirApp {
             // Suspend recompute during the two pre-loads — we only
             // want one job dispatched once both inputs are settled.
             suspend_recompute: true,
+            last_zoom_event: None,
         };
 
         // Pre-load any sequences supplied on the command line. Errors
@@ -353,6 +360,81 @@ impl DottirApp {
         tracing::info!("dispatch compute id={id}");
         self.worker.dispatch(req);
         self.compute_in_flight = true;
+    }
+
+    /// C2 zoom-settle recompute: when the user has stopped scrolling
+    /// for [`ZOOM_SETTLE_MS`] and `display_zoom` has strayed outside
+    /// `[0.5, 2.0]`, swap to a finer (or coarser) `PlotConfig::zoom`
+    /// tier and recompute. Resets `display_zoom` back to 1.0 of the
+    /// new pixelmap and scales `view_offset` + crosshair so the same
+    /// residue stays under the same screen pixel.
+    fn maybe_zoom_settle_recompute(&mut self, ctx: &Context) {
+        const ZOOM_SETTLE_MS: u64 = 200;
+        const ZOOM_IN_THRESHOLD: f32 = 2.0;
+        const ZOOM_OUT_THRESHOLD: f32 = 0.5;
+
+        let Some(t) = self.last_zoom_event else {
+            return;
+        };
+        if self.compute_in_flight {
+            // Wait for the in-flight job to land before scheduling
+            // another tier change.
+            ctx.request_repaint_after(std::time::Duration::from_millis(
+                ZOOM_SETTLE_MS,
+            ));
+            return;
+        }
+        if t.elapsed().as_millis() < ZOOM_SETTLE_MS as u128 {
+            // Schedule another frame so we re-check after the
+            // settle interval, even if no other event fires.
+            ctx.request_repaint_after(std::time::Duration::from_millis(
+                ZOOM_SETTLE_MS,
+            ));
+            return;
+        }
+
+        let current_zoom = self.settings.zoom.max(1);
+        let (new_zoom, scale) = if self.display_zoom >= ZOOM_IN_THRESHOLD
+            && current_zoom > 1
+        {
+            // Zoomed in past 2× — recompute at a finer tier
+            // (half the computation zoom, doubling pixelmap density).
+            let n = (current_zoom / 2).max(1);
+            let s = current_zoom as f32 / n as f32; // > 1, e.g. 2.0
+            (n, s)
+        } else if self.display_zoom <= ZOOM_OUT_THRESHOLD && current_zoom < 64 {
+            // Zoomed out past 0.5× — recompute at a coarser tier
+            // (double the computation zoom, halving pixelmap density).
+            let n = (current_zoom.saturating_mul(2)).min(64);
+            let s = current_zoom as f32 / n as f32; // < 1, e.g. 0.5
+            (n, s)
+        } else {
+            // Within [0.5, 2.0] or already at a tier extreme: clear
+            // the timestamp and stop chasing.
+            self.last_zoom_event = None;
+            return;
+        };
+
+        tracing::info!(
+            "zoom-settle: tier change {current_zoom} → {new_zoom} \
+             (display_zoom {:.2} → 1.0, scale {scale})",
+            self.display_zoom,
+        );
+        self.settings.zoom = new_zoom;
+        // Rescale view state so the same residue stays under the
+        // same screen position. New pixelmap dims = old × (1/scale),
+        // so view_offset (in pixelmap coords) scales by 1/scale.
+        let inv = 1.0 / scale;
+        self.view_offset = self.view_offset * inv;
+        self.display_zoom = 1.0;
+        if let Some((cq, cs)) = self.crosshair {
+            // Crosshair is in pixelmap coords; scale identically.
+            let cq2 = (cq as f32 * inv).round() as u32;
+            let cs2 = (cs as f32 * inv).round() as u32;
+            self.crosshair = Some((cq2, cs2));
+        }
+        self.last_zoom_event = None;
+        self.recompute();
     }
 
     /// Drain any completed worker results and apply the latest one
@@ -465,6 +547,9 @@ impl eframe::App for DottirApp {
         // Drain any completed background-compute results before any
         // panel reads `self.plot`. Stale results are discarded inside.
         self.poll_compute_results();
+        // Once the wheel has been idle for the debounce interval,
+        // consider recomputing at a finer/coarser tier.
+        self.maybe_zoom_settle_recompute(ctx);
 
         self.handle_keyboard(ctx);
         self.draw_menu(ctx);
@@ -937,6 +1022,8 @@ impl DottirApp {
                     self.display_zoom = (self.display_zoom * factor).clamp(0.1, 100.0);
                     self.view_offset =
                         world_under_cursor - cursor_local / self.display_zoom;
+                    // Stamp for the C2 zoom-settle recompute trigger.
+                    self.last_zoom_event = Some(std::time::Instant::now());
                 }
             }
             // Click sets the crosshair.

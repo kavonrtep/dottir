@@ -16,11 +16,11 @@ Status as of 2026-05-17. Items checked here are merged on `master`.
 | A4 | Single-pass FASTA read | ☑ | 10fe13f |
 | B  | Docs refresh | ☑ | 4c3481e |
 | C1 | GUI memory cap slider | ☑ | ebeaa38 |
-| C2 | Zoom quality / background recompute | ☐ | — |
+| C2 | Zoom quality / background recompute | ☑ | 6d3c921 (part 1) + this commit (part 2). Multi-res cache deferred. |
 | C3 | Breaklines | ☑ | ebeaa38 |
 | C4 | Sequence-coord axes | ☑ | ebeaa38 |
 | C5 | Session save/load | ☑ | 9362d0d |
-| C6 | Background-compute machinery | ☐ | — *(subsumed by C2)* |
+| C6 | Background-compute machinery | ☑ | 6d3c921 *(subsumed by C2 part 1)* |
 | C7 | `dottir-gui` CLI pre-load | ☑ | 436a809 |
 | C8 | Light theme default | ☑ | 0de5f72 |
 | D1 | SVG export | ☑ | d83d44b |
