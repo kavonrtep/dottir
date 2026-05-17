@@ -51,15 +51,18 @@ pub fn write_svg<P: AsRef<Path>>(
         });
     }
 
-    // Encode the pixelmap as an in-memory greyscale PNG.
-    let mut png_buf = Vec::with_capacity(pixels.len() + 1024);
+    // Invert before encoding: raw kernel output uses 0 = no hit
+    // (black), but SVG viewers expect the analysis-conventional
+    // "white background, dark hits" look.
+    let inverted = crate::text_overlay::inverted(pixels);
+    let mut png_buf = Vec::with_capacity(inverted.len() + 1024);
     {
         let cursor = Cursor::new(&mut png_buf);
         let mut encoder = png::Encoder::new(cursor, width, height);
         encoder.set_color(png::ColorType::Grayscale);
         encoder.set_depth(png::BitDepth::Eight);
         let mut writer = encoder.write_header()?;
-        writer.write_image_data(pixels)?;
+        writer.write_image_data(&inverted)?;
     }
     let png_b64 = base64::engine::general_purpose::STANDARD.encode(&png_buf);
 

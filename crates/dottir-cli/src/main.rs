@@ -290,11 +290,12 @@ fn run_batch(args: BatchArgs) -> Result<()> {
         .map(|(a, b)| (*a, *b as &str))
         .collect();
 
-    png_export::write_grayscale_png(
+    png_export::write_grayscale_png_with_axes(
         &args.output,
         plot.width,
         plot.height,
         &plot.pixels,
+        50, // margin in pixels
         &text_chunk_refs,
     )?;
     tracing::info!("wrote {}", args.output.display());

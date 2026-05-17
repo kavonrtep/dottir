@@ -21,10 +21,50 @@ pub enum PngError {
     DimensionMismatch { width: u32, height: u32, len: usize },
 }
 
-/// Write a greyscale 8-bit PNG. `pixels` must be exactly `width * height`
-/// bytes, row-major. Optional `text_chunks` are added as `tEXt` entries
-/// for parameter provenance.
+/// Write a greyscale 8-bit PNG with a margin, axis ticks, and
+/// numeric labels around the pixelmap. The input `pixels` is
+/// inverted on the way out (raw kernel output is "0 = no hit", we
+/// emit "no hit = white") so the result is the analysis-friendly
+/// light-background plot. Margin defaults to ~50 px; pass 0 via
+/// [`write_grayscale_png_raw`] to skip the frame entirely.
+pub fn write_grayscale_png_with_axes<P: AsRef<Path>>(
+    path: P,
+    width: u32,
+    height: u32,
+    pixels: &[u8],
+    margin: u32,
+    text_chunks: &[(&str, &str)],
+) -> Result<(), PngError> {
+    if pixels.len() != (width as usize).saturating_mul(height as usize) {
+        return Err(PngError::DimensionMismatch {
+            width,
+            height,
+            len: pixels.len(),
+        });
+    }
+    // Invert so "no hit" (raw 0) renders as white and "strong hit"
+    // (raw 255) renders as black — the analysis-conventional look.
+    let inverted = crate::text_overlay::inverted(pixels);
+    let (canvas, total_w, total_h) =
+        crate::text_overlay::compose_image_with_axes(&inverted, width, height, margin);
+    write_grayscale_png_raw(path, total_w, total_h, &canvas, text_chunks)
+}
+
+/// Lower-level: write a raw greyscale PNG with whatever pixels you
+/// give it, no inversion, no axes. Use this when you've already
+/// composed your own canvas (e.g. the GUI's "Save PNG" applies the
+/// current greyramp LUT before calling this).
 pub fn write_grayscale_png<P: AsRef<Path>>(
+    path: P,
+    width: u32,
+    height: u32,
+    pixels: &[u8],
+    text_chunks: &[(&str, &str)],
+) -> Result<(), PngError> {
+    write_grayscale_png_raw(path, width, height, pixels, text_chunks)
+}
+
+fn write_grayscale_png_raw<P: AsRef<Path>>(
     path: P,
     width: u32,
     height: u32,

@@ -24,5 +24,6 @@ pub mod params;
 pub mod png_export;
 pub mod sequence;
 pub mod svg_export;
+pub mod text_overlay;
 
 pub use sequence::{RecordSpan, Sequence};

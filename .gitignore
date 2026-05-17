@@ -24,3 +24,6 @@ Thumbs.db
 
 # Generated documentation outputs
 docs/book/book/
+
+# Scratch output directory for CLI smoke runs
+tmp/
