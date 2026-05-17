@@ -1,46 +1,104 @@
 # dottir
 
-`dottir` is a Rust reimplementation of **Dotter**, the classic dot-matrix plotter by Sonnhammer & Durbin (1995). It keeps the original idea of score-matrix sliding-window plots, Karlin/Altschul window sizing, and anti-diagonal suppression, while modernizing the codebase and user experience.
+A modern Rust reimplementation of **[Dotter](https://www.sanger.ac.uk/tool/dotter/)** — the
+classic sliding-window dot-matrix plotter by Sonnhammer & Durbin
+([Gene 167(2), 1995](https://doi.org/10.1016/0378-1119(95)00714-8)) shipped
+in [seqtools-4.28](https://github.com/douglasgscofield/seqtools-4.28).
+Same scientific feel — Karlin/Altschul window sizing, score-matrix
+scoring, anti-diagonal suppression, live greyramp — in a single
+cross-platform binary with no GTK dependency.
 
-## What It Does
+## Features
 
-- Compute dotplots from FASTA sequences
-- Support BLASTN and BLASTP workflows
-- Export greyscale PNGs with provenance metadata
-- Provide a desktop GUI for interactive inspection
-- Keep outputs deterministic across runs and thread counts
+- **CLI and interactive GUI** in one workspace. Same compute engine
+  behind both.
+- **BLASTN** (forward, reverse, both strands), **BLASTP**, and
+  **BLASTX** (three reading frames). `--watson-only` /
+  `--crick-only` and `-r` / `-v` reverse-complement options match
+  the original Dotter.
+- **Self-comparison** with mirror, upper, or lower triangle.
+- **Inverted-repeat highlighting** — paint reverse-strand hits in
+  magenta against forward-strand greyscale, so palindromes pop.
+- **Multi-record FASTA** with **breakline rendering** and
+  `record:position` coordinates in the GUI status bar.
+- **Live greyramp** — drag the black/white sliders, the image
+  updates without re-running compute.
+- **Zoom-aware** GUI: smooth pan/zoom, then a debounced recompute
+  at a finer tier exposes per-residue detail.
+- **Honest memory cap** (`--memory-mib`) — refuses oversized
+  pixelmaps rather than silently OOMing.
+- **Provenance**: every export writes a `.params.toml` sidecar with
+  the SHA-256 of each input and the resolved Karlin parameters.
+- **Outputs**: PNG (with `tEXt` provenance), SVG (embedded base64
+  PNG + axis labels), and the original C-dotter `.dot` binary
+  (read + write).
+- **Deterministic**: byte-identical output across runs and across
+  rayon thread counts.
 
-## Build
+## Install
+
+dottir builds with stable Rust. MSRV is **1.85** (the dev
+environment uses Rust 1.95 from conda-forge).
 
 ```sh
-cargo build --workspace
+git clone https://github.com/petr/dottir
+cd dottir
+cargo build --release
+# binaries: target/release/dottir (CLI) and target/release/dottir-gui
 ```
 
-The workspace is pinned to Rust `1.95.0`.
-
-## Run
-
-CLI batch mode:
+On Linux the GUI needs the usual X11/GL stack:
 
 ```sh
-cargo run -p dottir-cli -- batch query.fa subject.fa -o plot.png
+sudo apt install \
+    libxkbcommon-dev libgl1-mesa-dev libxcb1-dev \
+    libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+    libxcursor-dev libxi-dev libxrandr-dev libgtk-3-dev
 ```
 
-GUI:
+The CLI has no system-library dependencies.
+
+## Quick start
+
+A self-comparison of a single sequence — the classic repeat-finding
+plot:
 
 ```sh
-cargo run -p dottir-gui
+dottir batch chr4.fa chr4.fa -o chr4.png \
+    --self-comparison --auto-zoom 4000
 ```
 
-## Project Layout
+A query vs. subject BLASTP at a fixed window:
 
-- `crates/dottir-core/` - algorithmic core
-- `crates/dottir-io/` - FASTA, PNG, params sidecar, alignment helpers
-- `crates/dottir-cli/` - headless batch binary
-- `crates/dottir-gui/` - egui-based interactive frontend
-- `docs/book/` - user manual
-- `docs/adr/` - architecture decisions
+```sh
+dottir batch query.faa target.faa -o p.png \
+    --mode blastp --matrix BLOSUM45 -W 12
+```
 
-## Inspiration
+Open the GUI with both sequences pre-loaded:
 
-The project is directly inspired by the original Dotter implementation and its behavior. The goal is to preserve the scientific feel of the original tool while making it easier to maintain, test, and extend in Rust.
+```sh
+dottir-gui chr4.fa chr4.fa --self-comparison -W 25
+```
+
+Full flag reference: `dottir batch --help`, `dottir-gui --help`, or
+the [CLI page](./docs/book/src/cli.md) /
+[GUI page](./docs/book/src/gui.md) in the user manual.
+
+## Documentation
+
+- [User manual](./docs/book/src/intro.md) (mdBook): installation,
+  CLI/GUI reference, algorithm overview, score matrices,
+  reproducibility format.
+- [Spec](./dottir_specification.md) and
+  [implementation plan](./IMPLEMENTATION_PLAN.md): what's
+  guaranteed, what's planned.
+- [Improvements plan](./IMPROVEMENTS_PLAN.md): progress against
+  [REVIEW.md](./REVIEW.md) findings.
+- [Architecture decisions](./docs/adr/): MADR records.
+
+## License
+
+GPL-3.0-or-later (same as upstream Dotter). See [LICENSE](./LICENSE)
+and [NOTICE](./NOTICE) for full credits to Sonnhammer, Durbin,
+Barson, Scofield, and the NCBI BLAST authors.
