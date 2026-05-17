@@ -77,6 +77,26 @@ struct BatchArgs {
     #[arg(long, value_enum, default_value_t = StrandArg::Both)]
     strand: StrandArg,
 
+    /// Compute only the forward (watson) strand. Equivalent to
+    /// `--strand forward`. Original Dotter flag: `--watson-only`.
+    #[arg(long, default_value_t = false, conflicts_with_all = ["crick_only"])]
+    watson_only: bool,
+
+    /// Compute only the reverse (crick) strand. Equivalent to
+    /// `--strand reverse`. Original Dotter flag: `--crick-only`.
+    #[arg(long, default_value_t = false)]
+    crick_only: bool,
+
+    /// Pre-process: reverse-complement the query before computation.
+    /// Original Dotter flag: `-r`.
+    #[arg(short = 'r', long, default_value_t = false)]
+    reverse_query: bool,
+
+    /// Pre-process: reverse-complement the subject before computation.
+    /// Original Dotter flag: `-v`.
+    #[arg(short = 'v', long, default_value_t = false)]
+    reverse_subject: bool,
+
     /// Compute as a self-comparison (query == subject).
     #[arg(long, default_value_t = false)]
     self_comparison: bool,
@@ -197,18 +217,29 @@ fn run_batch(args: BatchArgs) -> Result<()> {
         tracing::info!("auto_zoom chose zoom={zoom} (--zoom={} ignored)", args.zoom);
     }
 
+    // --watson-only / --crick-only override --strand. Mutually
+    // exclusive (clap's `conflicts_with` already enforced that).
+    let strand = if args.watson_only {
+        Strand::Forward
+    } else if args.crick_only {
+        Strand::Reverse
+    } else {
+        args.strand.to_core()
+    };
     let mut cfg = PlotConfig {
         mode,
         matrix,
         window_size: args.window,
         zoom,
         pixel_fac: args.pixel_fac,
-        strand: args.strand.to_core(),
+        strand,
         self_comparison: args.self_comparison,
         triangle: args.triangle.to_core(),
         disable_mirror: args.disable_mirror,
         memory_limit_bytes: args.memory_limit_bytes,
         separate_strand_channels: false,
+        reverse_query: args.reverse_query,
+        reverse_subject: args.reverse_subject,
     };
     // BLASTP only supports Forward.
     if mode == BlastMode::Blastp {

@@ -243,6 +243,51 @@ fn self_comparison_with_unequal_lengths_errors() {
     assert!(msg.contains("self_comparison"), "got: {msg}");
 }
 
+/// F2: `reverse_query = true` is equivalent to passing
+/// `reverse_complement(query)` and the default config — it pre-flips
+/// the query axis before computation. So Forward+RC(q) vs s should
+/// match Forward+q vs s where q has been externally reverse-
+/// complemented.
+#[test]
+fn reverse_query_flag_matches_external_revcomp() {
+    let q = b"AAACCCGGGTAACTGAACCTTAGGCAAATTTGGCCAAGGTTACAACTGAACC".to_vec();
+    let s = q.clone();
+
+    let mut cfg = PlotConfig::default_blastn(ScoreMatrix::dna_identity());
+    cfg.strand = Strand::Forward;
+    cfg.window_size = Some(8);
+    cfg.zoom = 1;
+
+    // Path A: flag.
+    let mut cfg_a = cfg.clone();
+    cfg_a.reverse_query = true;
+    let plot_a = compute_dotplot(&q, &s, &cfg_a).unwrap();
+
+    // Path B: external revcomp.
+    let q_rc = reverse_complement(&q);
+    let plot_b = compute_dotplot(&q_rc, &s, &cfg).unwrap();
+
+    assert_eq!(plot_a.pixels, plot_b.pixels);
+}
+
+/// F2: BLASTP ignores reverse_query/reverse_subject (proteins have no
+/// reverse strand). Setting either flag must not change the result.
+#[test]
+fn rev_flags_are_noop_for_blastp() {
+    let q = b"MKTAYIAKQRQISFVKSHFSRQLEERLGLIEVQAPILSRVGDGTQ".to_vec();
+    let s = q.clone();
+    use dottir_core::BlastMode;
+    let mut cfg = PlotConfig::default_blastp(ScoreMatrix::blosum62());
+    cfg.mode = BlastMode::Blastp;
+    cfg.window_size = Some(5);
+
+    let plot_off = compute_dotplot(&q, &s, &cfg).unwrap();
+    cfg.reverse_query = true;
+    cfg.reverse_subject = true;
+    let plot_on = compute_dotplot(&q, &s, &cfg).unwrap();
+    assert_eq!(plot_off.pixels, plot_on.pixels);
+}
+
 /// Determinism across thread counts placeholder — for Phase 3 we'll
 /// re-run this with rayon configured. For now, single-threaded
 /// repetition is enough.

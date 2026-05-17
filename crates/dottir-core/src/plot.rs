@@ -60,6 +60,13 @@ pub struct PlotConfig {
     /// If true, keep forward and reverse dot channels separate in the
     /// returned [`DotPlot`] (spec §4.4.3 — inverted-repeat highlighting).
     pub separate_strand_channels: bool,
+    /// Pre-process: reverse-complement the query before computation.
+    /// Equivalent to the original Dotter's `-r` flag (spec §4.1.10).
+    /// Only meaningful for BLASTN; ignored for BLASTP.
+    pub reverse_query: bool,
+    /// Pre-process: reverse-complement the subject before computation.
+    /// Equivalent to the original Dotter's `-v` flag.
+    pub reverse_subject: bool,
 }
 
 impl PlotConfig {
@@ -78,6 +85,8 @@ impl PlotConfig {
             disable_mirror: false,
             memory_limit_bytes: 512 * 1024 * 1024,
             separate_strand_channels: false,
+            reverse_query: false,
+            reverse_subject: false,
         }
     }
 
@@ -95,6 +104,8 @@ impl PlotConfig {
             disable_mirror: false,
             memory_limit_bytes: 512 * 1024 * 1024,
             separate_strand_channels: false,
+            reverse_query: false,
+            reverse_subject: false,
         }
     }
 }
@@ -196,8 +207,26 @@ pub fn compute_dotplot(
     }
 
     let alpha = config.mode.alphabet();
-    let q_encoded = encode(query, alpha);
-    let s_encoded_forward = encode(subject, alpha);
+    // Spec §4.1.10: `-r` / `-v` reverse-complement the corresponding
+    // axis sequence before computation. Only meaningful for BLASTN
+    // (protein has no reverse strand). We do this on raw ASCII bytes
+    // via reverse_complement_dna, then encode.
+    let query_buf: std::borrow::Cow<[u8]> = if config.reverse_query
+        && config.mode == BlastMode::Blastn
+    {
+        std::borrow::Cow::Owned(reverse_complement_dna(query))
+    } else {
+        std::borrow::Cow::Borrowed(query)
+    };
+    let subject_buf: std::borrow::Cow<[u8]> = if config.reverse_subject
+        && config.mode == BlastMode::Blastn
+    {
+        std::borrow::Cow::Owned(reverse_complement_dna(subject))
+    } else {
+        std::borrow::Cow::Borrowed(subject)
+    };
+    let q_encoded = encode(&query_buf, alpha);
+    let s_encoded_forward = encode(&subject_buf, alpha);
 
     let width = image_dimension(q_encoded.len(), config.zoom);
     let height = image_dimension(s_encoded_forward.len(), config.zoom);

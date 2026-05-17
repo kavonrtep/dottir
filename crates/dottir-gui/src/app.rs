@@ -64,6 +64,12 @@ struct Settings {
     /// `PlotConfig::memory_limit_bytes` on every recompute. Default
     /// 512 MiB, matching the CLI default.
     memory_limit_bytes: u64,
+    /// Pre-process: reverse-complement the query (spec §4.1.10
+    /// `-r`). BLASTN only.
+    reverse_query: bool,
+    /// Pre-process: reverse-complement the subject (spec §4.1.10
+    /// `-v`). BLASTN only.
+    reverse_subject: bool,
 }
 
 impl Default for Settings {
@@ -78,6 +84,8 @@ impl Default for Settings {
             self_comparison: false,
             triangle: Triangle::Both,
             memory_limit_bytes: 512 * 1024 * 1024,
+            reverse_query: false,
+            reverse_subject: false,
         }
     }
 }
@@ -189,6 +197,8 @@ impl DottirApp {
             self_comparison: startup.self_comparison,
             triangle: Triangle::Both,
             memory_limit_bytes: startup.memory_limit_bytes,
+            reverse_query: false,
+            reverse_subject: false,
         };
 
         let mut app = Self {
@@ -271,6 +281,8 @@ impl DottirApp {
             disable_mirror: false,
             memory_limit_bytes: self.settings.memory_limit_bytes,
             separate_strand_channels: false,
+            reverse_query: self.settings.reverse_query,
+            reverse_subject: self.settings.reverse_subject,
         };
         let qs = q.bytes();
         let ss = s.bytes();
@@ -627,6 +639,30 @@ impl DottirApp {
                             {
                                 changed = true;
                             }
+                        }
+                    });
+                    // -r / -v: pre-flip the axis sequence before
+                    // compute. Spec §4.1.10.
+                    ui.horizontal(|ui| {
+                        if ui
+                            .checkbox(
+                                &mut self.settings.reverse_query,
+                                "Reverse-complement query (-r)",
+                            )
+                            .changed()
+                        {
+                            changed = true;
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        if ui
+                            .checkbox(
+                                &mut self.settings.reverse_subject,
+                                "Reverse-complement subject (-v)",
+                            )
+                            .changed()
+                        {
+                            changed = true;
                         }
                     });
                 }
