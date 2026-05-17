@@ -258,54 +258,59 @@ pub fn format_kb(n: u64) -> String {
     }
 }
 
-/// Nearest-neighbour upscale a `(w × h)` greyscale pixelmap so the
-/// longer side is at least `target_max_dim` pixels, preserving the
-/// aspect ratio with an *integer* scale factor (every input pixel
-/// becomes a clean `scale × scale` block — no aliasing).
+/// Nearest-neighbour resize a `(src_w × src_h)` greyscale pixelmap
+/// to **exactly** `dst_w` pixels wide, with the height derived to
+/// preserve the input aspect ratio.
 ///
-/// Returns the upscaled buffer plus its new dimensions. If
-/// `target_max_dim ≤ max(w, h)` or the inputs are zero-sized, the
-/// original is returned unchanged.
+/// Returns the resized buffer plus its `(dst_w, dst_h)` dimensions.
+/// Special cases:
 ///
-/// Used by the CLI's PNG exporter to bring tiny plots (e.g. a
-/// 287 bp self-comparison ↦ 287 × 287 pixels) up to a comfortable
-/// viewing size without committing to fractional scaling (which
-/// would smear pixel boundaries and break the "1 pixel = 1 matrix
-/// block" contract).
-pub fn upscale_nearest(
+/// * `dst_w == 0` — caller is opting out: return the original
+///   pixelmap unchanged.
+/// * `dst_w == src_w` — no rescale needed; return as-is.
+/// * `dst_w < src_w` — downscaling. Nearest-neighbour drops pixels
+///   (skips entries on the input grid). For dotplots this loses
+///   information; callers usually want to *up*scale instead, but
+///   the downscale path is here for completeness.
+/// * `dst_w > src_w` — upscaling. Each output pixel maps to a
+///   single input pixel via `src_x = floor(dst_x * src_w / dst_w)`
+///   — clean block expansion with no aliasing.
+///
+/// Replaces the earlier integer-only `upscale_nearest`: the
+/// integer constraint meant we couldn't actually hit a
+/// user-requested width (a 287 px input ↦ 2000 px request wanted
+/// 6.97×; integer ceil gave 7× = 2009 px). Fractional NN is fine
+/// for dotplots — most pixels are 0 / 255 so block-quantisation is
+/// either invisible or the desired pixel-perfect look.
+pub fn resize_nearest(
     pixels: &[u8],
-    w: u32,
-    h: u32,
-    target_max_dim: u32,
+    src_w: u32,
+    src_h: u32,
+    dst_w: u32,
 ) -> (Vec<u8>, u32, u32) {
-    let max_dim = w.max(h);
-    if max_dim == 0 || target_max_dim <= max_dim {
-        return (pixels.to_vec(), w, h);
+    if dst_w == 0 || src_w == 0 || src_h == 0 {
+        return (pixels.to_vec(), src_w, src_h);
     }
-    // Ceil-divide so the longer side ends up ≥ target.
-    let scale = ((target_max_dim + max_dim - 1) / max_dim).max(1);
-    if scale <= 1 {
-        return (pixels.to_vec(), w, h);
+    if dst_w == src_w {
+        return (pixels.to_vec(), src_w, src_h);
     }
-    let new_w = w.saturating_mul(scale);
-    let new_h = h.saturating_mul(scale);
-    let mut out = vec![0_u8; (new_w as usize) * (new_h as usize)];
-    let s = scale as usize;
-    let w_us = w as usize;
-    let nw = new_w as usize;
-    for row in 0..h as usize {
-        for col in 0..w_us {
-            let v = pixels[row * w_us + col];
-            for dy in 0..s {
-                let dst_y = row * s + dy;
-                let row_off = dst_y * nw + col * s;
-                for dx in 0..s {
-                    out[row_off + dx] = v;
-                }
-            }
+    // Preserve aspect ratio: `dst_h = round(dst_w * src_h / src_w)`.
+    let dst_h = ((dst_w as u64 * src_h as u64) / src_w as u64).max(1) as u32;
+    let mut out = vec![0_u8; (dst_w as usize) * (dst_h as usize)];
+    let src_w_u = src_w as u64;
+    let src_h_u = src_h as u64;
+    let dst_w_u = dst_w as u64;
+    let dst_h_u = dst_h as u64;
+    for y in 0..dst_h as usize {
+        let sy = ((y as u64) * src_h_u / dst_h_u).min(src_h_u - 1) as usize;
+        let src_row = sy * src_w as usize;
+        let dst_row = y * dst_w as usize;
+        for x in 0..dst_w as usize {
+            let sx = ((x as u64) * src_w_u / dst_w_u).min(src_w_u - 1) as usize;
+            out[dst_row + x] = pixels[src_row + sx];
         }
     }
-    (out, new_w, new_h)
+    (out, dst_w, dst_h)
 }
 
 /// Invert a greyscale pixelmap in place: `v = 255 - v`. Turns the raw
@@ -392,41 +397,61 @@ mod tests {
     }
 
     #[test]
-    fn upscale_brings_small_plot_above_target() {
-        // 287 ↦ scale=7 ↦ 287*7 = 2009 ≥ 2000.
+    fn resize_hits_exact_target_width() {
         let pixels: Vec<u8> = (0..287 * 287).map(|i| (i % 256) as u8).collect();
-        let (out, w, h) = upscale_nearest(&pixels, 287, 287, 2000);
-        assert_eq!(w, 287 * 7);
-        assert_eq!(h, 287 * 7);
-        assert_eq!(out.len(), (w as usize) * (h as usize));
-        assert!(w >= 2000);
-        // Each input pixel must reproduce as a 7×7 block: the top-
-        // left 7×7 block should all equal pixels[0].
-        let v00 = pixels[0];
-        for dy in 0..7 {
-            for dx in 0..7 {
-                assert_eq!(out[dy * w as usize + dx], v00);
-            }
-        }
+        let (out, w, h) = resize_nearest(&pixels, 287, 287, 2000);
+        assert_eq!(w, 2000);
+        assert_eq!(h, 2000); // square input → square output
+        assert_eq!(out.len(), 2000 * 2000);
+        // Top-left output pixel maps to top-left input pixel.
+        assert_eq!(out[0], pixels[0]);
     }
 
     #[test]
-    fn upscale_skips_when_already_large_enough() {
-        let pixels = vec![42_u8; 3000 * 100];
-        let (out, w, h) = upscale_nearest(&pixels, 3000, 100, 2000);
-        assert_eq!(w, 3000);
+    fn resize_preserves_aspect_ratio() {
+        // 100 × 50, target 200 ↦ height = 200 * 50 / 100 = 100.
+        let pixels = vec![0_u8; 100 * 50];
+        let (_, w, h) = resize_nearest(&pixels, 100, 50, 200);
+        assert_eq!(w, 200);
         assert_eq!(h, 100);
+        // 1342 × 1308, target 2000 ↦ height = 2000*1308/1342 = 1949.
+        let pixels = vec![0_u8; 1342 * 1308];
+        let (_, w, h) = resize_nearest(&pixels, 1342, 1308, 2000);
+        assert_eq!(w, 2000);
+        assert_eq!(h, 1949);
+    }
+
+    #[test]
+    fn resize_dst_w_zero_is_noop() {
+        let pixels = vec![42_u8; 100 * 50];
+        let (out, w, h) = resize_nearest(&pixels, 100, 50, 0);
+        assert_eq!((w, h), (100, 50));
         assert_eq!(out, pixels);
     }
 
     #[test]
-    fn upscale_preserves_aspect_ratio() {
-        // 100 × 50, target 250 ↦ scale = ceil(250/100) = 3 ↦ 300 × 150.
-        let pixels = vec![0_u8; 100 * 50];
-        let (_, w, h) = upscale_nearest(&pixels, 100, 50, 250);
-        assert_eq!(w, 300);
-        assert_eq!(h, 150);
-        assert_eq!(w as f32 / h as f32, 100.0 / 50.0);
+    fn resize_dst_w_equal_src_w_is_noop() {
+        let pixels: Vec<u8> = (0..3000_u32).map(|i| (i % 256) as u8).collect();
+        let (out, w, h) = resize_nearest(&pixels, 300, 10, 300);
+        assert_eq!((w, h), (300, 10));
+        assert_eq!(out, pixels);
+    }
+
+    #[test]
+    fn resize_downscale_drops_pixels_cleanly() {
+        // 10×10 input with each pixel marked by its row index.
+        let mut pixels = vec![0_u8; 100];
+        for y in 0..10 {
+            for x in 0..10 {
+                pixels[y * 10 + x] = y as u8;
+            }
+        }
+        // Downscale to 5×5.
+        let (out, w, h) = resize_nearest(&pixels, 10, 10, 5);
+        assert_eq!((w, h), (5, 5));
+        // Each output row maps to a single input row: row y maps to
+        // input row (y * 10 / 5) = 2y. So out[2*5+0] should equal 4.
+        assert_eq!(out[2 * 5 + 0], 4);
     }
 
     #[test]

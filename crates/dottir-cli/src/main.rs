@@ -123,14 +123,15 @@ struct BatchArgs {
     #[arg(long, default_value_t = false)]
     no_sidecar: bool,
 
-    /// Target longer-side resolution for the PNG, in pixels. Small
-    /// plots (e.g. a 287 bp self-comparison) are nearest-neighbour
-    /// upscaled with an integer scale factor so the longer side
-    /// reaches at least this many pixels. Set to 0 to disable
-    /// upscaling and write the pixelmap at its native resolution.
+    /// Exact PNG width in pixels. Height is derived to preserve
+    /// the input aspect ratio. The pixelmap is nearest-neighbour
+    /// resized to fit (upscale gives pixel-perfect blocks;
+    /// downscale drops pixels — prefer to omit this flag if you
+    /// want a smaller image). Capped at 16384 px. Pass 0 to skip
+    /// resizing and write the pixelmap at its native resolution.
     /// Has no effect on the SVG (SVG renderers scale themselves).
     #[arg(long, value_name = "PX", default_value_t = 2000)]
-    target_width: u32,
+    width: u32,
 
     /// Also write an SVG version of the plot (with embedded PNG +
     /// axis labels) to this path.
@@ -299,24 +300,32 @@ fn run_batch(args: BatchArgs) -> Result<()> {
         .map(|(a, b)| (*a, *b as &str))
         .collect();
 
-    // Nearest-neighbour upscale small pixelmaps so the PNG opens
-    // at a comfortable size without losing pixel sharpness. Native
-    // SVG path stays at the original resolution (SVG renderers
-    // scale themselves).
-    let (png_pixels, png_w, png_h) = if args.target_width > 0 {
-        dottir_io::text_overlay::upscale_nearest(
+    // Resize the pixelmap to the requested PNG width (preserving
+    // aspect ratio). `--width 0` is the opt-out. Cap at a generous
+    // upper bound so a stray digit can't OOM. SVG keeps the native
+    // resolution (SVG renderers scale themselves).
+    const MAX_PNG_WIDTH: u32 = 16384;
+    let requested_w = args.width.min(MAX_PNG_WIDTH);
+    if requested_w != args.width {
+        tracing::warn!(
+            "PNG width {} clamped to {MAX_PNG_WIDTH}",
+            args.width
+        );
+    }
+    let (png_pixels, png_w, png_h) = if requested_w > 0 {
+        dottir_io::text_overlay::resize_nearest(
             &plot.pixels,
             plot.width,
             plot.height,
-            args.target_width,
+            requested_w,
         )
     } else {
         (plot.pixels.clone(), plot.width, plot.height)
     };
     if png_w != plot.width {
         tracing::info!(
-            "PNG upscaled {}×{} → {}×{} (target {} px)",
-            plot.width, plot.height, png_w, png_h, args.target_width
+            "PNG resized {}×{} → {}×{} (--width {})",
+            plot.width, plot.height, png_w, png_h, args.width
         );
     }
     // Coord-space dims for axis labels are the sequence lengths

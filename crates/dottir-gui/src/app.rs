@@ -1100,7 +1100,7 @@ impl DottirApp {
             // crisp under viewport zoom.
             self.draw_axis_labels(ui, rect, plot);
 
-            // Crosshair overlay.
+            // Crosshair overlay + coord label.
             if let Some((cq, cs)) = self.crosshair {
                 let cx = rect.left()
                     + ((cq as f32 + 0.5) - self.view_offset.x) * self.display_zoom;
@@ -1114,6 +1114,49 @@ impl DottirApp {
                 ui.painter().line_segment(
                     [Pos2::new(cx, rect.top()), Pos2::new(cx, rect.bottom())],
                     stroke,
+                );
+
+                // Coord label next to the cross. Shows sequence
+                // coords; for multi-record FASTAs the helper renders
+                // `record_id:pos`. Placed bottom-right of the cross
+                // by default, or flipped to the left/top side if
+                // it'd run off the canvas edge.
+                let z = plot.params.zoom.max(1) as usize;
+                let q_seq = (cq as usize) * z + z / 2;
+                let s_seq = (cs as usize) * z + z / 2;
+                let label = format!(
+                    "q = {}, s = {}",
+                    format_coord(self.query.as_ref(), q_seq),
+                    format_coord(self.subject.as_ref(), s_seq),
+                );
+                let font = egui::FontId::monospace(11.0);
+                let label_size =
+                    ui.painter().layout_no_wrap(label.clone(), font.clone(), Color32::BLACK).size();
+                let pad = 4.0;
+                let mut lx = cx + 6.0;
+                let mut ly = cy + 6.0;
+                if lx + label_size.x + pad > rect.right() {
+                    lx = cx - 6.0 - label_size.x - 2.0 * pad;
+                }
+                if ly + label_size.y + pad > rect.bottom() {
+                    ly = cy - 6.0 - label_size.y - 2.0 * pad;
+                }
+                // Backing rect for readability over dotplot ink.
+                let bg = Rect::from_min_size(
+                    Pos2::new(lx - pad, ly - pad),
+                    Vec2::new(label_size.x + 2.0 * pad, label_size.y + 2.0 * pad),
+                );
+                ui.painter().rect_filled(
+                    bg,
+                    3.0,
+                    Color32::from_rgba_unmultiplied(255, 255, 255, 220),
+                );
+                ui.painter().text(
+                    Pos2::new(lx, ly),
+                    egui::Align2::LEFT_TOP,
+                    label,
+                    font,
+                    Color32::from_rgb(120, 0, 0),
                 );
             }
         });
