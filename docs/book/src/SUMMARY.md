@@ -6,6 +6,7 @@
 
 - [Installation](./install.md)
 - [The `dottir batch` CLI](./cli.md)
+- [The `dottir-gui` interactive viewer](./gui.md)
 
 # Concepts
 

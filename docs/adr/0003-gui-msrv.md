@@ -1,7 +1,12 @@
 # ADR 0003 — Defer egui/eframe runtime to a future MSRV bump
 
-* Status: Superseded by the MSRV-1.85 bump on 2026-05-17 — egui MVP
-  is now in tree (Phase 5 commit).
+* Status: **Superseded** by commit
+  [cd3924e](https://github.com/petr/dottir/commit/cd3924e) ("Bump
+  MSRV to 1.85 and unpin transitive deps", 2026-05-17). Phase 5
+  GUI MVP shipped in [cc1fbf1](https://github.com/petr/dottir/commit/cc1fbf1)
+  (egui/eframe at 0.29), light theme + CLI pre-load follow-ups in
+  [0de5f72](https://github.com/petr/dottir/commit/0de5f72) and
+  [436a809](https://github.com/petr/dottir/commit/436a809).
 * Date: 2026-05-16
 * Deciders: petr
 
