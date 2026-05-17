@@ -265,6 +265,49 @@ Already implied by C2 but worth stating: any compute longer than ~100 ms
 moves off the UI thread. Failures (OOM, invalid matrix) surface as a
 red toast in the status bar instead of blocking the UI.
 
+### C7. `dottir-gui` command-line: pre-load sequences
+
+Mirror the original `dotter` program's invocation: `dotter q.fa s.fa`
+opens with both sequences pre-loaded and the dotplot already computed.
+Today dottir-gui takes no CLI args (or three positional args used as a
+headless fallback before Phase 5 landed — now obsolete).
+
+Replace the manual `std::env::args` parsing in `dottir-gui/src/main.rs`
+with a `clap` parser:
+
+```text
+dottir-gui [QUERY] [SUBJECT] [OPTIONS]
+
+Positional:
+  QUERY     Optional query FASTA path; loaded at startup.
+  SUBJECT   Optional subject FASTA path; loaded at startup.
+
+Options (mirror PlotConfig + the original Dotter flags):
+  -W, --window N        Window-size override.
+  -z, --zoom N          Computation zoom.
+      --mode MODE       blastn | blastp.
+      --matrix NAME     Score matrix name (built-in).
+      --self            Self-comparison.
+      --memory-mib N    Memory cap; surfaces C1 setting.
+  -h, --help / -V, --version
+```
+
+If `QUERY` and `SUBJECT` are both supplied, the app `recompute()`s
+immediately after window creation; otherwise it starts with the
+no-plot placeholder (current behaviour).
+
+**Acceptance**: `dottir-gui examples/chr4_ref_seq.fasta examples/chr4_ref_seq.fasta --self -W 25`
+opens with a computed self-comparison ready for inspection.
+
+### C8. Light colour scheme as the GUI default
+
+Reviewer's observation: egui's default visuals are dark, but the
+plotting area is essentially light (greyscale pixelmap on near-white
+background). The mismatch makes axis labels and panel text hard to
+read against the plot. Switch the default to
+`egui::Visuals::light()` in `DottirApp::new`, and add a "Dark theme"
+toggle in the View menu for users who prefer the contrast inversion.
+
 ---
 
 ## Phase D — Export layer

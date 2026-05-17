@@ -131,10 +131,18 @@ pub struct DottirApp {
     /// Crosshair in pixelmap coords (q, s).
     crosshair: Option<(u32, u32)>,
     show_settings: bool,
+    /// True = light theme (the default — matches the greyscale plot
+    /// area). False = egui's dark theme.
+    light_theme: bool,
 }
 
 impl DottirApp {
-    pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        // Default to a light theme — the plotting area is a greyscale
+        // pixelmap on a near-white background, so a dark surround
+        // muddles axis labels and panel text. Users who prefer dark
+        // can toggle it in the View menu.
+        cc.egui_ctx.set_visuals(egui::Visuals::light());
         Self {
             query: None,
             subject: None,
@@ -148,6 +156,7 @@ impl DottirApp {
             display_zoom: 1.0,
             crosshair: None,
             show_settings: false,
+            light_theme: true,
         }
     }
 
@@ -358,6 +367,20 @@ impl DottirApp {
                     if ui.button("Reset greyramp").clicked() {
                         self.greyramp = Greyramp::default();
                         self.texture_dirty = true;
+                    }
+                    ui.separator();
+                    let theme_label = if self.light_theme {
+                        "Switch to dark theme"
+                    } else {
+                        "Switch to light theme"
+                    };
+                    if ui.button(theme_label).clicked() {
+                        self.light_theme = !self.light_theme;
+                        ctx.set_visuals(if self.light_theme {
+                            egui::Visuals::light()
+                        } else {
+                            egui::Visuals::dark()
+                        });
                     }
                     ui.separator();
                     if ui.button("Settings…").clicked() {
