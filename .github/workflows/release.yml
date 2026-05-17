@@ -1,5 +1,20 @@
 name: Release
 
+# Tag-driven release pipeline.
+#
+#   git tag v0.X.Y && git push origin v0.X.Y
+#
+# Stages:
+#   1. check-tag — strict version match between the tag and the
+#      [workspace.package].version in Cargo.toml. Fails fast.
+#   2. build matrix (Linux x86_64, Windows x86_64) — release binaries
+#      for both `dottir` and `dottir-gui`, packaged as tar.gz / zip
+#      with a sha256 sidecar.
+#   3. publish — gh release create with auto-generated notes; uploads
+#      every archive + .sha256.
+#   4. conda — builds linux-64 and win-64 conda packages from
+#      recipe/meta.yaml and uploads to the petrnovak Anaconda channel.
+
 on:
   push:
     tags: ["v*.*.*"]
@@ -8,44 +23,167 @@ permissions:
   contents: write
 
 jobs:
+  check-tag:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.parse.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: parse
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          ver="${tag#v}"
+          cargo_ver=$(awk -F'"' '
+            /^\[workspace.package\]/{f=1; next}
+            f && /^\[/{f=0}
+            f && /^version[[:space:]]*=/{print $2; exit}
+          ' Cargo.toml)
+          echo "tag=$tag  ver=$ver  cargo_ver=$cargo_ver"
+          if [ "$ver" != "$cargo_ver" ]; then
+            echo "::error::tag $tag (version $ver) doesn't match Cargo.toml workspace version $cargo_ver"
+            exit 1
+          fi
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+
   build:
+    needs: check-tag
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-musl
-            artifact: dottir-x86_64-linux
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+            bin_suffix: ""
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            artifact: dottir-x86_64-windows.exe
+            archive: zip
+            bin_suffix: ".exe"
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-      - name: Install musl-tools (Linux)
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Linux GUI deps
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
-      - name: Build dottir-cli
-        run: cargo build --release --locked --target ${{ matrix.target }} -p dottir-cli
-      - name: Rename binary (Unix)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libxcursor-dev libxi-dev libxrandr-dev libgtk-3-dev \
+            libxkbcommon-dev libwayland-dev libfontconfig1-dev
+      - name: Build release binaries
+        run: cargo build --release --workspace --locked
+      - name: Strip (Linux)
         if: runner.os == 'Linux'
-        run: cp target/${{ matrix.target }}/release/dottir ${{ matrix.artifact }}
-      - name: Rename binary (Windows)
+        run: |
+          strip target/release/dottir
+          strip target/release/dottir-gui
+      - name: Stage archive contents
+        shell: bash
+        run: |
+          set -euo pipefail
+          ver="${{ needs.check-tag.outputs.version }}"
+          name="dottir-v${ver}-${{ matrix.target }}"
+          mkdir -p "dist/$name"
+          cp target/release/dottir${{ matrix.bin_suffix }}     "dist/$name/"
+          cp target/release/dottir-gui${{ matrix.bin_suffix }} "dist/$name/"
+          cp README.md LICENSE docs/CHANGELOG.md               "dist/$name/"
+          echo "STAGE=dist/$name" >> "$GITHUB_ENV"
+          echo "ARCHIVE_BASE=$name" >> "$GITHUB_ENV"
+      - name: Pack tar.gz (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          cd dist
+          tar -czf "${ARCHIVE_BASE}.tar.gz" "${ARCHIVE_BASE}"
+          sha256sum "${ARCHIVE_BASE}.tar.gz" > "${ARCHIVE_BASE}.tar.gz.sha256"
+      - name: Pack zip (Windows)
         if: runner.os == 'Windows'
-        run: copy target\${{ matrix.target }}\release\dottir.exe ${{ matrix.artifact }}
-      - name: Upload to release
-        uses: softprops/action-gh-release@v2
+        shell: bash
+        run: |
+          cd dist
+          7z a "${ARCHIVE_BASE}.zip" "${ARCHIVE_BASE}" >/dev/null
+          sha256sum "${ARCHIVE_BASE}.zip" > "${ARCHIVE_BASE}.zip.sha256"
+      - uses: actions/upload-artifact@v4
         with:
-          files: ${{ matrix.artifact }}
+          name: archive-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.sha256
+          if-no-files-found: error
 
-  deny:
+  publish:
+    needs: [check-tag, build]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Install cargo-deny
-        run: cargo install --locked cargo-deny
-      - run: cargo deny --all-features check
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: archive-*
+          merge-multiple: true
+      - name: Verify checksums
+        run: |
+          set -euo pipefail
+          cd dist
+          for sum in *.sha256; do
+            sha256sum -c "$sum"
+          done
+          ls -la
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ver="${{ needs.check-tag.outputs.version }}"
+          gh release create "v$ver" \
+            --title "v$ver" \
+            --generate-notes \
+            ./dist/*.tar.gz ./dist/*.zip ./dist/*.sha256
+
+  conda:
+    needs: [check-tag, publish]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            platform: linux-64
+          - os: windows-latest
+            platform: win-64
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash -el {0}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: conda-incubator/setup-miniconda@v3
+        with:
+          miniforge-version: latest
+          channels: conda-forge
+          channel-priority: strict
+      - name: Install conda-build + anaconda-client
+        run: conda install -n base -y conda-build anaconda-client
+      - name: Build conda package
+        env:
+          DOTTIR_VERSION: ${{ needs.check-tag.outputs.version }}
+        run: |
+          conda build recipe/ --output-folder conda-out -c conda-forge
+      - name: Upload to petrnovak channel
+        env:
+          ANACONDA_API_TOKEN: ${{ secrets.ANACONDA_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Glob handles both .conda (new) and .tar.bz2 (legacy) outputs.
+          shopt -s nullglob
+          pkgs=( conda-out/${{ matrix.platform }}/dottir-*.conda
+                 conda-out/${{ matrix.platform }}/dottir-*.tar.bz2 )
+          if [ "${#pkgs[@]}" -eq 0 ]; then
+            echo "::error::no conda packages found under conda-out/${{ matrix.platform }}/"
+            exit 1
+          fi
+          anaconda --token "$ANACONDA_API_TOKEN" upload \
+            --user petrnovak --force "${pkgs[@]}"

@@ -1,0 +1,6 @@
+# Build-matrix overrides for conda-build.
+#
+# This file intentionally minimal — conda-forge's defaults match what
+# we want (current GCC/MSVC, default glibc on the ubuntu-22.04 runner).
+# Pin specific compiler/toolchain versions here only if a runner
+# upgrade breaks the recipe.

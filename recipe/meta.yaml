@@ -1,0 +1,81 @@
+{% set version = environ.get("DOTTIR_VERSION", "0.0.0") %}
+
+package:
+  name: dottir
+  version: {{ version }}
+
+source:
+  # Build from the checkout the workflow already has. This keeps the
+  # recipe self-contained and avoids the chicken-and-egg of needing
+  # the GitHub release to exist before we can build the conda package.
+  path: ../..
+
+build:
+  number: 0
+  # build.sh / bld.bat are auto-discovered next to meta.yaml.
+  # The Rust toolchain is provided by the `rust` host package; we
+  # delete `rust-toolchain.toml` in the build script so cargo does
+  # not try to invoke rustup (not installed in the conda build env).
+  binary_relocation: true
+  missing_dso_whitelist:
+    # eframe links against the X11/wayland libs we declare in `host`,
+    # but dlopens libGL at runtime — that's resolved via the user's
+    # system OpenGL stack, not bundled.
+    - "*/libGL.so*"
+    - "*/libEGL.so*"
+
+requirements:
+  build:
+    - {{ compiler('c') }}
+    - {{ compiler('cxx') }}
+    - rust >=1.85
+    - make                                                 # [unix]
+    - pkg-config                                           # [linux]
+  host:                                                    # [linux]
+    - xorg-libx11                                          # [linux]
+    - xorg-libxcursor                                      # [linux]
+    - xorg-libxi                                           # [linux]
+    - xorg-libxrandr                                       # [linux]
+    - libxkbcommon                                         # [linux]
+    - wayland                                              # [linux]
+    - fontconfig                                           # [linux]
+  run:                                                     # [linux]
+    - {{ pin_compatible('libxkbcommon') }}                 # [linux]
+    - {{ pin_compatible('wayland') }}                      # [linux]
+    - {{ pin_compatible('fontconfig') }}                   # [linux]
+    # X11 .so deps are auto-detected from the binary's NEEDED entries
+    # by conda-build's run_exports machinery, so we don't list them
+    # explicitly here.
+
+test:
+  commands:
+    - dottir --version
+    # The GUI binary's --version exits before eframe initializes,
+    # so this is a safe smoke test even on the headless build runner.
+    - dottir-gui --version                                 # [unix]
+    - dottir-gui.exe --version                             # [win]
+
+about:
+  home: https://github.com/kavonrtep/dottir
+  license: GPL-3.0-or-later
+  license_family: GPL3
+  license_file: LICENSE
+  summary: "Matrix-scored sequence dot-matrix plotter (Rust port of Dotter)"
+  description: |
+    dottir is a modern Rust reimplementation of Dotter
+    (Sonnhammer & Durbin 1995): a sliding-window, score-matrix
+    sequence dot-matrix plotter with an interactive greyramp GUI
+    and a headless batch CLI. Two binaries are installed:
+
+      * dottir      — headless batch CLI (FASTA in, PNG out + sidecar)
+      * dottir-gui  — interactive viewer (egui/eframe)
+
+    Faithful to the original algorithms (Karlin/Altschul window
+    sizing, anti-diagonal suppression, ping-pong sum recurrence)
+    with cross-platform builds and modern dependency management.
+  dev_url: https://github.com/kavonrtep/dottir
+  doc_url: https://github.com/kavonrtep/dottir/tree/main/docs
+
+extra:
+  recipe-maintainers:
+    - kavonrtep
