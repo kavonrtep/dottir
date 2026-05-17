@@ -70,6 +70,11 @@ struct Settings {
     /// Pre-process: reverse-complement the subject (spec §4.1.10
     /// `-v`). BLASTN only.
     reverse_subject: bool,
+    /// Spec §4.4.3 inverted-repeat highlighting: when on, the
+    /// forward+reverse passes write into separate channels and the
+    /// renderer paints reverse hits in `reverse_colour`. Only
+    /// meaningful for BLASTN Strand::Both.
+    inverted_repeat_colour: bool,
 }
 
 impl Default for Settings {
@@ -86,6 +91,7 @@ impl Default for Settings {
             memory_limit_bytes: 512 * 1024 * 1024,
             reverse_query: false,
             reverse_subject: false,
+            inverted_repeat_colour: false,
         }
     }
 }
@@ -199,6 +205,7 @@ impl DottirApp {
             memory_limit_bytes: startup.memory_limit_bytes,
             reverse_query: false,
             reverse_subject: false,
+            inverted_repeat_colour: false,
         };
 
         let mut app = Self {
@@ -280,7 +287,9 @@ impl DottirApp {
             triangle: self.settings.triangle,
             disable_mirror: false,
             memory_limit_bytes: self.settings.memory_limit_bytes,
-            separate_strand_channels: false,
+            separate_strand_channels: self.settings.inverted_repeat_colour
+                && self.settings.mode == BlastMode::Blastn
+                && matches!(self.settings.strand, Strand::Both),
             reverse_query: self.settings.reverse_query,
             reverse_subject: self.settings.reverse_subject,
         };
@@ -320,10 +329,48 @@ impl DottirApp {
             return;
         }
         let lut = self.greyramp.lut();
+        // Spec §4.4.3 inverted-repeat highlighting: when both
+        // forward+reverse channels are populated, paint forward in
+        // grey and reverse in magenta (overlapping cells take
+        // whichever channel is stronger after the greyramp).
         let mut rgba = Vec::with_capacity(plot.pixels.len() * 4);
-        for &v in &plot.pixels {
-            let g = lut[v as usize];
-            rgba.extend_from_slice(&[g, g, g, 255]);
+        match (plot.forward_pixels.as_deref(), plot.reverse_pixels.as_deref()) {
+            (Some(fwd), Some(rev)) if self.settings.inverted_repeat_colour => {
+                for i in 0..plot.pixels.len() {
+                    let f = lut[fwd[i] as usize]; // forward strength (0..255)
+                    let r = lut[rev[i] as usize]; // reverse strength
+                    // Forward → black on white (so darker means more
+                    // confident); reverse channel uses magenta (255,
+                    // 0, 255).
+                    // Blend: take the channel with the highest "ink"
+                    // (= 255 - lut value, since white = 255 means
+                    // "no ink"). If forward wins, render greyscale; if
+                    // reverse wins, render magenta-tinted.
+                    let f_ink = 255 - f;
+                    let r_ink = 255 - r;
+                    let (cr, cg, cb) = if f_ink >= r_ink {
+                        (f, f, f) // greyscale forward
+                    } else {
+                        // Reverse hit. Render as magenta whose
+                        // intensity scales with r_ink.
+                        let ink = r_ink as u16;
+                        let bg = 255_u16 - ink; // white background
+                        (
+                            (bg + ink * 220 / 255) as u8,
+                            (bg) as u8,
+                            (bg + ink * 220 / 255) as u8,
+                        )
+                    };
+                    rgba.extend_from_slice(&[cr, cg, cb, 255]);
+                }
+            }
+            _ => {
+                // Plain greyscale: combined channel through the LUT.
+                for &v in &plot.pixels {
+                    let g = lut[v as usize];
+                    rgba.extend_from_slice(&[g, g, g, 255]);
+                }
+            }
         }
         let image = ColorImage::from_rgba_unmultiplied(
             [plot.width as usize, plot.height as usize],
@@ -660,6 +707,17 @@ impl DottirApp {
                             .checkbox(
                                 &mut self.settings.reverse_subject,
                                 "Reverse-complement subject (-v)",
+                            )
+                            .changed()
+                        {
+                            changed = true;
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        if ui
+                            .checkbox(
+                                &mut self.settings.inverted_repeat_colour,
+                                "Highlight inverted repeats (magenta reverse strand)",
                             )
                             .changed()
                         {
