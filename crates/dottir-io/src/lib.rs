@@ -26,4 +26,4 @@ pub mod sequence;
 pub mod svg_export;
 pub mod text_overlay;
 
-pub use sequence::{RecordSpan, Sequence};
+pub use sequence::{detect_alphabet, DetectedAlphabet, RecordSpan, Sequence};

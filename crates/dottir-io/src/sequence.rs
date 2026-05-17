@@ -136,6 +136,52 @@ impl Sequence {
     pub fn bytes(&self) -> &[u8] {
         &self.seq
     }
+
+    /// Heuristically classify this sequence as DNA or protein.
+    /// Same rule the original Dotter uses (`detectSeqType`): if the
+    /// non-`ACGTNU` ratio across the first sampled residues exceeds a
+    /// threshold, it's protein. Whitespace is already stripped by the
+    /// FASTA reader, so every byte here is a residue.
+    pub fn detect_alphabet(&self) -> DetectedAlphabet {
+        detect_alphabet(&self.seq)
+    }
+}
+
+/// Result of [`Sequence::detect_alphabet`] / [`detect_alphabet`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DetectedAlphabet {
+    Dna,
+    Protein,
+    /// Buffer empty or too short to classify.
+    Unknown,
+}
+
+/// Classify a residue buffer as DNA or protein. The rule: count the
+/// fraction of bytes outside `ACGTNU` (plus `acgtnu` since the FASTA
+/// reader could in theory hand back mixed case before uppercasing). If
+/// that fraction is above 10% it's protein. Up to the first 4096
+/// residues are sampled, which is plenty to disambiguate any real
+/// FASTA without scanning a 500-Mb genome.
+pub fn detect_alphabet(seq: &[u8]) -> DetectedAlphabet {
+    if seq.is_empty() {
+        return DetectedAlphabet::Unknown;
+    }
+    let sample = &seq[..seq.len().min(4096)];
+    let mut non_dna: usize = 0;
+    for &b in sample {
+        match b {
+            b'A' | b'C' | b'G' | b'T' | b'N' | b'U' => {}
+            b'a' | b'c' | b'g' | b't' | b'n' | b'u' => {}
+            _ if b.is_ascii_alphabetic() => non_dna += 1,
+            _ => {}
+        }
+    }
+    let ratio = non_dna as f64 / sample.len() as f64;
+    if ratio > 0.10 {
+        DetectedAlphabet::Protein
+    } else {
+        DetectedAlphabet::Dna
+    }
 }
 
 #[cfg(test)]
@@ -217,5 +263,21 @@ mod tests {
     fn bytes_matches_seq() {
         let s = Sequence::from_records(vec![rec("x", b"ACGT")], None);
         assert_eq!(s.bytes(), b"ACGT");
+    }
+
+    #[test]
+    fn detect_alphabet_recognises_dna_protein_and_empty() {
+        assert_eq!(detect_alphabet(b""), DetectedAlphabet::Unknown);
+        assert_eq!(
+            detect_alphabet(b"ACGTACGTNACGT"),
+            DetectedAlphabet::Dna,
+        );
+        // Real protein (P00533 prefix) — has K, T, I, etc.
+        assert_eq!(
+            detect_alphabet(b"MRPSGTAGAALLALLAALCPASRALEEKKVCQGTSNKLT"),
+            DetectedAlphabet::Protein,
+        );
+        // Edge case: pure-N "DNA" classification.
+        assert_eq!(detect_alphabet(b"NNNNNNNN"), DetectedAlphabet::Dna);
     }
 }
