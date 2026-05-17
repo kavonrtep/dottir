@@ -113,6 +113,13 @@ pub fn text_width(s: &str) -> usize {
 /// at top and left, and numeric labels along both axes. Returns
 /// `(composite_pixels, total_width, total_height)`.
 ///
+/// `coord_w` and `coord_h` are the upper bounds of the **coordinate
+/// space** the axes label — typically the sequence lengths in
+/// residues. They can differ from `plot_w` / `plot_h` (the
+/// **pixel-canvas** dimensions) when the kernel ran at zoom > 1 or
+/// the pixelmap was nearest-neighbour upscaled. Pass `coord_w =
+/// plot_w, coord_h = plot_h` for the no-rescale case.
+///
 /// `pixels` is the input pixelmap in row-major form. The composite
 /// is also greyscale, with the same convention (0 = black ink,
 /// 255 = white). The caller is expected to have already applied any
@@ -121,6 +128,8 @@ pub fn compose_image_with_axes(
     pixels: &[u8],
     plot_w: u32,
     plot_h: u32,
+    coord_w: u32,
+    coord_h: u32,
     margin: u32,
 ) -> (Vec<u8>, u32, u32) {
     let total_w = plot_w + 2 * margin;
@@ -150,11 +159,21 @@ pub fn compose_image_with_axes(
     draw_vline(&mut canvas, stride_out, left, top, bot, frame_ink);
     draw_vline(&mut canvas, stride_out, right, top, bot, frame_ink);
 
-    // Tick marks + labels on the top axis (query).
-    let step_x = nice_tick_step(plot_w as u64, 60);
+    // Tick marks + labels on the top axis (query). Steps and labels
+    // are in coordinate space; tick *positions* convert to pixel
+    // space via the pixel/coord ratio.
+    let coord_w_safe = coord_w.max(1);
+    let coord_h_safe = coord_h.max(1);
+    let px_per_coord_x = plot_w as f64 / coord_w_safe as f64;
+    let px_per_coord_y = plot_h as f64 / coord_h_safe as f64;
+    let min_coord_step_x =
+        (60.0 / px_per_coord_x.max(f64::MIN_POSITIVE)).ceil().max(1.0) as u32;
+    let min_coord_step_y =
+        (60.0 / px_per_coord_y.max(f64::MIN_POSITIVE)).ceil().max(1.0) as u32;
+    let step_x = nice_tick_step(coord_w_safe as u64, min_coord_step_x);
     let mut t = 0_u64;
-    while t <= plot_w as u64 {
-        let x = m + t as usize;
+    while t <= coord_w_safe as u64 {
+        let x = m + (t as f64 * px_per_coord_x).round() as usize;
         if x >= stride_out {
             break;
         }
@@ -166,13 +185,11 @@ pub fn compose_image_with_axes(
         draw_text(&mut canvas, stride_out, total_h as usize, lx, ly, &label, 30);
         t = t.saturating_add(step_x);
     }
-    // Left axis (subject). Use the same min spacing as the top
-    // axis — small enough to give plenty of ticks, large enough to
-    // avoid format_kb collisions in the 1k-10k range.
-    let step_y = nice_tick_step(plot_h as u64, 60);
+    // Left axis (subject).
+    let step_y = nice_tick_step(coord_h_safe as u64, min_coord_step_y);
     let mut t = 0_u64;
-    while t <= plot_h as u64 {
-        let y = m + t as usize;
+    while t <= coord_h_safe as u64 {
+        let y = m + (t as f64 * px_per_coord_y).round() as usize;
         if y >= total_h as usize {
             break;
         }
@@ -241,6 +258,56 @@ pub fn format_kb(n: u64) -> String {
     }
 }
 
+/// Nearest-neighbour upscale a `(w × h)` greyscale pixelmap so the
+/// longer side is at least `target_max_dim` pixels, preserving the
+/// aspect ratio with an *integer* scale factor (every input pixel
+/// becomes a clean `scale × scale` block — no aliasing).
+///
+/// Returns the upscaled buffer plus its new dimensions. If
+/// `target_max_dim ≤ max(w, h)` or the inputs are zero-sized, the
+/// original is returned unchanged.
+///
+/// Used by the CLI's PNG exporter to bring tiny plots (e.g. a
+/// 287 bp self-comparison ↦ 287 × 287 pixels) up to a comfortable
+/// viewing size without committing to fractional scaling (which
+/// would smear pixel boundaries and break the "1 pixel = 1 matrix
+/// block" contract).
+pub fn upscale_nearest(
+    pixels: &[u8],
+    w: u32,
+    h: u32,
+    target_max_dim: u32,
+) -> (Vec<u8>, u32, u32) {
+    let max_dim = w.max(h);
+    if max_dim == 0 || target_max_dim <= max_dim {
+        return (pixels.to_vec(), w, h);
+    }
+    // Ceil-divide so the longer side ends up ≥ target.
+    let scale = ((target_max_dim + max_dim - 1) / max_dim).max(1);
+    if scale <= 1 {
+        return (pixels.to_vec(), w, h);
+    }
+    let new_w = w.saturating_mul(scale);
+    let new_h = h.saturating_mul(scale);
+    let mut out = vec![0_u8; (new_w as usize) * (new_h as usize)];
+    let s = scale as usize;
+    let w_us = w as usize;
+    let nw = new_w as usize;
+    for row in 0..h as usize {
+        for col in 0..w_us {
+            let v = pixels[row * w_us + col];
+            for dy in 0..s {
+                let dst_y = row * s + dy;
+                let row_off = dst_y * nw + col * s;
+                for dx in 0..s {
+                    out[row_off + dx] = v;
+                }
+            }
+        }
+    }
+    (out, new_w, new_h)
+}
+
 /// Invert a greyscale pixelmap in place: `v = 255 - v`. Turns the raw
 /// "0 = no hit (black), 255 = strong hit (white)" output from
 /// `compute_dotplot` into the analysis-friendly "white background,
@@ -307,7 +374,7 @@ mod tests {
     #[test]
     fn compose_writes_pixelmap_into_interior() {
         let pixels = vec![100_u8; 4 * 3];
-        let (canvas, tw, th) = compose_image_with_axes(&pixels, 4, 3, 10);
+        let (canvas, tw, th) = compose_image_with_axes(&pixels, 4, 3, 4, 3, 10);
         assert_eq!(tw, 24);
         assert_eq!(th, 23);
         // The interior pixel block should still read 100 (no
@@ -322,6 +389,44 @@ mod tests {
         // Outside-the-frame corners should be white background.
         assert_eq!(canvas[0], 255);
         assert_eq!(canvas[(tw - 1) as usize], 255);
+    }
+
+    #[test]
+    fn upscale_brings_small_plot_above_target() {
+        // 287 ↦ scale=7 ↦ 287*7 = 2009 ≥ 2000.
+        let pixels: Vec<u8> = (0..287 * 287).map(|i| (i % 256) as u8).collect();
+        let (out, w, h) = upscale_nearest(&pixels, 287, 287, 2000);
+        assert_eq!(w, 287 * 7);
+        assert_eq!(h, 287 * 7);
+        assert_eq!(out.len(), (w as usize) * (h as usize));
+        assert!(w >= 2000);
+        // Each input pixel must reproduce as a 7×7 block: the top-
+        // left 7×7 block should all equal pixels[0].
+        let v00 = pixels[0];
+        for dy in 0..7 {
+            for dx in 0..7 {
+                assert_eq!(out[dy * w as usize + dx], v00);
+            }
+        }
+    }
+
+    #[test]
+    fn upscale_skips_when_already_large_enough() {
+        let pixels = vec![42_u8; 3000 * 100];
+        let (out, w, h) = upscale_nearest(&pixels, 3000, 100, 2000);
+        assert_eq!(w, 3000);
+        assert_eq!(h, 100);
+        assert_eq!(out, pixels);
+    }
+
+    #[test]
+    fn upscale_preserves_aspect_ratio() {
+        // 100 × 50, target 250 ↦ scale = ceil(250/100) = 3 ↦ 300 × 150.
+        let pixels = vec![0_u8; 100 * 50];
+        let (_, w, h) = upscale_nearest(&pixels, 100, 50, 250);
+        assert_eq!(w, 300);
+        assert_eq!(h, 150);
+        assert_eq!(w as f32 / h as f32, 100.0 / 50.0);
     }
 
     #[test]

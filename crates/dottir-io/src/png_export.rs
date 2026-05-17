@@ -25,12 +25,20 @@ pub enum PngError {
 /// numeric labels around the pixelmap. The input `pixels` is
 /// inverted on the way out (raw kernel output is "0 = no hit", we
 /// emit "no hit = white") so the result is the analysis-friendly
-/// light-background plot. Margin defaults to ~50 px; pass 0 via
-/// [`write_grayscale_png_raw`] to skip the frame entirely.
+/// light-background plot.
+///
+/// `coord_w` and `coord_h` are the coordinate-space dimensions
+/// shown along the axes (typically the input sequence lengths in
+/// residues). They can differ from the pixel dimensions `width` /
+/// `height` when the caller has nearest-neighbour upscaled the
+/// pixelmap. For the no-rescale case pass `coord_w = width,
+/// coord_h = height`.
 pub fn write_grayscale_png_with_axes<P: AsRef<Path>>(
     path: P,
     width: u32,
     height: u32,
+    coord_w: u32,
+    coord_h: u32,
     pixels: &[u8],
     margin: u32,
     text_chunks: &[(&str, &str)],
@@ -42,11 +50,10 @@ pub fn write_grayscale_png_with_axes<P: AsRef<Path>>(
             len: pixels.len(),
         });
     }
-    // Invert so "no hit" (raw 0) renders as white and "strong hit"
-    // (raw 255) renders as black — the analysis-conventional look.
     let inverted = crate::text_overlay::inverted(pixels);
-    let (canvas, total_w, total_h) =
-        crate::text_overlay::compose_image_with_axes(&inverted, width, height, margin);
+    let (canvas, total_w, total_h) = crate::text_overlay::compose_image_with_axes(
+        &inverted, width, height, coord_w, coord_h, margin,
+    );
     write_grayscale_png_raw(path, total_w, total_h, &canvas, text_chunks)
 }
 

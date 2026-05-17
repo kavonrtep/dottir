@@ -123,6 +123,15 @@ struct BatchArgs {
     #[arg(long, default_value_t = false)]
     no_sidecar: bool,
 
+    /// Target longer-side resolution for the PNG, in pixels. Small
+    /// plots (e.g. a 287 bp self-comparison) are nearest-neighbour
+    /// upscaled with an integer scale factor so the longer side
+    /// reaches at least this many pixels. Set to 0 to disable
+    /// upscaling and write the pixelmap at its native resolution.
+    /// Has no effect on the SVG (SVG renderers scale themselves).
+    #[arg(long, value_name = "PX", default_value_t = 2000)]
+    target_width: u32,
+
     /// Also write an SVG version of the plot (with embedded PNG +
     /// axis labels) to this path.
     #[arg(long, value_name = "PATH")]
@@ -290,11 +299,37 @@ fn run_batch(args: BatchArgs) -> Result<()> {
         .map(|(a, b)| (*a, *b as &str))
         .collect();
 
+    // Nearest-neighbour upscale small pixelmaps so the PNG opens
+    // at a comfortable size without losing pixel sharpness. Native
+    // SVG path stays at the original resolution (SVG renderers
+    // scale themselves).
+    let (png_pixels, png_w, png_h) = if args.target_width > 0 {
+        dottir_io::text_overlay::upscale_nearest(
+            &plot.pixels,
+            plot.width,
+            plot.height,
+            args.target_width,
+        )
+    } else {
+        (plot.pixels.clone(), plot.width, plot.height)
+    };
+    if png_w != plot.width {
+        tracing::info!(
+            "PNG upscaled {}×{} → {}×{} (target {} px)",
+            plot.width, plot.height, png_w, png_h, args.target_width
+        );
+    }
+    // Coord-space dims for axis labels are the sequence lengths
+    // (residues), regardless of any pixelmap upscaling. For zoom > 1
+    // the pre-upscale pixelmap already represents `seq_len / zoom`
+    // pixels, but the axes still label in residue coordinates.
     png_export::write_grayscale_png_with_axes(
         &args.output,
-        plot.width,
-        plot.height,
-        &plot.pixels,
+        png_w,
+        png_h,
+        query.len() as u32,
+        subject.len() as u32,
+        &png_pixels,
         50, // margin in pixels
         &text_chunk_refs,
     )?;
