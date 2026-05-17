@@ -22,13 +22,19 @@ on:
 permissions:
   contents: write
 
+env:
+  # Opt third-party JS actions (rust-toolchain, rust-cache,
+  # setup-miniconda) into the Node 24 runtime ahead of GitHub's
+  # June 2026 forced cutover.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   check-tag:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.parse.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - id: parse
         shell: bash
         run: |
@@ -63,7 +69,7 @@ jobs:
             bin_suffix: ".exe"
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install Linux GUI deps
@@ -106,7 +112,7 @@ jobs:
           cd dist
           7z a "${ARCHIVE_BASE}.zip" "${ARCHIVE_BASE}" >/dev/null
           sha256sum "${ARCHIVE_BASE}.zip" > "${ARCHIVE_BASE}.zip.sha256"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: archive-${{ matrix.target }}
           path: |
@@ -119,8 +125,8 @@ jobs:
     needs: [check-tag, build]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v5
         with:
           path: dist
           pattern: archive-*
@@ -159,7 +165,7 @@ jobs:
       run:
         shell: bash -el {0}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: conda-incubator/setup-miniconda@v3
         with:
           miniforge-version: latest
