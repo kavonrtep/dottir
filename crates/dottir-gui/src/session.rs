@@ -57,7 +57,11 @@ pub struct SessionView {
     /// Display (viewport) zoom — distinct from `plot.zoom`, which is
     /// the *computation* zoom.
     pub display_zoom: f32,
-    /// Crosshair pixelmap coord, if set.
+    /// Crosshair residue coord `[q_seq, s_seq]` (0-indexed) since
+    /// schema v2. Schema v1 stored *full-sequence pixelmap* coords
+    /// here; the GUI migrates those on load (multiplies by the
+    /// recorded compute zoom + adds half a block) so old sessions
+    /// round-trip without visible drift.
     pub crosshair: Option<[u32; 2]>,
     pub light_theme: bool,
     /// H2: whether the alignment-view dock is shown. Default-true
@@ -78,7 +82,7 @@ fn default_align_window() -> u32 {
     100
 }
 
-pub const SESSION_VERSION: u32 = 1;
+pub const SESSION_VERSION: u32 = 2;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {

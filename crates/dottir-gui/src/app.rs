@@ -236,7 +236,13 @@ pub struct DottirApp {
     /// portion is visible. Clamped to `[0, max(0, pixelmap_dim −
     /// canvas_dim)]` per axis.
     view_offset: Vec2,
-    /// Crosshair in pixelmap coords (q, s).
+    /// Crosshair in *absolute residue* coords `(q_seq, s_seq)`,
+    /// 0-indexed into the full sequences (NOT pixelmap pixels and
+    /// NOT slice-local). Keyboard nudges move by 1 residue regardless
+    /// of compute zoom or slice — spec §4.2.4. Render-time conversion
+    /// to slice-local pixmap pixels is `q_pix = (q_seq - slice.start) / zoom`;
+    /// the crosshair hides itself when that pixel falls outside the
+    /// current slice's pixmap.
     crosshair: Option<(u32, u32)>,
     show_settings: bool,
     /// True = light theme (the default — matches the greyscale plot
@@ -378,9 +384,10 @@ impl ViewSlice {
 const RECT_ZOOM_MARGIN: f64 = 0.5;
 
 /// One slot on the history stack: enough state to restore a view.
-/// `view_offset` and `crosshair` are in pixelmap-pixel coords that
-/// only make sense at this snapshot's `slice` and `compute_zoom` —
-/// they're restored together so they stay consistent.
+/// `view_offset` is in pixelmap-pixel coords that only make sense at
+/// this snapshot's `slice` and `compute_zoom`. `crosshair` is in
+/// absolute residue coords and is slice/zoom-independent — it survives
+/// a snapshot restore without translation.
 #[derive(Clone, Debug)]
 struct ViewSnapshot {
     slice: ViewSlice,
@@ -826,10 +833,10 @@ impl DottirApp {
         self.settings.zoom = new_zoom;
         self.target_slice = Some(new_slice);
         self.pending_view_offset_after_compute = Some(Vec2::new(new_off_x, new_off_y));
-        // Crosshair coords are tied to the *old* slice/zoom — drop
-        // them rather than risk a misleading display. The user can
-        // re-click in the new view.
-        self.crosshair = None;
+        // Crosshair is in absolute residue coords — survives slice
+        // and zoom changes unchanged. If it falls outside the new
+        // slice the render path hides the lines (still recoverable
+        // by Back).
         self.recompute();
     }
 
@@ -1196,6 +1203,8 @@ impl eframe::App for DottirApp {
 impl DottirApp {
     fn handle_keyboard(&mut self, ctx: &Context) {
         let mods = ctx.input(|i| i.modifiers);
+        // Step is in *residues* — independent of compute zoom or slice
+        // (spec §4.2.4). Plain arrow = 1 residue, Shift = 10, Ctrl = 100.
         let step = if mods.ctrl {
             100_i32
         } else if mods.shift {
@@ -1203,14 +1212,27 @@ impl DottirApp {
         } else {
             1
         };
-        let Some(plot) = &self.plot else {
+        if self.plot.is_none() {
             return;
-        };
-        let pw = plot.width as i64;
-        let ph = plot.height as i64;
+        }
+        // Clamp bounds come from the loaded sequence lengths; falling
+        // back to a huge bound keeps things sensible if a sequence is
+        // somehow missing (the next click will reset).
+        let qlen = self
+            .query
+            .as_ref()
+            .map(|s| s.len() as i64)
+            .unwrap_or(i64::MAX);
+        let slen = self
+            .subject
+            .as_ref()
+            .map(|s| s.len() as i64)
+            .unwrap_or(i64::MAX);
         let mut nudged = false;
         let mut snap = false;
-        let (mut q, mut s) = self.crosshair.unwrap_or((plot.width / 2, plot.height / 2));
+        let (mut q, mut s) = self
+            .crosshair
+            .unwrap_or(((qlen / 2) as u32, (slen / 2) as u32));
         let mut q_i = q as i64;
         let mut s_i = s as i64;
         ctx.input(|i| {
@@ -1273,8 +1295,8 @@ impl DottirApp {
             }
         });
         if nudged {
-            q = q_i.clamp(0, pw - 1) as u32;
-            s = s_i.clamp(0, ph - 1) as u32;
+            q = q_i.clamp(0, qlen.saturating_sub(1).max(0)) as u32;
+            s = s_i.clamp(0, slen.saturating_sub(1).max(0)) as u32;
             self.crosshair = Some((q, s));
         }
         if snap {
@@ -1283,35 +1305,46 @@ impl DottirApp {
     }
 
     /// Snap the crosshair to the brightest pixel within a search
-    /// disc, with current position as the tie-breaker (closest
-    /// pixel wins on equal value). Bound to **Space**.
+    /// disc, then refine the residue position **within** that pixel
+    /// by rescoring the underlying sliding window at every
+    /// (q_residue, s_residue) midpoint in the pixel's `zoom × zoom`
+    /// block — eliminating the off-by-up-to-(zoom-1) error that
+    /// dropping back to "centre of pixel" would introduce at higher
+    /// zoom tiers. Bound to **Space**.
     ///
-    /// This is the simplest design that actually does what users
-    /// want: most strong dots on a dotplot belong to a diagonal
-    /// run, so "grab the local max" lands you on the nearest line.
-    /// A more sophisticated version would aggregate scores per
-    /// diagonal offset, but the simple local max is robust and
-    /// fast enough for arbitrarily large pixelmaps (we cap the
-    /// search at ±64 pixelmap pixels around the current
-    /// crosshair).
+    /// The coarse step finds the brightest pixel (current position is
+    /// the tie-breaker — closest wins on equal value); the fine step
+    /// recovers the exact base. For zoom = 1 the fine step is a no-op
+    /// (the block has a single candidate residue).
     fn snap_crosshair_to_line(&mut self) {
         let Some(plot) = self.plot.as_ref() else {
             return;
         };
-        let Some((cq, cs)) = self.crosshair else {
+        let Some((cq_seq, cs_seq)) = self.crosshair else {
             return;
         };
+        let z = plot.params.zoom.max(1) as i64;
+        let (q_off, s_off) = self
+            .current_slice
+            .as_ref()
+            .map(|sl| (sl.q_range.start as i64, sl.s_range.start as i64))
+            .unwrap_or((0, 0));
+        // Convert current residue crosshair to slice-local pixel.
+        // Negative result (crosshair outside slice on the low side)
+        // clamps to 0; the search radius then explores into the slice.
+        let cq_pix = (cq_seq as i64 - q_off).max(0);
+        let cs_pix = (cs_seq as i64 - s_off).max(0);
         const RADIUS: i64 = 64;
         let pw = plot.width as i64;
         let ph = plot.height as i64;
         let stride = plot.width as usize;
-        let q_lo = (cq as i64 - RADIUS).max(0);
-        let q_hi = (cq as i64 + RADIUS).min(pw - 1);
-        let s_lo = (cs as i64 - RADIUS).max(0);
-        let s_hi = (cs as i64 + RADIUS).min(ph - 1);
-        // Track the best (value, -distance², q, s) tuple. Tuple
-        // ordering gives us "max value, then min distance" for free.
-        let mut best: Option<(u8, i64, u32, u32)> = None;
+        let q_lo = (cq_pix - RADIUS).max(0);
+        let q_hi = (cq_pix + RADIUS).min(pw - 1);
+        let s_lo = (cs_pix - RADIUS).max(0);
+        let s_hi = (cs_pix + RADIUS).min(ph - 1);
+        // Track the best (value, -distance², q_pix, s_pix) tuple.
+        // Tuple ordering gives us "max value, then min distance" for free.
+        let mut best: Option<(u8, i64, i64, i64)> = None;
         for sp in s_lo..=s_hi {
             let row = sp as usize * stride;
             for qp in q_lo..=q_hi {
@@ -1319,10 +1352,10 @@ impl DottirApp {
                 if v == 0 {
                     continue;
                 }
-                let dq = qp - cq as i64;
-                let ds = sp - cs as i64;
+                let dq = qp - cq_pix;
+                let ds = sp - cs_pix;
                 let dist_sq = dq * dq + ds * ds;
-                let candidate = (v, -dist_sq, qp as u32, sp as u32);
+                let candidate = (v, -dist_sq, qp, sp);
                 match best {
                     None => best = Some(candidate),
                     Some(cur) if (candidate.0, candidate.1) > (cur.0, cur.1) => {
@@ -1332,9 +1365,63 @@ impl DottirApp {
                 }
             }
         }
-        if let Some((_, _, q, s)) = best {
-            self.crosshair = Some((q, s));
+        let Some((_, _, qp_best, sp_best)) = best else {
+            return;
+        };
+        // Default: residue at the centre of the pixel's block, with
+        // the slice origin added back in. The within-block refinement
+        // below overrides this when we can actually score the
+        // underlying window.
+        let mut q_residue = q_off + qp_best * z + z / 2;
+        let mut s_residue = s_off + sp_best * z + z / 2;
+        // Fine step: walk every residue midpoint in the block,
+        // compute the actual sliding-window score, pick the max.
+        // Only do this when both sequences are loaded and we have a
+        // score matrix — otherwise stick with the block centre.
+        if let (Some(qseq), Some(sseq), Some(matrix)) = (
+            self.query.as_ref(),
+            self.subject.as_ref(),
+            self.settings.build_matrix(),
+        ) {
+            let w = plot.params.window_size as i64;
+            let half = w / 2;
+            let qbytes = qseq.bytes();
+            let sbytes = sseq.bytes();
+            let qlen = qbytes.len() as i64;
+            let slen = sbytes.len() as i64;
+            let mode = self.settings.mode;
+            let strand = self.settings.strand;
+            let q_mid_lo = q_off + qp_best * z;
+            let q_mid_hi = (q_off + (qp_best + 1) * z).min(qlen);
+            let s_mid_lo = s_off + sp_best * z;
+            let s_mid_hi = (s_off + (sp_best + 1) * z).min(slen);
+            let mut best_score: i64 = i64::MIN;
+            for qm in q_mid_lo..q_mid_hi {
+                for sm in s_mid_lo..s_mid_hi {
+                    let sc = window_score(
+                        qbytes, sbytes, qm, sm, half, w, qlen, slen, &matrix, mode, strand,
+                    );
+                    if sc > best_score {
+                        best_score = sc;
+                        q_residue = qm;
+                        s_residue = sm;
+                    }
+                }
+            }
         }
+        let qlen_cap = self
+            .query
+            .as_ref()
+            .map(|s| s.len() as i64)
+            .unwrap_or(q_off + pw * z);
+        let slen_cap = self
+            .subject
+            .as_ref()
+            .map(|s| s.len() as i64)
+            .unwrap_or(s_off + ph * z);
+        let q_residue = q_residue.clamp(0, qlen_cap.saturating_sub(1).max(0));
+        let s_residue = s_residue.clamp(0, slen_cap.saturating_sub(1).max(0));
+        self.crosshair = Some((q_residue as u32, s_residue as u32));
     }
 
     fn draw_menu(&mut self, ctx: &Context) {
@@ -1417,7 +1504,10 @@ impl DottirApp {
                     ui.menu_button("Keyboard shortcuts…", |ui| {
                         let style = egui::FontId::monospace(11.0);
                         for (keys, desc) in [
-                            ("← → ↑ ↓", "nudge crosshair (Shift ×10, Ctrl ×100)"),
+                            (
+                                "← → ↑ ↓",
+                                "nudge crosshair 1 residue (Shift ×10, Ctrl ×100)",
+                            ),
                             (",   .", "step along main diagonal"),
                             ("[   ]", "step along anti-diagonal"),
                             ("Space", "snap crosshair to nearest strong dot"),
@@ -1900,23 +1990,33 @@ impl DottirApp {
                         "pixelmap {}×{}, W={}",
                         plot.width, plot.height, plot.params.window_size
                     ));
-                    if let Some((q, s)) = self.crosshair {
-                        let idx = (s as usize) * (plot.width as usize) + (q as usize);
-                        let v = plot.pixels.get(idx).copied().unwrap_or(0);
-                        // Pixmap pixel → absolute residue (zoom + slice).
-                        let z = plot.params.zoom as usize;
+                    if let Some((q_seq, s_seq)) = self.crosshair {
+                        // Crosshair is in absolute residue coords;
+                        // map to slice-local pixmap pixel to read the
+                        // raster value (0 if the crosshair is outside
+                        // the current slice).
+                        let z = plot.params.zoom.max(1) as usize;
                         let (q_off, s_off) = self
                             .current_slice
                             .as_ref()
                             .map(|sl| (sl.q_range.start, sl.s_range.start))
                             .unwrap_or((0, 0));
-                        let q_seq = q_off + (q as usize) * z + z / 2;
-                        let s_seq = s_off + (s as usize) * z + z / 2;
+                        let v = if (q_seq as usize) >= q_off && (s_seq as usize) >= s_off {
+                            let qp = ((q_seq as usize) - q_off) / z;
+                            let sp = ((s_seq as usize) - s_off) / z;
+                            if qp < plot.width as usize && sp < plot.height as usize {
+                                plot.pixels[sp * (plot.width as usize) + qp]
+                            } else {
+                                0
+                            }
+                        } else {
+                            0
+                        };
                         ui.separator();
                         ui.label(format!(
                             "q = {}, s = {}, value = {}",
-                            format_coord(self.query.as_ref(), q_seq),
-                            format_coord(self.subject.as_ref(), s_seq),
+                            format_coord(self.query.as_ref(), q_seq as usize),
+                            format_coord(self.subject.as_ref(), s_seq as usize),
                             v,
                         ));
                     } else {
@@ -1957,7 +2057,7 @@ impl DottirApp {
                     );
                     return;
                 }
-                let Some((cq_pix, cs_pix)) = self.crosshair else {
+                let Some((cq_seq, cs_seq)) = self.crosshair else {
                     ui.label("Alignment view: click on the plot to set the crosshair.");
                     return;
                 };
@@ -1968,19 +2068,10 @@ impl DottirApp {
                     return;
                 };
 
-                // Centre coordinates in *residue* space (translate
-                // pixelmap coords back through the kernel zoom + add
-                // the slice origin so we get absolute residues into
-                // the full sequence — alignment-dock walks the full
-                // sequence bytes, not the slice).
-                let kzoom = plot.params.zoom.max(1) as usize;
-                let (q_off, s_off) = self
-                    .current_slice
-                    .as_ref()
-                    .map(|sl| (sl.q_range.start, sl.s_range.start))
-                    .unwrap_or((0, 0));
-                let q_centre = q_off + (cq_pix as usize) * kzoom + kzoom / 2;
-                let s_centre = s_off + (cs_pix as usize) * kzoom + kzoom / 2;
+                // Crosshair is already in absolute residue space.
+                let q_centre = cq_seq as usize;
+                let s_centre = cs_seq as usize;
+                let _ = plot;
 
                 // Header row: coords + window-size spinner.
                 ui.horizontal(|ui| {
@@ -2208,14 +2299,41 @@ impl DottirApp {
             // in the margin are ignored. Use `draw_offset` so the
             // crosshair lands on the pixmap cell the user *sees*
             // under the cursor, not at a sub-pixel-shifted cell.
+            // The pixmap pixel is then converted to an *absolute
+            // residue* by adding the slice origin and multiplying by
+            // the compute zoom (which is the residues-per-pixel
+            // factor) — keeps the crosshair semantics zoom-independent.
             if response.clicked() {
                 if let Some(p) = response.interact_pointer_pos() {
                     if plot_area.contains(p) {
                         let local = p - plot_area.left_top();
-                        let q = (local.x + draw_offset.x).floor() as i64;
-                        let s = (local.y + draw_offset.y).floor() as i64;
-                        if q >= 0 && q < plot.width as i64 && s >= 0 && s < plot.height as i64 {
-                            self.crosshair = Some((q as u32, s as u32));
+                        let qp = (local.x + draw_offset.x).floor() as i64;
+                        let sp = (local.y + draw_offset.y).floor() as i64;
+                        if qp >= 0 && qp < plot.width as i64
+                            && sp >= 0 && sp < plot.height as i64
+                        {
+                            let z = plot.params.zoom.max(1) as i64;
+                            let (q_off, s_off) = self
+                                .current_slice
+                                .as_ref()
+                                .map(|sl| (sl.q_range.start as i64, sl.s_range.start as i64))
+                                .unwrap_or((0, 0));
+                            // Centre of the pixel's residue block.
+                            let q_seq = q_off + qp * z + z / 2;
+                            let s_seq = s_off + sp * z + z / 2;
+                            let qlen = self
+                                .query
+                                .as_ref()
+                                .map(|s| s.len() as i64)
+                                .unwrap_or(i64::MAX);
+                            let slen = self
+                                .subject
+                                .as_ref()
+                                .map(|s| s.len() as i64)
+                                .unwrap_or(i64::MAX);
+                            let q_seq = q_seq.clamp(0, qlen.saturating_sub(1).max(0));
+                            let s_seq = s_seq.clamp(0, slen.saturating_sub(1).max(0));
+                            self.crosshair = Some((q_seq as u32, s_seq as u32));
                         }
                     }
                 }
@@ -2375,12 +2493,31 @@ impl DottirApp {
             self.draw_axis_labels(ui, rect, plot_area, plot, draw_offset);
 
             // Crosshair overlay + coord label — clipped to the plot
-            // area so the lines never run into the axis margin.
-            if let Some((cq, cs)) = self.crosshair {
-                let cx =
-                    plot_area.left() + ((cq as f32 + 0.5) - draw_offset.x);
-                let cy =
-                    plot_area.top() + ((cs as f32 + 0.5) - draw_offset.y);
+            // area so the lines never run into the axis margin. The
+            // crosshair is in *absolute residue* coords; map to the
+            // current slice's pixmap-pixel space (slice origin + zoom)
+            // before placing on screen. Crosshairs outside the slice
+            // are skipped — they'd just paint at the slice edge
+            // misleadingly.
+            if let Some((cq_seq, cs_seq)) = self.crosshair {
+                let z = plot.params.zoom.max(1) as f32;
+                let (q_off, s_off) = self
+                    .current_slice
+                    .as_ref()
+                    .map(|sl| (sl.q_range.start as f32, sl.s_range.start as f32))
+                    .unwrap_or((0.0, 0.0));
+                let cq_pix = ((cq_seq as f32) - q_off) / z;
+                let cs_pix = ((cs_seq as f32) - s_off) / z;
+                // Only draw when the crosshair pixel is inside the
+                // current slice's pixmap; otherwise (zoomed into a
+                // region that doesn't contain the residue) hide it.
+                let in_slice = cq_pix >= 0.0
+                    && cq_pix < plot.width as f32
+                    && cs_pix >= 0.0
+                    && cs_pix < plot.height as f32;
+                if in_slice {
+                let cx = plot_area.left() + ((cq_pix + 0.5) - draw_offset.x);
+                let cy = plot_area.top() + ((cs_pix + 0.5) - draw_offset.y);
                 let stroke = egui::Stroke::new(1.0, Color32::from_rgb(255, 80, 80));
                 clip_painter.line_segment(
                     [
@@ -2397,18 +2534,10 @@ impl DottirApp {
                     stroke,
                 );
 
-                // Coord label next to the cross. Convert pixmap-pixel
-                // → absolute residue by adding the current slice
-                // origin (so the crosshair always reports residue
-                // coords, not slice-local pixmap coords).
-                let z = plot.params.zoom.max(1) as usize;
-                let (cq_off, cs_off) = self
-                    .current_slice
-                    .as_ref()
-                    .map(|sl| (sl.q_range.start, sl.s_range.start))
-                    .unwrap_or((0, 0));
-                let q_seq = cq_off + (cq as usize) * z + z / 2;
-                let s_seq = cs_off + (cs as usize) * z + z / 2;
+                // Coord label next to the cross — crosshair is
+                // already in absolute residue coords.
+                let q_seq = cq_seq as usize;
+                let s_seq = cs_seq as usize;
                 let label = format!(
                     "q = {}, s = {}",
                     format_coord(self.query.as_ref(), q_seq),
@@ -2449,6 +2578,7 @@ impl DottirApp {
                     font,
                     Color32::from_rgb(120, 0, 0),
                 );
+                }
             }
         });
     }
@@ -3053,6 +3183,87 @@ enum MatchClass {
     Other,
 }
 
+/// Compute the sliding-window score at residue midpoint `(q_mid,
+/// s_mid)` using the same window convention the kernel uses (spec
+/// §4.1.4): a length-`W` window centred so that the residue range
+/// is `[q_mid - half, q_mid - half + W)`. Out-of-bounds columns
+/// contribute 0. Used by `snap_crosshair_to_line` to refine within
+/// the brightest pixel's `zoom × zoom` block down to exact residue
+/// precision.
+///
+/// For [`Strand::Both`] / [`Strand::Reverse`] we also evaluate the
+/// reverse-complement-subject window and return whichever is
+/// larger, matching the max-merged pixelmap the user is snapping
+/// against.
+#[allow(clippy::too_many_arguments)]
+fn window_score(
+    qbytes: &[u8],
+    sbytes: &[u8],
+    q_mid: i64,
+    s_mid: i64,
+    half: i64,
+    w: i64,
+    qlen: i64,
+    slen: i64,
+    matrix: &ScoreMatrix,
+    mode: BlastMode,
+    strand: Strand,
+) -> i64 {
+    let n = matrix.size();
+    let encode = |b: u8| -> usize {
+        let bu = b.to_ascii_uppercase();
+        let idx = match mode {
+            BlastMode::Blastn => dottir_core::alphabet::encode_dna(bu),
+            BlastMode::Blastp | BlastMode::Blastx => dottir_core::alphabet::encode_protein(bu),
+        };
+        idx as usize
+    };
+    let do_forward = !matches!(strand, Strand::Reverse);
+    let do_reverse = !matches!(strand, Strand::Forward) && mode == BlastMode::Blastn;
+    let mut fwd: i64 = 0;
+    let mut rev: i64 = 0;
+    for k in 0..w {
+        let qi = q_mid - half + k;
+        if qi < 0 || qi >= qlen {
+            continue;
+        }
+        let qb = qbytes[qi as usize];
+        let qidx = encode(qb);
+        if qidx >= n {
+            continue;
+        }
+        if do_forward {
+            let si = s_mid - half + k;
+            if si >= 0 && si < slen {
+                let sidx = encode(sbytes[si as usize]);
+                if sidx < n {
+                    fwd += matrix.get(qidx, sidx) as i64;
+                }
+            }
+        }
+        if do_reverse {
+            // Reverse-strand pixel at (q_mid, s_mid) corresponds to
+            // querying q forward against subject walked backwards
+            // (and complemented). The kernel's reverse pass uses
+            // `s_idx + win2` for the centre offset; mirror that here.
+            let si = s_mid + half - k;
+            if si >= 0 && si < slen {
+                let sb = dottir_core::alphabet::complement_dna_byte(sbytes[si as usize]);
+                let sidx = encode(sb);
+                if sidx < n {
+                    rev += matrix.get(qidx, sidx) as i64;
+                }
+            }
+        }
+    }
+    match (do_forward, do_reverse) {
+        (true, true) => fwd.max(rev),
+        (true, false) => fwd,
+        (false, true) => rev,
+        (false, false) => 0,
+    }
+}
+
 /// Read a residue at a possibly-out-of-bounds coordinate. Returns
 /// `(b'-', true)` for out-of-bounds, `(byte, false)` otherwise.
 fn lookup(seq: &[u8], pos: isize) -> (u8, bool) {
@@ -3460,7 +3671,19 @@ fn open_session(app: &mut DottirApp) {
     // model — the saved field is kept for backward-compatible
     // session files but doesn't influence rendering.
     let _ = s.view.display_zoom;
-    app.crosshair = s.view.crosshair.map(|[q, s]| (q, s));
+    // Crosshair: schema v1 stored *full-sequence pixmap* coords;
+    // schema v2+ stores absolute residue coords. Migrate v1 values
+    // by remapping through the recorded compute zoom (centre of the
+    // old pixel block in residue space — matches what the v1 GUI
+    // showed in the status bar before the navigation rework).
+    app.crosshair = s.view.crosshair.map(|[q, s_]| {
+        if s.version <= 1 {
+            let z = s.plot.zoom.max(1);
+            (q * z + z / 2, s_ * z + z / 2)
+        } else {
+            (q, s_)
+        }
+    });
     app.light_theme = s.view.light_theme;
     app.align_dock_visible = s.view.align_dock_visible;
     app.settings.align_window_size = s.view.align_window_size.clamp(20, 400);
