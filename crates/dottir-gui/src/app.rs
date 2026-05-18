@@ -440,31 +440,41 @@ impl DottirApp {
     /// loaded + canvas measured). `false` means the caller should
     /// defer the recompute until the next paint (see
     /// `pending_initial_compute`).
-    fn maybe_apply_auto_zoom(&mut self) -> bool {
-        if !self.settings.auto_fit_compute_zoom {
-            return true; // pass-through: respect manual settings.zoom
-        }
-        let (Some(q), Some(s)) = (self.query.as_ref(), self.subject.as_ref()) else {
-            return false;
-        };
-        let Some((plot_w, plot_h)) = self.measured_plot_area else {
-            return false;
-        };
+    /// Pure helper: per-axis display-matched compute zoom for the
+    /// current sequence pair and canvas measurement. Returns `None`
+    /// when sequences aren't loaded or the canvas hasn't been
+    /// measured yet. Independent of `auto_fit_compute_zoom` (the
+    /// setting only controls whether the result is *applied*) — also
+    /// used by zoom-settle as the floor for tier-out so wheel-cycling
+    /// returns to the exact same compute zoom rather than drifting
+    /// through integer-truncated halves and doubles.
+    fn canonical_compute_zoom(&self) -> Option<u32> {
+        let q = self.query.as_ref()?;
+        let s = self.subject.as_ref()?;
+        let (plot_w, plot_h) = self.measured_plot_area?;
         let ppp = self.measured_pixels_per_point.max(0.1);
         let phys_w = (plot_w * ppp).max(1.0) as f64;
         let phys_h = (plot_h * ppp).max(1.0) as f64;
         let zoom_q = (q.len() as f64 / phys_w).ceil() as u32;
         let zoom_s = (s.len() as f64 / phys_h).ceil() as u32;
-        let new_zoom = zoom_q.max(zoom_s).max(1);
+        Some(zoom_q.max(zoom_s).max(1))
+    }
+
+    fn maybe_apply_auto_zoom(&mut self) -> bool {
+        if !self.settings.auto_fit_compute_zoom {
+            return true; // pass-through: respect manual settings.zoom
+        }
+        let Some(new_zoom) = self.canonical_compute_zoom() else {
+            return false;
+        };
         if new_zoom != self.settings.zoom {
+            let qlen = self.query.as_ref().map(|q| q.len()).unwrap_or(0);
+            let slen = self.subject.as_ref().map(|s| s.len()).unwrap_or(0);
+            let (pw, ph) = self.measured_plot_area.unwrap_or((0.0, 0.0));
+            let ppp = self.measured_pixels_per_point.max(0.1);
             tracing::info!(
                 "auto-fit: zoom = {new_zoom} \
-                 (qlen={}, slen={}, plot={:.0}×{:.0} logical, ppp={:.2})",
-                q.len(),
-                s.len(),
-                plot_w,
-                plot_h,
-                ppp,
+                 (qlen={qlen}, slen={slen}, plot={pw:.0}×{ph:.0} logical, ppp={ppp:.2})",
             );
             self.settings.zoom = new_zoom;
         }
@@ -593,21 +603,41 @@ impl DottirApp {
 
         let current_zoom = self.settings.zoom.max(1);
         let physical_scale = self.display_zoom * self.measured_pixels_per_point.max(0.1);
+        // Canonical zoom for the current canvas — what auto-fit would
+        // pick. Acts as the *floor* (in terms of pixelmap fineness)
+        // for tier-out so wheel-cycling is reproducible: without this
+        // cap, integer-truncated halving (e.g. 19 → 9) followed by
+        // doubling (9 → 18) leaves us with a different pixelmap than
+        // the user started with, and the rendering visibly differs.
+        let canonical = self.canonical_compute_zoom();
+        let canonical_floor = canonical.unwrap_or(64); // when auto-fit isn't applicable, no cap
         let (new_zoom, scale) = if physical_scale >= ZOOM_IN_THRESHOLD && current_zoom > 1 {
             // Zoomed in past 2× physical — recompute at a finer tier
             // (half the computation zoom, doubling pixelmap density).
             let n = (current_zoom / 2).max(1);
             let s = current_zoom as f32 / n as f32; // > 1, e.g. 2.0
             (n, s)
-        } else if physical_scale <= ZOOM_OUT_THRESHOLD && current_zoom < 64 {
-            // Zoomed out past 0.5× physical — recompute at a coarser
-            // tier (double the compute zoom, halving pixelmap density).
-            let n = (current_zoom.saturating_mul(2)).min(64);
+        } else if physical_scale <= ZOOM_OUT_THRESHOLD
+            && current_zoom < 64
+            && current_zoom < canonical_floor
+        {
+            // Zoomed out past 0.5× physical and not yet back at the
+            // canonical zoom — recompute at a coarser tier. Snap to
+            // canonical when the doubled value would meet or exceed
+            // it; otherwise just double. This makes wheel-cycling
+            // reach a fixed point at canonical instead of drifting.
+            let raw = current_zoom.saturating_mul(2).min(64);
+            let n = if raw >= canonical_floor {
+                canonical_floor
+            } else {
+                raw
+            };
             let s = current_zoom as f32 / n as f32; // < 1, e.g. 0.5
             (n, s)
         } else {
-            // Within [0.5, 2.0] physical or already at a tier extreme:
-            // clear the timestamp and stop chasing.
+            // Within [0.5, 2.0] physical, or already at the tier
+            // extreme, or already at canonical: clear the timestamp
+            // and stop chasing.
             self.last_zoom_event = None;
             return;
         };
@@ -1849,11 +1879,18 @@ impl DottirApp {
             }
 
             // Adaptive sampler: downsample with LINEAR, upsample with
-            // NEAREST. Crossover (1.0 boundary) requires a texture
-            // rebuild because `TextureOptions` is fixed per
-            // `load_texture` call; flip `texture_dirty` so
-            // `ensure_texture` rebuilds with the new mode next frame.
-            let want_linear = self.display_zoom < 1.0;
+            // NEAREST. The crossover is on *physical_scale* —
+            // `display_zoom × pixels_per_point` — not logical
+            // display_zoom. On a HiDPI display (ppp=2), display_zoom
+            // = 0.5 already maps each texel to one physical pixel
+            // (physical_scale = 1.0), so NEAREST is correct.
+            // Crossover requires a texture rebuild because
+            // `TextureOptions` is fixed per `load_texture` call; flip
+            // `texture_dirty` so `ensure_texture` rebuilds with the
+            // new mode next frame.
+            let physical_scale_for_sampler =
+                self.display_zoom * self.measured_pixels_per_point.max(0.1);
+            let want_linear = physical_scale_for_sampler < 1.0;
             if want_linear != self.texture_filter_linear {
                 self.texture_filter_linear = want_linear;
                 self.texture_dirty = true;
