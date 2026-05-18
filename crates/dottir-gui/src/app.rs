@@ -172,9 +172,14 @@ struct Greyramp {
 
 impl Default for Greyramp {
     fn default() -> Self {
-        // C dotter defaults per spec §4.2.2: white=40, black=100.
+        // White and black colocated at 100 — a hard threshold rather
+        // than a ramp. Only pixels ≥ 100 paint black; everything else
+        // is white. Suppresses the noise floor on dense self-
+        // comparisons and matches the user's preferred starting view.
+        // (Spec §4.2.2 lists C dotter's 40/100 ramp; the slider below
+        // still lets users dial it in.)
         Self {
-            white: 40,
+            white: 100,
             black: 100,
             swap: false,
         }
@@ -1330,13 +1335,13 @@ impl DottirApp {
             .map(|sl| (sl.q_range.start as i64, sl.s_range.start as i64))
             .unwrap_or((0, 0));
         // Convert current residue crosshair to slice-local pixel.
-        // Negative result (crosshair outside slice on the low side)
-        // clamps to 0; the search radius then explores into the slice.
-        let cq_pix = (cq_seq as i64 - q_off).max(0);
-        let cs_pix = (cs_seq as i64 - s_off).max(0);
-        const RADIUS: i64 = 64;
+        // Crosshair outside the slice clamps to the nearest edge; the
+        // search radius then explores inward.
         let pw = plot.width as i64;
         let ph = plot.height as i64;
+        let cq_pix = ((cq_seq as i64 - q_off).max(0) / z).clamp(0, pw - 1);
+        let cs_pix = ((cs_seq as i64 - s_off).max(0) / z).clamp(0, ph - 1);
+        const RADIUS: i64 = 64;
         let stride = plot.width as usize;
         let q_lo = (cq_pix - RADIUS).max(0);
         let q_hi = (cq_pix + RADIUS).min(pw - 1);
@@ -1549,6 +1554,35 @@ impl DottirApp {
                 ui.style_mut().spacing.item_spacing = Vec2::new(4.0, 3.0);
                 ui.style_mut().spacing.interact_size.y = 18.0;
 
+                // ── View ──
+                ui.label(
+                    egui::RichText::new("View")
+                        .strong()
+                        .size(13.0)
+                        .color(Color32::from_gray(50)),
+                );
+                ui.horizontal(|ui| {
+                    if ui
+                        .button("Fit")
+                        .on_hover_text(
+                            "Restore the canonical (display-matched) zoom showing the whole \
+                             pixelmap. Pushes the current view onto the Back stack.",
+                        )
+                        .clicked()
+                    {
+                        self.action_fit();
+                    }
+                    let back_enabled = !self.history.is_empty();
+                    if ui
+                        .add_enabled(back_enabled, egui::Button::new("Back"))
+                        .on_hover_text("Pop the previous view from the history stack (Esc).")
+                        .clicked()
+                    {
+                        self.action_back();
+                    }
+                });
+                ui.separator();
+
                 // ── Sequences summary ──
                 ui.label(
                     egui::RichText::new("Sequences")
@@ -1632,6 +1666,36 @@ impl DottirApp {
                     );
                 }
                 painter.rect_stroke(rect, 0.0, egui::Stroke::new(1.0, Color32::from_gray(120)));
+
+                // ── Keyboard shortcuts (reference) ──
+                ui.add_space(6.0);
+                ui.separator();
+                ui.label(
+                    egui::RichText::new("Keyboard shortcuts")
+                        .strong()
+                        .size(13.0)
+                        .color(Color32::from_gray(50)),
+                );
+                let mono = egui::FontId::monospace(11.0);
+                for (keys, desc) in [
+                    ("← → ↑ ↓", "nudge 1 res (⇧×10, ⌃×100)"),
+                    (",   .", "step along main diagonal"),
+                    ("[   ]", "step along anti-diagonal"),
+                    ("Space", "snap to nearest strong dot"),
+                    ("L-click", "set crosshair"),
+                    ("L-drag", "pan"),
+                    ("M-drag", "zoom into rectangle"),
+                    ("Esc/Bsp", "back (pop view history)"),
+                ] {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(format!("{keys:<8}"))
+                                .font(mono.clone())
+                                .color(Color32::from_gray(70)),
+                        );
+                        ui.label(egui::RichText::new(desc).size(11.0));
+                    });
+                }
             });
     }
 
@@ -2461,8 +2525,8 @@ impl DottirApp {
             // mirror the inverted-repeat colour convention.
             if self.settings.show_ridge_overlay && !self.current_ridges.is_empty() {
                 let stroke_fwd =
-                    egui::Stroke::new(1.5, Color32::from_rgb(20, 20, 20));
-                let stroke_rev = egui::Stroke::new(1.5, Color32::from_rgb(170, 0, 170));
+                    egui::Stroke::new(0.75, Color32::from_rgb(20, 20, 20));
+                let stroke_rev = egui::Stroke::new(0.75, Color32::from_rgb(170, 0, 170));
                 for ridge in &self.current_ridges {
                     let p0 = Pos2::new(
                         plot_area.left()
