@@ -487,9 +487,10 @@ impl DottirApp {
     /// C2 zoom-settle recompute: when the user has stopped scrolling
     /// for [`ZOOM_SETTLE_MS`] and `display_zoom` has strayed outside
     /// `[0.5, 2.0]`, swap to a finer (or coarser) `PlotConfig::zoom`
-    /// tier and recompute. Resets `display_zoom` back to 1.0 of the
-    /// new pixelmap and scales `view_offset` + crosshair so the same
-    /// residue stays under the same screen pixel.
+    /// tier and recompute. Rescales `view_offset`, `crosshair`, and
+    /// `display_zoom` so the on-screen image stays exactly the same
+    /// size and position when the new pixelmap arrives (seamless
+    /// transition — no perceptible "jump" by the user).
     fn maybe_zoom_settle_recompute(&mut self, ctx: &Context) {
         const ZOOM_SETTLE_MS: u64 = 200;
         const ZOOM_IN_THRESHOLD: f32 = 2.0;
@@ -531,22 +532,34 @@ impl DottirApp {
             return;
         };
 
+        // Math: with `scale = old_compute_zoom / new_compute_zoom`,
+        // the new pixelmap dim is `old_dim * scale`. To keep the
+        // same residue under the same screen pixel:
+        // - view_offset_new = view_offset_old * scale  (pixelmap coords
+        //   shrink by `scale`)
+        // - display_zoom_new = display_zoom_old / scale  (so on-screen
+        //   size = pixelmap_dim_new × display_zoom_new
+        //   = old_dim × scale × old_zoom / scale
+        //   = old_dim × old_zoom — unchanged).
+        // The previous version reset display_zoom to 1.0 and applied
+        // `*= 1/scale` to view_offset, which produced a visible
+        // enlargement on zoom-out and a visible shrink on zoom-in
+        // when the recompute landed.
+        let inv = 1.0 / scale;
+        let new_display_zoom = self.display_zoom * inv;
         tracing::info!(
             "zoom-settle: tier change {current_zoom} → {new_zoom} \
-             (display_zoom {:.2} → 1.0, scale {scale})",
+             (display_zoom {:.2} → {:.2}, scale {scale})",
             self.display_zoom,
+            new_display_zoom,
         );
         self.settings.zoom = new_zoom;
-        // Rescale view state so the same residue stays under the
-        // same screen position. New pixelmap dims = old × (1/scale),
-        // so view_offset (in pixelmap coords) scales by 1/scale.
-        let inv = 1.0 / scale;
-        self.view_offset *= inv;
-        self.display_zoom = 1.0;
+        self.view_offset *= scale;
+        self.display_zoom = new_display_zoom;
         if let Some((cq, cs)) = self.crosshair {
-            // Crosshair is in pixelmap coords; scale identically.
-            let cq2 = (cq as f32 * inv).round() as u32;
-            let cs2 = (cs as f32 * inv).round() as u32;
+            // Crosshair is in pixelmap coords; same scaling as view_offset.
+            let cq2 = (cq as f32 * scale).round() as u32;
+            let cs2 = (cs as f32 * scale).round() as u32;
             self.crosshair = Some((cq2, cs2));
         }
         self.last_zoom_event = None;
@@ -1120,6 +1133,19 @@ impl DottirApp {
                         .changed()
                     {
                         changed = true;
+                    }
+                    // Snap the *display* view (pan + display_zoom) back
+                    // to fit-the-whole-plot. Doesn't touch the compute
+                    // zoom (the slider above); the canvas's first-frame
+                    // logic does the actual snap.
+                    if ui
+                        .button("Fit")
+                        .on_hover_text(
+                            "Reset pan and display zoom so the whole pixelmap fits the canvas.",
+                        )
+                        .clicked()
+                    {
+                        self.view_initialised = false;
                     }
                 });
                 ui.horizontal(|ui| {
@@ -2537,16 +2563,22 @@ fn format_seq_label(name: &str, seq: Option<&Sequence>) -> String {
 /// Format a concatenated-buffer coord as `record_id:position` when the
 /// sequence has multiple records; falls back to the bare offset
 /// otherwise. Used by the status bar at the crosshair.
+/// Format a 0-indexed sequence position for display. Output is 1-indexed
+/// to match biology / dotter convention — so calling with `coord = 0`
+/// (the first base) returns `"1"`. The multi-record branch already did
+/// `pos + 1` for the per-record position; this just keeps the single-
+/// record branch consistent.
 fn format_coord(seq: Option<&Sequence>, coord: usize) -> String {
+    let one_indexed = coord + 1;
     let Some(seq) = seq else {
-        return format!("{coord}");
+        return format!("{one_indexed}");
     };
     if seq.records.len() <= 1 {
-        return format!("{coord}");
+        return format!("{one_indexed}");
     }
     match seq.record_at(coord) {
         Some((rec, pos)) => format!("{}:{}", rec.id, pos + 1),
-        None => format!("{coord}"),
+        None => format!("{one_indexed}"),
     }
 }
 
