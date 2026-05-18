@@ -2,7 +2,10 @@
 
 use std::path::PathBuf;
 
-use dottir_core::{BlastMode, DotPlot, PlotConfig, ScoreMatrix, Strand, Triangle};
+use dottir_core::{
+    extract_ridges_from_pixels, BlastMode, DotPlot, PlotConfig, Ridge, RidgeDirection,
+    RidgeParams, ScoreMatrix, Strand, Triangle,
+};
 use dottir_io::{DetectedAlphabet, Sequence};
 use egui::{
     Color32, ColorImage, Context, Pos2, Rect, Sense, Slider, TextureHandle, TextureOptions, Vec2,
@@ -75,6 +78,20 @@ struct Settings {
     /// H2 alignment-dock window size (residues, centred on the
     /// crosshair). Clamped to [20, 400] at render time.
     align_window_size: u32,
+    /// Draw coherent diagonal runs from the pixmap as anti-aliased
+    /// vector segments on top of the raster (default on). Hides the
+    /// per-window intensity oscillation on imperfect-homology
+    /// diagonals — the raster underneath is unchanged so the data
+    /// view is still accessible by toggling this off.
+    show_ridge_overlay: bool,
+    /// Minimum continuous-lit-cells for a diagonal run to be
+    /// vectorised. Smaller → more (and shorter) ridges; larger →
+    /// only long runs survive.
+    ridge_min_length: u32,
+    /// Maximum non-lit-cells inside a ridge before it breaks into
+    /// two segments. 0 = no bridging; 2 (default) bridges over
+    /// occasional mismatch clusters.
+    ridge_max_gap: u32,
     /// When true, the GUI picks `PlotConfig::zoom` such that the
     /// computed pixelmap is roughly *physical-canvas-sized* — Dotter's
     /// invariant of computing at display scale and rendering near 1:1.
@@ -122,6 +139,9 @@ impl Default for Settings {
             align_window_size: 100,
             auto_fit_compute_zoom: true,
             auto_pixel_fac: true,
+            show_ridge_overlay: true,
+            ridge_min_length: 8,
+            ridge_max_gap: 2,
         }
     }
 }
@@ -311,6 +331,12 @@ pub struct DottirApp {
     /// update `current_slice`. Avoids plumbing slice through the
     /// worker (which only sees pre-sliced bytes).
     last_dispatched_slice: Option<ViewSlice>,
+    /// Ridges extracted from the *current* plot (see
+    /// `refresh_ridges`). Re-extracted whenever the plot or any
+    /// parameter affecting extraction (overlay toggle, threshold,
+    /// min length, gap) changes. Painted as anti-aliased line
+    /// segments above the raster in the canvas draw.
+    current_ridges: Vec<Ridge>,
 }
 
 /// Maximum number of history entries kept around for Back. Older
@@ -407,6 +433,9 @@ impl DottirApp {
             align_window_size: 100,
             auto_fit_compute_zoom: true,
             auto_pixel_fac: startup_auto_pf,
+            show_ridge_overlay: true,
+            ridge_min_length: 8,
+            ridge_max_gap: 2,
         };
 
         let mut app = Self {
@@ -442,6 +471,7 @@ impl DottirApp {
             target_slice: None,
             locked_pixel_fac: None,
             last_dispatched_slice: None,
+            current_ridges: Vec::new(),
         };
 
         // Pre-load any sequences supplied on the command line. Errors
@@ -568,6 +598,34 @@ impl DottirApp {
 
     /// Push the current view onto the history stack so a later `Back`
     /// can return to it. Bounded — oldest entry drops off the bottom.
+    /// Re-extract ridges from the current pixmap into
+    /// `current_ridges`. Called whenever the plot changes (new
+    /// compute lands, cache hit, settings change) or a parameter
+    /// affecting extraction is touched (greyramp white, min length,
+    /// max gap, overlay toggle). Cheap — a single linear scan of
+    /// the pixmap.
+    fn refresh_ridges(&mut self) {
+        if !self.settings.show_ridge_overlay {
+            self.current_ridges.clear();
+            return;
+        }
+        let Some(plot) = self.plot.as_ref() else {
+            self.current_ridges.clear();
+            return;
+        };
+        // Threshold tracks the greyramp's white point so the
+        // overlay's "lit" definition follows the user's noise
+        // floor: dropping greyramp.white hides more raster dots
+        // AND prunes weak ridges in tandem.
+        let params = RidgeParams {
+            threshold: self.greyramp.white,
+            min_length: self.settings.ridge_min_length.max(1),
+            max_gap: self.settings.ridge_max_gap,
+        };
+        self.current_ridges =
+            extract_ridges_from_pixels(&plot.pixels, plot.width, plot.height, &params);
+    }
+
     fn push_history(&mut self) {
         let Some(plot) = &self.plot else {
             return;
@@ -834,6 +892,7 @@ impl DottirApp {
             self.plot = Some(plot);
             self.texture_dirty = true;
             self.last_error = None;
+            self.refresh_ridges();
             if let Some(off) = self.pending_view_offset_after_compute.take() {
                 self.view_offset = off;
             }
@@ -997,6 +1056,7 @@ impl DottirApp {
                     self.plot = Some(plot);
                     self.texture_dirty = true;
                     self.last_error = None;
+                    self.refresh_ridges();
                     // Pin the canvas size that the new compute was
                     // targeting (latest available measurement). The
                     // resize-retarget detector compares future paints
@@ -1437,6 +1497,10 @@ impl DottirApp {
                     .changed()
                 {
                     self.texture_dirty = true;
+                    // Ridge threshold tracks greyramp.white, so the
+                    // overlay's "lit" definition follows the raster's
+                    // noise floor.
+                    self.refresh_ridges();
                 }
                 ui.label(egui::RichText::new("Black").size(11.0));
                 if ui
@@ -1456,6 +1520,7 @@ impl DottirApp {
                     if ui.small_button("Reset").clicked() {
                         self.greyramp = Greyramp::default();
                         self.texture_dirty = true;
+                        self.refresh_ridges();
                     }
                 });
                 ui.add_space(2.0);
@@ -1745,9 +1810,67 @@ impl DottirApp {
                      1 GiB suits ~32k × 32k at zoom 1. Halve the cap when \
                      zoom doubles.",
                 );
+
+                // Vector ridge overlay — display-only, no recompute.
+                // Tied to its own local `ridges_changed` flag so
+                // settings panel adjustments don't trigger the full
+                // pixelmap recompute path.
+                let mut ridges_changed = false;
+                ui.separator();
+                ui.heading("Ridge overlay");
+                ui.horizontal(|ui| {
+                    if ui
+                        .checkbox(
+                            &mut self.settings.show_ridge_overlay,
+                            "Show vector ridges",
+                        )
+                        .on_hover_text(
+                            "Draw anti-aliased line segments over coherent diagonal runs \
+                             detected in the raster. Hides per-window intensity oscillation \
+                             on imperfect-homology lines. The raster underneath is unchanged \
+                             — toggle off to see the data view.",
+                        )
+                        .changed()
+                    {
+                        ridges_changed = true;
+                    }
+                });
+                if self.settings.show_ridge_overlay {
+                    ui.horizontal(|ui| {
+                        ui.label("Min length (cells):");
+                        if ui
+                            .add(
+                                egui::DragValue::new(&mut self.settings.ridge_min_length)
+                                    .range(1..=200),
+                            )
+                            .changed()
+                        {
+                            ridges_changed = true;
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Max gap (cells):");
+                        if ui
+                            .add(
+                                egui::DragValue::new(&mut self.settings.ridge_max_gap).range(0..=20),
+                            )
+                            .changed()
+                        {
+                            ridges_changed = true;
+                        }
+                    });
+                    ui.weak(
+                        "Threshold tracks the greyramp `White` slider — drop it to hide noise \
+                         from both the raster AND the overlay in tandem.",
+                    );
+                }
+
                 ui.separator();
                 if ui.button("Apply").clicked() {
                     changed = true;
+                }
+                if ridges_changed && !changed {
+                    self.refresh_ridges();
                 }
             });
         self.show_settings = open;
@@ -2209,6 +2332,41 @@ impl DottirApp {
                         ],
                         break_stroke,
                     );
+                }
+            }
+
+            // Vector ridge overlay: anti-aliased line segments over
+            // coherent diagonal runs detected in the raster. Hides
+            // the per-window intensity oscillation on imperfect-
+            // homology lines without altering the pixmap. Forward
+            // ridges in dark grey, reverse ridges in magenta to
+            // mirror the inverted-repeat colour convention.
+            if self.settings.show_ridge_overlay && !self.current_ridges.is_empty() {
+                let stroke_fwd =
+                    egui::Stroke::new(1.5, Color32::from_rgb(20, 20, 20));
+                let stroke_rev = egui::Stroke::new(1.5, Color32::from_rgb(170, 0, 170));
+                for ridge in &self.current_ridges {
+                    let p0 = Pos2::new(
+                        plot_area.left()
+                            + (ridge.start.0 as f32 + 0.5)
+                            - draw_offset.x,
+                        plot_area.top()
+                            + (ridge.start.1 as f32 + 0.5)
+                            - draw_offset.y,
+                    );
+                    let p1 = Pos2::new(
+                        plot_area.left()
+                            + (ridge.end.0 as f32 + 0.5)
+                            - draw_offset.x,
+                        plot_area.top()
+                            + (ridge.end.1 as f32 + 0.5)
+                            - draw_offset.y,
+                    );
+                    let stroke = match ridge.direction {
+                        RidgeDirection::Forward => stroke_fwd,
+                        RidgeDirection::Reverse => stroke_rev,
+                    };
+                    clip_painter.line_segment([p0, p1], stroke);
                 }
             }
 

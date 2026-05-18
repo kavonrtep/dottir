@@ -35,6 +35,7 @@ pub mod karlin;
 pub mod matrix;
 pub mod pixel;
 pub mod plot;
+pub mod ridges;
 pub mod score_vec;
 pub mod sliding;
 pub mod translation;
@@ -45,6 +46,9 @@ pub use matrix::{BlastMode, ScoreMatrix};
 pub use plot::{
     compute_dotplot, pick_auto_zoom, reverse_complement, DotPlot, PlotConfig, PlotParams, Strand,
     Triangle,
+};
+pub use ridges::{
+    extract_ridges, extract_ridges_from_pixels, Ridge, RidgeDirection, RidgeParams,
 };
 
 /// Bumped whenever the algorithmic contract changes such that previously
