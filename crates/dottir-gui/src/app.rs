@@ -245,10 +245,6 @@ pub struct DottirApp {
     /// choose `PlotConfig::zoom`, so the first compute is deferred
     /// until this is set.
     measured_plot_area: Option<(f32, f32)>,
-    /// `pixels_per_point` at the most recent paint. Used together with
-    /// `measured_plot_area` to compute the *physical* canvas dimensions.
-    /// Default 1.0 until first paint.
-    measured_pixels_per_point: f32,
     /// `true` between a sequence-load and the first canvas paint —
     /// i.e., we have sequences but no canvas measurement yet, so we
     /// can't pick a display-matched compute zoom. `update()` fires
@@ -434,7 +430,6 @@ impl DottirApp {
             suspend_recompute: true,
             align_dock_visible: true,
             measured_plot_area: None,
-            measured_pixels_per_point: 1.0,
             pending_initial_compute: false,
             pending_resize_retarget: None,
             last_compute_canvas_size: None,
@@ -538,11 +533,16 @@ impl DottirApp {
         let q = self.query.as_ref()?;
         let s = self.subject.as_ref()?;
         let (plot_w, plot_h) = self.measured_plot_area?;
-        let ppp = self.measured_pixels_per_point.max(0.1);
-        let phys_w = (plot_w * ppp).max(1.0) as f64;
-        let phys_h = (plot_h * ppp).max(1.0) as f64;
-        let zoom_q = (q.len() as f64 / phys_w).ceil() as u32;
-        let zoom_s = (s.len() as f64 / phys_h).ceil() as u32;
+        // Target the *logical* canvas dimension (egui drawing unit),
+        // not physical pixels — the texture is drawn at `pw` logical
+        // points, so pixmap_dim ≈ logical_canvas keeps it 1:1 on
+        // screen. The previous version multiplied by
+        // `pixels_per_point`, which sized the pixmap to the physical
+        // canvas and made HiDPI initial views overflow by factor ppp.
+        let log_w = (plot_w as f64).max(1.0);
+        let log_h = (plot_h as f64).max(1.0);
+        let zoom_q = (q.len() as f64 / log_w).ceil() as u32;
+        let zoom_s = (s.len() as f64 / log_h).ceil() as u32;
         Some(zoom_q.max(zoom_s).max(1))
     }
 
@@ -557,10 +557,9 @@ impl DottirApp {
             let qlen = self.query.as_ref().map(|q| q.len()).unwrap_or(0);
             let slen = self.subject.as_ref().map(|s| s.len()).unwrap_or(0);
             let (pw, ph) = self.measured_plot_area.unwrap_or((0.0, 0.0));
-            let ppp = self.measured_pixels_per_point.max(0.1);
             tracing::info!(
                 "auto-fit: zoom = {new_zoom} \
-                 (qlen={qlen}, slen={slen}, plot={pw:.0}×{ph:.0} logical, ppp={ppp:.2})",
+                 (qlen={qlen}, slen={slen}, plot={pw:.0}×{ph:.0} logical)",
             );
             self.settings.zoom = new_zoom;
         }
@@ -718,12 +717,12 @@ impl DottirApp {
         let sel_h = sel_hi_y.saturating_sub(sel_lo_y).max(1);
 
         // New compute zoom so the *selection* (not the slice) fills
-        // the physical canvas.
-        let ppp = self.measured_pixels_per_point.max(0.1);
-        let phys_w = (plot_area.width() * ppp).max(1.0) as f64;
-        let phys_h = (plot_area.height() * ppp).max(1.0) as f64;
-        let zoom_x = ((sel_w as f64) / phys_w).ceil() as u32;
-        let zoom_y = ((sel_h as f64) / phys_h).ceil() as u32;
+        // the logical canvas (matches the texture's drawing unit so
+        // it lands 1:1 — see canonical_compute_zoom).
+        let log_w = (plot_area.width() as f64).max(1.0);
+        let log_h = (plot_area.height() as f64).max(1.0);
+        let zoom_x = ((sel_w as f64) / log_w).ceil() as u32;
+        let zoom_y = ((sel_h as f64) / log_h).ceil() as u32;
         let new_zoom = zoom_x.max(zoom_y).max(1);
 
         // New slice = selection ± RECT_ZOOM_MARGIN of its size,
@@ -1965,7 +1964,6 @@ impl DottirApp {
             let approx_plot_w = (avail.x - left_margin).max(1.0);
             let approx_plot_h = (avail.y - top_margin).max(1.0);
             let new_area = (approx_plot_w, approx_plot_h);
-            let new_ppp = ctx.pixels_per_point();
             // Detect resize-retarget BEFORE overwriting the previous
             // measurement: compare against the canvas size at last
             // successful compute, not the live frame-to-frame
@@ -1983,7 +1981,6 @@ impl DottirApp {
                 }
             }
             self.measured_plot_area = Some(new_area);
-            self.measured_pixels_per_point = new_ppp;
 
             // Allocate the canvas and resolve interactions *before*
             // binding `&self.plot` — the borrow checker can't tell
