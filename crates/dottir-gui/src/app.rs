@@ -215,6 +215,11 @@ pub struct DottirApp {
     /// canvas. Default true; toggled via View → "Show alignment
     /// view".
     align_dock_visible: bool,
+    /// False until the canvas has rendered its first frame for the
+    /// current `plot`; on that frame the view is snapped to
+    /// fit-to-canvas. Cleared whenever a new pixelmap arrives so
+    /// every freshly loaded plot opens fully zoomed out.
+    view_initialised: bool,
 }
 
 impl DottirApp {
@@ -271,6 +276,7 @@ impl DottirApp {
             suspend_recompute: true,
             last_zoom_event: None,
             align_dock_visible: true,
+            view_initialised: false,
         };
 
         // Pre-load any sequences supplied on the command line. Errors
@@ -308,6 +314,9 @@ impl DottirApp {
                     SeqRole::Subject => self.subject = Some(seq),
                 }
                 self.last_error = None;
+                // Fresh sequence data → reset view so the new plot
+                // opens fully zoomed out on its first render.
+                self.view_initialised = false;
                 self.maybe_switch_mode_from_alphabet(detected);
                 self.recompute();
             }
@@ -778,8 +787,9 @@ impl DottirApp {
                 });
                 ui.menu_button("View", |ui| {
                     if ui.button("Reset pan / zoom").clicked() {
-                        self.view_offset = Vec2::ZERO;
-                        self.display_zoom = 1.0;
+                        // Defer to the canvas's first-frame logic:
+                        // it'll snap to fit-zoom on the next paint.
+                        self.view_initialised = false;
                     }
                     if ui.button("Reset greyramp").clicked() {
                         self.greyramp = Greyramp::default();
@@ -1349,39 +1359,9 @@ impl DottirApp {
                 rect.right_bottom(),
             );
 
-            // Pan with primary drag — only inside the plot area
-            // (drags into the axis margin don't pan).
-            if response.dragged() {
-                self.view_offset -= response.drag_delta() / self.display_zoom;
-            }
-            // Zoom with scroll, centered on cursor. World coordinate
-            // under the cursor is computed against `plot_area`, so the
-            // zoom anchor is correct now that the pixelmap origin
-            // moved off `rect.left_top()`.
-            let scroll = ctx.input(|i| i.smooth_scroll_delta.y);
-            if scroll.abs() > 0.0 {
-                if let Some(cursor) = response.hover_pos() {
-                    if plot_area.contains(cursor) {
-                        let factor = (scroll / 100.0).exp();
-                        let cursor_local = cursor - plot_area.left_top();
-                        let world_under_cursor =
-                            self.view_offset + cursor_local / self.display_zoom;
-                        self.display_zoom = (self.display_zoom * factor).clamp(0.1, 100.0);
-                        self.view_offset = world_under_cursor - cursor_local / self.display_zoom;
-                        // Stamp for the C2 zoom-settle recompute trigger.
-                        self.last_zoom_event = Some(std::time::Instant::now());
-                    }
-                }
-            }
-
-            // Constrain zoom + pan so the user can't scroll the
-            // pixelmap completely off-screen. Lower bound on zoom is
-            // "fit-to-canvas" (the level at which the entire
-            // pixelmap fits exactly inside the canvas — zooming out
-            // further just leaves grey margin around a shrinking
-            // image, which is wasted space). Pan is clamped so the
-            // plot's edges can't pass the canvas's far edges; when
-            // the plot is smaller than the canvas it's auto-centred.
+            // Compute fit-to-canvas zoom first — used both as the
+            // lower bound for interactive zoom and as the initial
+            // zoom level for freshly loaded plots.
             let pw = plot.width as f32;
             let ph = plot.height as f32;
             let plot_w = plot_area.width().max(1.0);
@@ -1389,7 +1369,65 @@ impl DottirApp {
             let fit_zoom_x = plot_w / pw.max(1.0);
             let fit_zoom_y = plot_h / ph.max(1.0);
             let fit_zoom = fit_zoom_x.min(fit_zoom_y);
-            self.display_zoom = self.display_zoom.max(fit_zoom);
+
+            // First render of a freshly loaded plot: snap to fit so
+            // the user sees the whole pixelmap.
+            if !self.view_initialised {
+                self.display_zoom = fit_zoom;
+                self.view_offset = Vec2::ZERO;
+                self.view_initialised = true;
+            }
+
+            // Pan with primary drag — only inside the plot area
+            // (drags into the axis margin don't pan).
+            if response.dragged() {
+                self.view_offset -= response.drag_delta() / self.display_zoom;
+            }
+            // Zoom with scroll, centered on cursor. Clamped against
+            // `[fit_zoom, 100.0]` *before* the anchor math so that
+            // hitting the floor doesn't re-bump `display_zoom`
+            // afterwards and drift the anchor.
+            let scroll = ctx.input(|i| i.smooth_scroll_delta.y);
+            if scroll.abs() > 0.0 {
+                if let Some(cursor) = response.hover_pos() {
+                    if plot_area.contains(cursor) {
+                        let factor = (scroll / 100.0).exp();
+                        let new_zoom =
+                            (self.display_zoom * factor).clamp(fit_zoom, 100.0);
+                        let cursor_local = cursor - plot_area.left_top();
+                        let world_under_cursor =
+                            self.view_offset + cursor_local / self.display_zoom;
+                        self.display_zoom = new_zoom;
+                        self.view_offset = world_under_cursor - cursor_local / self.display_zoom;
+                        // Stamp for the C2 zoom-settle recompute trigger.
+                        self.last_zoom_event = Some(std::time::Instant::now());
+                    }
+                }
+            }
+            // Double-click: zoom 2× centred on the click position,
+            // same anchor math as the wheel. Single-click still
+            // fires before this and sets the crosshair, so a
+            // double-click both moves the crosshair to the cursor
+            // and zooms in around it.
+            if response.double_clicked() {
+                if let Some(p) = response.interact_pointer_pos() {
+                    if plot_area.contains(p) {
+                        let new_zoom = (self.display_zoom * 2.0).clamp(fit_zoom, 100.0);
+                        let local = p - plot_area.left_top();
+                        let world_under_cursor =
+                            self.view_offset + local / self.display_zoom;
+                        self.display_zoom = new_zoom;
+                        self.view_offset = world_under_cursor - local / self.display_zoom;
+                        self.last_zoom_event = Some(std::time::Instant::now());
+                    }
+                }
+            }
+
+            // Constrain pan so the user can't scroll the pixelmap
+            // completely off-screen. With `display_zoom` already
+            // clamped at `fit_zoom`, the plot is always at least as
+            // big as the canvas in one axis; the other axis (if
+            // aspect ratios differ) gets auto-centred.
             let cw = plot_w / self.display_zoom; // canvas width in pixelmap coords
             let ch = plot_h / self.display_zoom;
             if pw <= cw {
@@ -1546,17 +1584,23 @@ impl DottirApp {
                 if ly + label_size.y + pad > plot_area.bottom() {
                     ly = cy - 6.0 - label_size.y - 2.0 * pad;
                 }
-                let bg = Rect::from_min_size(
-                    Pos2::new(lx - pad, ly - pad),
-                    Vec2::new(label_size.x + 2.0 * pad, label_size.y + 2.0 * pad),
-                );
-                clip_painter.rect_filled(
-                    bg,
-                    3.0,
-                    Color32::from_rgba_unmultiplied(255, 255, 255, 220),
-                );
+                // 1-px white shadow in the four cardinal directions
+                // keeps the dark red label legible over a black
+                // diagonal without occluding dotplot pixels with a
+                // coloured patch.
+                let label_pos = Pos2::new(lx, ly);
+                let shadow = Color32::WHITE;
+                for &(dx, dy) in &[(-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0)] {
+                    clip_painter.text(
+                        Pos2::new(label_pos.x + dx, label_pos.y + dy),
+                        egui::Align2::LEFT_TOP,
+                        &label,
+                        font.clone(),
+                        shadow,
+                    );
+                }
                 clip_painter.text(
-                    Pos2::new(lx, ly),
+                    label_pos,
                     egui::Align2::LEFT_TOP,
                     label,
                     font,
@@ -2533,6 +2577,9 @@ fn open_session(app: &mut DottirApp) {
     app.crosshair = s.view.crosshair.map(|[q, s]| (q, s));
     app.light_theme = s.view.light_theme;
     app.align_dock_visible = s.view.align_dock_visible;
+    // Session restore overrides the load_fasta-driven view reset:
+    // the saved transform is authoritative, don't snap-to-fit.
+    app.view_initialised = true;
     app.settings.align_window_size = s.view.align_window_size.clamp(20, 400);
     tracing::info!("loaded session {}", path.display());
 }
