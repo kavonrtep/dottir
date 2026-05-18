@@ -210,11 +210,12 @@ pub struct DottirApp {
     texture: Option<TextureHandle>,
     /// Whether the cached texture matches the current greyramp + pixelmap.
     texture_dirty: bool,
-    /// View transform: top-left of the canvas in pixelmap coords.
+    /// Scroll position: top-left of the canvas in pixelmap pixel
+    /// coords. The pixelmap is always drawn 1:1 (no GPU resampling);
+    /// when it's bigger than the canvas, this offset chooses which
+    /// portion is visible. Clamped to `[0, max(0, pixelmap_dim −
+    /// canvas_dim)]` per axis.
     view_offset: Vec2,
-    /// Pixels-per-pixelmap-pixel zoom (display zoom, separate from
-    /// PlotConfig.zoom which is *computation* zoom).
-    display_zoom: f32,
     /// Crosshair in pixelmap coords (q, s).
     crosshair: Option<(u32, u32)>,
     show_settings: bool,
@@ -234,39 +235,10 @@ pub struct DottirApp {
     /// during DottirApp::new and would otherwise dispatch multiple
     /// jobs before the second sequence is loaded.
     suspend_recompute: bool,
-    /// Timestamp of the most recent scroll-wheel zoom event, used by
-    /// the C2 zoom-settle recompute: when no scroll has fired for
-    /// 200ms and `display_zoom` is far enough from 1.0 to warrant
-    /// finer-grained computation, the kernel re-runs at a new
-    /// `PlotConfig::zoom` tier.
-    last_zoom_event: Option<std::time::Instant>,
     /// H2: whether the alignment-view dock is shown beneath the
     /// canvas. Default true; toggled via View → "Show alignment
     /// view".
     align_dock_visible: bool,
-    /// False until the canvas has rendered its first frame for the
-    /// current `plot`; on that frame the view is snapped to
-    /// fit-to-canvas. Cleared whenever a new pixelmap arrives so
-    /// every freshly loaded plot opens fully zoomed out.
-    view_initialised: bool,
-    /// Adaptive texture sampling regime — set to `true` when
-    /// `display_zoom < 1.0` (downsampling) so the texture is rebuilt
-    /// with `TextureOptions::LINEAR`, killing nearest-neighbour
-    /// moiré on the periodic diagonals. Flipped back to `false`
-    /// (NEAREST = pixel-perfect upsample) when `display_zoom ≥ 1.0`.
-    /// Crossover sets `texture_dirty = true` so the rebuild happens
-    /// next frame.
-    texture_filter_linear: bool,
-    /// Peak-preserving texture max-pool factor. `1` = no pooling
-    /// (texture = full pixelmap). `>1` = each output texture pixel is
-    /// the max of a `pool_factor × pool_factor` block of the
-    /// pixelmap, applied at extreme downsample (`display_zoom <
-    /// 0.5`). Solves the "dashed diagonals at fit-zoom" artefact:
-    /// LINEAR-sampling a sparse-diagonal pixelmap at 9:1 averages
-    /// most diagonal pixels into the white background; max-pool
-    /// preserves the peak so single-pixel diagonals stay visible.
-    /// Set in the paint loop; texture rebuild triggered on change.
-    pool_factor: usize,
     /// Plot rectangle dimensions (logical) measured on the most recent
     /// canvas paint. `None` before the first paint. The
     /// display-matched compute zoom (Dotter invariant) needs this to
@@ -293,6 +265,55 @@ pub struct DottirApp {
     /// — comparing against the live `measured_plot_area` would
     /// re-trigger every frame during a slow drag.
     last_compute_canvas_size: Option<(f32, f32)>,
+    /// History stack for the rectangle-zoom workflow. Each entry is a
+    /// view we can [`pop_history`] back to. Bounded to
+    /// [`HISTORY_MAX`] entries — older ones drop off the bottom.
+    history: std::collections::VecDeque<ViewSnapshot>,
+    /// LRU-style cache of recently computed pixelmaps, keyed by
+    /// compute zoom. Hitting Back to a cached zoom is instant;
+    /// otherwise the cache miss triggers a fresh compute. Cleared on
+    /// any settings change that would invalidate the pixelmap
+    /// (matrix, window size, strand, etc.).
+    pixelmap_cache: std::collections::VecDeque<(u32, DotPlot)>,
+    /// View offset to apply when the next compute result lands.
+    /// Set by `action_rect_zoom` / `action_back` so the new pixelmap
+    /// (which has different dims, hence different coord space) gets
+    /// the correct scroll position. Consumed by `poll_compute_results`.
+    pending_view_offset_after_compute: Option<Vec2>,
+    /// A middle-mouse drag completed during the most recent paint —
+    /// we capture it before binding `&self.plot` and apply
+    /// `action_rect_zoom` after the paint closure ends (where
+    /// `&self.plot` is no longer alive). Carries the plot rectangle
+    /// captured at the same moment, so the math uses the canvas
+    /// dimensions at release time.
+    pending_rect_zoom: Option<(Rect, RectSelect)>,
+    /// Pending rectangle-selection state while the user is
+    /// middle-mouse-dragging. `start` is the press position in screen
+    /// coords; `current` is the latest mouse position. On release we
+    /// compute a new zoom from the rectangle and push a history entry.
+    rect_select: Option<RectSelect>,
+}
+
+/// Maximum number of history entries kept around for Back. Older
+/// entries fall off the bottom. Also caps the pixelmap cache size.
+const HISTORY_MAX: usize = 5;
+
+/// One slot on the history stack: enough state to restore a view.
+/// Crosshair and view_offset are in *pixelmap coords for that zoom*
+/// — when restoring across a zoom change, they should be transformed
+/// via `(coord × old_zoom) / new_zoom` to track the same residue.
+#[derive(Clone, Copy, Debug)]
+struct ViewSnapshot {
+    compute_zoom: u32,
+    view_offset: Vec2,
+    crosshair: Option<(u32, u32)>,
+}
+
+/// Middle-mouse rectangle-select drag state.
+#[derive(Clone, Copy, Debug)]
+struct RectSelect {
+    start_screen: Pos2,
+    current_screen: Pos2,
 }
 
 impl DottirApp {
@@ -344,7 +365,6 @@ impl DottirApp {
             texture: None,
             texture_dirty: true,
             view_offset: Vec2::ZERO,
-            display_zoom: 1.0,
             crosshair: None,
             show_settings: false,
             light_theme: true,
@@ -354,16 +374,17 @@ impl DottirApp {
             // Suspend recompute during the two pre-loads — we only
             // want one job dispatched once both inputs are settled.
             suspend_recompute: true,
-            last_zoom_event: None,
             align_dock_visible: true,
-            view_initialised: false,
-            texture_filter_linear: false,
-            pool_factor: 1,
             measured_plot_area: None,
             measured_pixels_per_point: 1.0,
             pending_initial_compute: false,
             pending_resize_retarget: None,
             last_compute_canvas_size: None,
+            history: std::collections::VecDeque::with_capacity(HISTORY_MAX),
+            pixelmap_cache: std::collections::VecDeque::with_capacity(HISTORY_MAX),
+            rect_select: None,
+            pending_view_offset_after_compute: None,
+            pending_rect_zoom: None,
         };
 
         // Pre-load any sequences supplied on the command line. Errors
@@ -403,9 +424,11 @@ impl DottirApp {
                     SeqRole::Subject => self.subject = Some(seq),
                 }
                 self.last_error = None;
-                // Fresh sequence data → reset view so the new plot
-                // opens fully zoomed out on its first render.
-                self.view_initialised = false;
+                // Fresh sequence data → reset view state.
+                self.view_offset = Vec2::ZERO;
+                self.crosshair = None;
+                self.history.clear();
+                self.pixelmap_cache.clear();
                 self.maybe_switch_mode_from_alphabet(detected);
                 if self.maybe_apply_auto_zoom() {
                     self.pending_initial_compute = false;
@@ -481,6 +504,161 @@ impl DottirApp {
         true
     }
 
+    /// Push the current view onto the history stack so a later `Back`
+    /// can return to it. Bounded — oldest entry drops off the bottom.
+    fn push_history(&mut self) {
+        let Some(plot) = &self.plot else {
+            return;
+        };
+        if self.history.len() >= HISTORY_MAX {
+            self.history.pop_front();
+        }
+        self.history.push_back(ViewSnapshot {
+            compute_zoom: plot.params.zoom,
+            view_offset: self.view_offset,
+            crosshair: self.crosshair,
+        });
+    }
+
+    /// Look up a cached pixelmap for the given compute zoom (LRU
+    /// "touch on read"). Cleared whenever settings that affect the
+    /// pixelmap change.
+    fn cache_get(&mut self, compute_zoom: u32) -> Option<DotPlot> {
+        let pos = self
+            .pixelmap_cache
+            .iter()
+            .position(|(z, _)| *z == compute_zoom)?;
+        let (z, plot) = self.pixelmap_cache.remove(pos)?;
+        let restored = plot.clone();
+        self.pixelmap_cache.push_back((z, plot));
+        Some(restored)
+    }
+
+    /// Insert a freshly computed pixelmap into the cache; evict
+    /// oldest if at capacity.
+    fn cache_insert(&mut self, compute_zoom: u32, plot: DotPlot) {
+        self.pixelmap_cache
+            .retain(|(z, _)| *z != compute_zoom);
+        if self.pixelmap_cache.len() >= HISTORY_MAX {
+            self.pixelmap_cache.pop_front();
+        }
+        self.pixelmap_cache.push_back((compute_zoom, plot));
+    }
+
+    /// Drop everything pixel-dependent — call when settings that
+    /// affect compute output change (matrix, window, strand, etc.).
+    fn invalidate_caches(&mut self) {
+        self.pixelmap_cache.clear();
+        self.history.clear();
+    }
+
+    /// Restore the canonical (display-matched) compute zoom — what
+    /// you'd see right after a fresh load. Pushes the current view
+    /// onto Back so the user can return.
+    fn action_fit(&mut self) {
+        let Some(canon) = self.canonical_compute_zoom() else {
+            return;
+        };
+        let cur_zoom = self.plot.as_ref().map(|p| p.params.zoom).unwrap_or(0);
+        if cur_zoom == canon && self.view_offset == Vec2::ZERO {
+            return;
+        }
+        self.push_history();
+        self.settings.zoom = canon;
+        self.pending_view_offset_after_compute = Some(Vec2::ZERO);
+        self.recompute();
+    }
+
+    /// Pop the history stack and recompute (or restore from cache)
+    /// at the previous view's compute zoom. No-op when history is
+    /// empty.
+    fn action_back(&mut self) {
+        let Some(prev) = self.history.pop_back() else {
+            return;
+        };
+        self.settings.zoom = prev.compute_zoom;
+        self.crosshair = prev.crosshair;
+        self.pending_view_offset_after_compute = Some(prev.view_offset);
+        self.recompute();
+    }
+
+    /// Zoom-into-rectangle (dotter classic): the user middle-mouse-
+    /// dragged a rectangle on the canvas. Compute a new compute_zoom
+    /// such that the selected residue range fills the physical
+    /// canvas, push the current view onto Back, and recompute.
+    /// After the result lands `poll_compute_results` applies the
+    /// pending `view_offset` so the user sees the selected region.
+    fn action_rect_zoom(&mut self, plot_area: Rect, rs: RectSelect) {
+        let (Some(plot), Some(q), Some(s)) =
+            (self.plot.as_ref(), self.query.as_ref(), self.subject.as_ref())
+        else {
+            return;
+        };
+        let cur_zoom = plot.params.zoom.max(1) as f32;
+
+        // Screen → pixelmap-pixel.
+        let to_pix = |p: Pos2| -> (f32, f32) {
+            let l = p - plot_area.left_top();
+            (l.x + self.view_offset.x, l.y + self.view_offset.y)
+        };
+        let (sx, sy) = to_pix(rs.start_screen);
+        let (ex, ey) = to_pix(rs.current_screen);
+        let (px_lo_x, px_hi_x) = if sx <= ex { (sx, ex) } else { (ex, sx) };
+        let (px_lo_y, px_hi_y) = if sy <= ey { (sy, ey) } else { (ey, sy) };
+        // Drop tiny selections (likely accidental clicks).
+        if (px_hi_x - px_lo_x) < 3.0 || (px_hi_y - px_lo_y) < 3.0 {
+            return;
+        }
+        let px_lo_x = px_lo_x.max(0.0).min(plot.width as f32);
+        let px_lo_y = px_lo_y.max(0.0).min(plot.height as f32);
+        let px_hi_x = px_hi_x.max(px_lo_x).min(plot.width as f32);
+        let px_hi_y = px_hi_y.max(px_lo_y).min(plot.height as f32);
+
+        // Pixelmap pixels → residues at the *current* compute zoom.
+        let res_lo_x = (px_lo_x * cur_zoom).floor().max(0.0) as usize;
+        let res_lo_y = (px_lo_y * cur_zoom).floor().max(0.0) as usize;
+        let res_hi_x = ((px_hi_x * cur_zoom).ceil() as usize).min(q.len());
+        let res_hi_y = ((px_hi_y * cur_zoom).ceil() as usize).min(s.len());
+        let residues_x = res_hi_x.saturating_sub(res_lo_x).max(1) as f64;
+        let residues_y = res_hi_y.saturating_sub(res_lo_y).max(1) as f64;
+
+        let ppp = self.measured_pixels_per_point.max(0.1);
+        let phys_w = (plot_area.width() * ppp).max(1.0) as f64;
+        let phys_h = (plot_area.height() * ppp).max(1.0) as f64;
+        // New zoom so the selection fills the physical canvas.
+        let zoom_x = (residues_x / phys_w).ceil() as u32;
+        let zoom_y = (residues_y / phys_h).ceil() as u32;
+        let new_zoom = zoom_x.max(zoom_y).max(1);
+
+        if new_zoom == plot.params.zoom {
+            // No effective zoom change — just pan to the selection.
+            let new_off = Vec2::new(
+                (res_lo_x as f32) / (new_zoom as f32),
+                (res_lo_y as f32) / (new_zoom as f32),
+            );
+            self.view_offset = new_off;
+            return;
+        }
+
+        tracing::info!(
+            "rect-zoom: {} → {} (residues ~{}×{}, target phys ~{:.0}×{:.0})",
+            plot.params.zoom,
+            new_zoom,
+            residues_x as u32,
+            residues_y as u32,
+            phys_w,
+            phys_h,
+        );
+        self.push_history();
+        self.settings.zoom = new_zoom;
+        // Pending view_offset is in NEW pixelmap coords; applied when
+        // the result lands.
+        let new_off_x = (res_lo_x as f32) / (new_zoom as f32);
+        let new_off_y = (res_lo_y as f32) / (new_zoom as f32);
+        self.pending_view_offset_after_compute = Some(Vec2::new(new_off_x, new_off_y));
+        self.recompute();
+    }
+
     /// If the freshly loaded sequence's detected alphabet conflicts
     /// with the current BLAST mode, switch the mode (and the matrix
     /// to that mode's default) so the kernel produces a meaningful
@@ -512,12 +690,33 @@ impl DottirApp {
         if self.suspend_recompute {
             return;
         }
-        let (Some(q), Some(s)) = (&self.query, &self.subject) else {
+        if self.query.is_none() || self.subject.is_none() {
             self.plot = None;
             self.texture = None;
             self.compute_in_flight = false;
             return;
-        };
+        }
+        let target_zoom = self.settings.zoom.max(1);
+        // Cache hit: restore instantly, no worker dispatch. Cache is
+        // invalidated on any settings change that would alter the
+        // pixelmap (matrix, window, strand, …) so a hit really means
+        // "same plot for the same inputs".
+        if let Some(plot) = self.cache_get(target_zoom) {
+            tracing::info!("cache hit at zoom={target_zoom}");
+            self.plot = Some(plot);
+            self.texture_dirty = true;
+            self.last_error = None;
+            if let Some(off) = self.pending_view_offset_after_compute.take() {
+                self.view_offset = off;
+            }
+            return;
+        }
+        // Re-borrow now that the cache check is done (avoids a
+        // double-borrow of self).
+        let (q, s) = (
+            self.query.as_ref().expect("checked above"),
+            self.subject.as_ref().expect("checked above"),
+        );
         let matrix = match self.settings.build_matrix() {
             Some(m) => m,
             None => {
@@ -567,113 +766,6 @@ impl DottirApp {
         tracing::info!("dispatch compute id={id}");
         self.worker.dispatch(req);
         self.compute_in_flight = true;
-    }
-
-    /// C2 zoom-settle recompute: when the user has stopped scrolling
-    /// for [`ZOOM_SETTLE_MS`] and `display_zoom` has strayed outside
-    /// `[0.5, 2.0]`, swap to a finer (or coarser) `PlotConfig::zoom`
-    /// tier and recompute. Rescales `view_offset`, `crosshair`, and
-    /// `display_zoom` so the on-screen image stays exactly the same
-    /// size and position when the new pixelmap arrives (seamless
-    /// transition — no perceptible "jump" by the user).
-    fn maybe_zoom_settle_recompute(&mut self, ctx: &Context) {
-        // Thresholds operate on `physical_scale = display_zoom × ppp`
-        // so HiDPI displays trigger tier changes at the right physical
-        // resolution (per docs/rendering_review.md): when the on-screen
-        // physical pixel count for the pixelmap diverges more than 2×
-        // from one texel per physical pixel, recompute.
-        const ZOOM_IN_THRESHOLD: f32 = 2.0;
-        const ZOOM_OUT_THRESHOLD: f32 = 0.5;
-
-        let Some(t) = self.last_zoom_event else {
-            return;
-        };
-        if self.compute_in_flight {
-            // Wait for the in-flight job to land before scheduling
-            // another tier change.
-            ctx.request_repaint_after(std::time::Duration::from_millis(RECOMPUTE_SETTLE_MS));
-            return;
-        }
-        if t.elapsed().as_millis() < RECOMPUTE_SETTLE_MS as u128 {
-            // Schedule another frame so we re-check after the
-            // settle interval, even if no other event fires.
-            ctx.request_repaint_after(std::time::Duration::from_millis(RECOMPUTE_SETTLE_MS));
-            return;
-        }
-
-        let current_zoom = self.settings.zoom.max(1);
-        let physical_scale = self.display_zoom * self.measured_pixels_per_point.max(0.1);
-        // Canonical zoom for the current canvas — what auto-fit would
-        // pick. Acts as the *floor* (in terms of pixelmap fineness)
-        // for tier-out so wheel-cycling is reproducible: without this
-        // cap, integer-truncated halving (e.g. 19 → 9) followed by
-        // doubling (9 → 18) leaves us with a different pixelmap than
-        // the user started with, and the rendering visibly differs.
-        let canonical = self.canonical_compute_zoom();
-        let canonical_floor = canonical.unwrap_or(64); // when auto-fit isn't applicable, no cap
-        let (new_zoom, scale) = if physical_scale >= ZOOM_IN_THRESHOLD && current_zoom > 1 {
-            // Zoomed in past 2× physical — recompute at a finer tier
-            // (half the computation zoom, doubling pixelmap density).
-            let n = (current_zoom / 2).max(1);
-            let s = current_zoom as f32 / n as f32; // > 1, e.g. 2.0
-            (n, s)
-        } else if physical_scale <= ZOOM_OUT_THRESHOLD
-            && current_zoom < 64
-            && current_zoom < canonical_floor
-        {
-            // Zoomed out past 0.5× physical and not yet back at the
-            // canonical zoom — recompute at a coarser tier. Snap to
-            // canonical when the doubled value would meet or exceed
-            // it; otherwise just double. This makes wheel-cycling
-            // reach a fixed point at canonical instead of drifting.
-            let raw = current_zoom.saturating_mul(2).min(64);
-            let n = if raw >= canonical_floor {
-                canonical_floor
-            } else {
-                raw
-            };
-            let s = current_zoom as f32 / n as f32; // < 1, e.g. 0.5
-            (n, s)
-        } else {
-            // Within [0.5, 2.0] physical, or already at the tier
-            // extreme, or already at canonical: clear the timestamp
-            // and stop chasing.
-            self.last_zoom_event = None;
-            return;
-        };
-
-        // Math: with `scale = old_compute_zoom / new_compute_zoom`,
-        // the new pixelmap dim is `old_dim * scale`. To keep the
-        // same residue under the same screen pixel:
-        // - view_offset_new = view_offset_old * scale  (pixelmap coords
-        //   shrink by `scale`)
-        // - display_zoom_new = display_zoom_old / scale  (so on-screen
-        //   size = pixelmap_dim_new × display_zoom_new
-        //   = old_dim × scale × old_zoom / scale
-        //   = old_dim × old_zoom — unchanged).
-        // The previous version reset display_zoom to 1.0 and applied
-        // `*= 1/scale` to view_offset, which produced a visible
-        // enlargement on zoom-out and a visible shrink on zoom-in
-        // when the recompute landed.
-        let inv = 1.0 / scale;
-        let new_display_zoom = self.display_zoom * inv;
-        tracing::info!(
-            "zoom-settle: tier change {current_zoom} → {new_zoom} \
-             (display_zoom {:.2} → {:.2}, scale {scale})",
-            self.display_zoom,
-            new_display_zoom,
-        );
-        self.settings.zoom = new_zoom;
-        self.view_offset *= scale;
-        self.display_zoom = new_display_zoom;
-        if let Some((cq, cs)) = self.crosshair {
-            // Crosshair is in pixelmap coords; same scaling as view_offset.
-            let cq2 = (cq as f32 * scale).round() as u32;
-            let cs2 = (cs as f32 * scale).round() as u32;
-            self.crosshair = Some((cq2, cs2));
-        }
-        self.last_zoom_event = None;
-        self.recompute();
     }
 
     /// Resize-retarget settle: when the canvas grew/shrunk by more
@@ -731,6 +823,12 @@ impl DottirApp {
                         plot.params.window_size,
                         r.config_zoom,
                     );
+                    // Insert into LRU cache for instant restore on
+                    // Back / Fit cycling. Clone is a one-shot pixel
+                    // copy (cheap relative to the compute that
+                    // produced it).
+                    let cached = plot.clone();
+                    self.cache_insert(plot.params.zoom, cached);
                     self.plot = Some(plot);
                     self.texture_dirty = true;
                     self.last_error = None;
@@ -741,9 +839,22 @@ impl DottirApp {
                     // measurement — so a slow drag accumulates but
                     // only fires once it crosses the threshold.
                     self.last_compute_canvas_size = self.measured_plot_area;
+                    // Apply any view_offset queued by the action that
+                    // triggered this compute (rect-zoom / Back / Fit).
+                    // The offset is in NEW pixelmap coords.
+                    if let Some(off) = self.pending_view_offset_after_compute.take() {
+                        self.view_offset = off;
+                    } else {
+                        // No queued offset → centre on origin (e.g.
+                        // a fresh load or settings change).
+                        self.view_offset = Vec2::ZERO;
+                    }
                 }
                 Err(e) => {
                     self.last_error = Some(format!("compute_dotplot failed: {e}"));
+                    // Failed compute leaves the previous pixelmap (if
+                    // any) intact and drops the pending offset.
+                    self.pending_view_offset_after_compute = None;
                 }
             }
         }
@@ -758,48 +869,19 @@ impl DottirApp {
         }
         let lut = self.greyramp.lut();
         let (pw, ph) = (plot.width as usize, plot.height as usize);
-        let k = self.pool_factor.max(1);
-
-        // If pool_factor > 1, pre-downsample the raw channels with
-        // MAX-pool — preserves peak intensities so single-pixel
-        // diagonals stay visible at extreme zoom-out instead of
-        // averaging to near-white through the GPU's LINEAR sampler.
-        // Otherwise borrow the original channels directly.
-        let (fwd_buf, rev_buf, tex_w, tex_h);
-        let fwd_view: &[u8];
-        let rev_view: Option<&[u8]>;
-        if k > 1 {
-            let (pooled_fwd, dw, dh) = max_pool_downsample(&plot.pixels, pw, ph, k);
-            fwd_buf = pooled_fwd;
-            rev_buf = plot
-                .reverse_pixels
-                .as_deref()
-                .map(|r| max_pool_downsample(r, pw, ph, k).0);
-            tex_w = dw;
-            tex_h = dh;
-            fwd_view = &fwd_buf;
-            rev_view = rev_buf.as_deref();
-        } else {
-            tex_w = pw;
-            tex_h = ph;
-            fwd_view = plot.pixels.as_slice();
-            rev_view = plot.reverse_pixels.as_deref();
-        }
+        let fwd_view = plot.pixels.as_slice();
+        let rev_view = plot.reverse_pixels.as_deref();
 
         // Spec §4.4.3 inverted-repeat highlighting: when the plot has
         // a separate reverse channel, paint forward in grey and
         // reverse in magenta — overlapping cells take whichever
         // channel is stronger after the greyramp.
-        let mut rgba = Vec::with_capacity(tex_w * tex_h * 4);
+        let mut rgba = Vec::with_capacity(pw * ph * 4);
         match rev_view {
             Some(rev) if self.settings.inverted_repeat_colour => {
                 for i in 0..fwd_view.len() {
                     let f = lut[fwd_view[i] as usize];
                     let r = lut[rev[i] as usize];
-                    // Forward → black on white; reverse uses magenta.
-                    // Pick whichever channel has more "ink" (= 255 -
-                    // LUT). If forward wins, render greyscale; if
-                    // reverse wins, render magenta-tinted.
                     let f_ink = 255 - f;
                     let r_ink = 255 - r;
                     let (cr, cg, cb) = if f_ink >= r_ink {
@@ -817,92 +899,21 @@ impl DottirApp {
                 }
             }
             _ => {
-                // Plain greyscale through the LUT. When pool_factor =
-                // 1 and a separate reverse channel exists but
-                // inverted-repeat colouring is off, we want the
-                // *combined* (max-merged) view — use plot.combined()
-                // which borrows when there's no reverse channel and
-                // allocates a merged buffer otherwise.
-                if k > 1 {
-                    // Pooled buffers: merge in-place rather than
-                    // re-pooling combined() (which would allocate
-                    // again).
-                    let combined: Vec<u8> = if let Some(rev) = rev_view {
-                        fwd_view
-                            .iter()
-                            .zip(rev.iter())
-                            .map(|(&a, &b)| a.max(b))
-                            .collect()
-                    } else {
-                        fwd_view.to_vec()
-                    };
-                    for v in combined {
-                        let g = lut[v as usize];
-                        rgba.extend_from_slice(&[g, g, g, 255]);
-                    }
-                } else {
-                    for &v in plot.combined().as_ref() {
-                        let g = lut[v as usize];
-                        rgba.extend_from_slice(&[g, g, g, 255]);
-                    }
+                for &v in plot.combined().as_ref() {
+                    let g = lut[v as usize];
+                    rgba.extend_from_slice(&[g, g, g, 255]);
                 }
             }
         }
-        let image = ColorImage::from_rgba_unmultiplied([tex_w, tex_h], &rgba);
-        // Sampler choice:
-        // - display_zoom >= 1.0 (upsample / inspect actual cells):
-        //   NEAREST — pixel-perfect.
-        // - display_zoom < 1.0 (downsample, pooled or not): LINEAR
-        //   for explicit antialiasing on top of the peak-preserving
-        //   max-pool. Two-step "max-pool then antialias on display"
-        //   gives smooth lines without re-blurring the peaks away
-        //   (max-pool kept the strong cells; LINEAR only smooths
-        //   between them).
-        let opts = if self.texture_filter_linear {
-            TextureOptions::LINEAR
-        } else {
-            TextureOptions::NEAREST
-        };
-        let _ = k; // intentionally unused now; sampler depends on display_zoom only
-        let handle = ctx.load_texture("dottir-pixelmap", image, opts);
+        let image = ColorImage::from_rgba_unmultiplied([pw, ph], &rgba);
+        // The dotter-faithful render is always 1:1 (pixelmap pixel =
+        // screen pixel). NEAREST → no GPU resampling, no sub-pixel
+        // sampling phase, no moiré. The compute step is the only
+        // place "zoom" happens.
+        let handle = ctx.load_texture("dottir-pixelmap", image, TextureOptions::NEAREST);
         self.texture = Some(handle);
         self.texture_dirty = false;
     }
-}
-
-/// Max-pool downsample a row-major byte buffer by integer factor `k`.
-/// Each output cell holds the maximum of its `k × k` source block.
-/// Output dims = `ceil(src_w / k), ceil(src_h / k)`.
-///
-/// Used at extreme display zoom-out (`display_zoom < 0.5`) to preserve
-/// peak intensities on sparse diagonals — the GPU's LINEAR sampler
-/// would average them toward white instead, producing the "dashed
-/// diagonals at fit-zoom" artefact.
-fn max_pool_downsample(src: &[u8], src_w: usize, src_h: usize, k: usize) -> (Vec<u8>, usize, usize) {
-    debug_assert_eq!(src.len(), src_w * src_h);
-    debug_assert!(k >= 1);
-    let dst_w = src_w.div_ceil(k);
-    let dst_h = src_h.div_ceil(k);
-    let mut dst = vec![0u8; dst_w * dst_h];
-    for dy in 0..dst_h {
-        let y0 = dy * k;
-        let y1 = (y0 + k).min(src_h);
-        for dx in 0..dst_w {
-            let x0 = dx * k;
-            let x1 = (x0 + k).min(src_w);
-            let mut m: u8 = 0;
-            for y in y0..y1 {
-                let row = &src[y * src_w + x0..y * src_w + x1];
-                for &v in row {
-                    if v > m {
-                        m = v;
-                    }
-                }
-            }
-            dst[dy * dst_w + dx] = m;
-        }
-    }
-    (dst, dst_w, dst_h)
 }
 
 #[derive(Clone, Copy)]
@@ -916,10 +927,12 @@ impl eframe::App for DottirApp {
         // Drain any completed background-compute results before any
         // panel reads `self.plot`. Stale results are discarded inside.
         self.poll_compute_results();
-        // Once the wheel has been idle for the debounce interval,
-        // consider recomputing at a finer/coarser tier.
-        self.maybe_zoom_settle_recompute(ctx);
 
+        // Esc → Back (history pop). Backspace also; both are dotter-
+        // classic for "step out".
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape) || i.key_pressed(egui::Key::Backspace)) {
+            self.action_back();
+        }
         self.handle_keyboard(ctx);
         self.draw_menu(ctx);
         self.draw_greyramp_panel(ctx);
@@ -931,6 +944,14 @@ impl eframe::App for DottirApp {
             self.draw_alignment_dock(ctx);
         }
         self.draw_canvas(ctx);
+
+        // Apply a rectangle-zoom captured by the canvas paint. We do
+        // this *after* the paint closure because action_rect_zoom
+        // mutates self.plot via recompute, which would conflict with
+        // the &self.plot borrow held during paint.
+        if let Some((pa, rs)) = self.pending_rect_zoom.take() {
+            self.action_rect_zoom(pa, rs);
+        }
 
         // Deferred initial compute: pre-loaded sequences (CLI or
         // load_fasta before the first paint) couldn't pick a
@@ -1131,10 +1152,11 @@ impl DottirApp {
                     }
                 });
                 ui.menu_button("View", |ui| {
-                    if ui.button("Reset pan / zoom").clicked() {
-                        // Defer to the canvas's first-frame logic:
-                        // it'll snap to fit-zoom on the next paint.
-                        self.view_initialised = false;
+                    if ui.button("Fit (reset to canonical zoom)").clicked() {
+                        self.action_fit();
+                    }
+                    if ui.button("Back (Esc)").clicked() {
+                        self.action_back();
                     }
                     if ui.button("Reset greyramp").clicked() {
                         self.greyramp = Greyramp::default();
@@ -1173,8 +1195,10 @@ impl DottirApp {
                             (",   .", "step along main diagonal"),
                             ("[   ]", "step along anti-diagonal"),
                             ("Space", "snap crosshair to nearest strong dot"),
-                            ("scroll", "zoom on cursor"),
-                            ("drag", "pan"),
+                            ("L-click", "set crosshair"),
+                            ("L-drag", "pan"),
+                            ("M-drag", "zoom into rectangle (dotter classic)"),
+                            ("Esc/Bsp", "back (pop view history)"),
                         ] {
                             ui.horizontal(|ui| {
                                 ui.label(
@@ -1375,18 +1399,17 @@ impl DottirApp {
                     {
                         changed = true;
                     }
-                    // Snap the *display* view (pan + display_zoom) back
-                    // to fit-the-whole-plot. Doesn't touch the compute
-                    // zoom (the slider above); the canvas's first-frame
-                    // logic does the actual snap.
+                    // Restore the canonical (display-matched) compute
+                    // zoom — same as the View menu's Fit action.
                     if ui
                         .button("Fit")
                         .on_hover_text(
-                            "Reset pan and display zoom so the whole pixelmap fits the canvas.",
+                            "Restore the canonical (display-matched) zoom showing the whole \
+                             pixelmap. Pushes the current view onto the Back stack.",
                         )
                         .clicked()
                     {
-                        self.view_initialised = false;
+                        self.action_fit();
                     }
                 });
                 ui.horizontal(|ui| {
@@ -1563,6 +1586,10 @@ impl DottirApp {
             });
         self.show_settings = open;
         if changed {
+            // Any setting that affects the pixelmap invalidates the
+            // cache + history (which would point at incompatible
+            // pixelmaps under the new parameters).
+            self.invalidate_caches();
             self.recompute();
         }
     }
@@ -1600,7 +1627,10 @@ impl DottirApp {
                         ));
                     } else {
                         ui.separator();
-                        ui.label("click on the plot to set the crosshair");
+                        ui.label(
+                            "left-click = crosshair · left-drag = pan · \
+                             middle-drag = zoom rectangle · Esc = Back",
+                        );
                     }
                 } else {
                     ui.label("load a query and subject FASTA to begin (File menu)");
@@ -1781,6 +1811,53 @@ impl DottirApp {
             self.measured_plot_area = Some(new_area);
             self.measured_pixels_per_point = new_ppp;
 
+            // Allocate the canvas and resolve interactions *before*
+            // binding `&self.plot` — the borrow checker can't tell
+            // that the subsequent `self.action_*` mutations don't
+            // touch the same field, so we capture everything we need
+            // from `response` up front. The `plot` reference's
+            // lifetime then doesn't overlap any self-mutating method.
+            let (rect, response) = ui.allocate_exact_size(avail, Sense::click_and_drag());
+            let plot_area = Rect::from_min_max(
+                Pos2::new(rect.left() + left_margin, rect.top() + top_margin),
+                rect.right_bottom(),
+            );
+
+            // Middle-drag = rectangle-zoom selection (dotter classic).
+            // Press: start rect_select, recording the screen position.
+            // Drag: update current corner. Release: stash the
+            // completed selection in `pending_rect_zoom`; the action
+            // fires after the paint closure ends.
+            if response.drag_started_by(egui::PointerButton::Middle) {
+                if let Some(p) = response.interact_pointer_pos() {
+                    if plot_area.contains(p) {
+                        self.rect_select = Some(RectSelect {
+                            start_screen: p,
+                            current_screen: p,
+                        });
+                    }
+                }
+            }
+            if response.dragged_by(egui::PointerButton::Middle) {
+                if let (Some(p), Some(rs)) =
+                    (response.interact_pointer_pos(), self.rect_select.as_mut())
+                {
+                    rs.current_screen = p;
+                }
+            }
+            if response.drag_stopped_by(egui::PointerButton::Middle) {
+                if let Some(rs) = self.rect_select.take() {
+                    self.pending_rect_zoom = Some((plot_area, rs));
+                }
+            }
+
+            // Left-drag = pan. Plain drag, applied directly to
+            // view_offset (1:1 means drag-delta is pixelmap-pixel
+            // delta).
+            if response.dragged_by(egui::PointerButton::Primary) {
+                self.view_offset -= response.drag_delta();
+            }
+
             let Some(plot) = &self.plot else {
                 ui.centered_and_justified(|ui| {
                     ui.label("No plot. Load a query and subject FASTA (File menu).");
@@ -1790,153 +1867,41 @@ impl DottirApp {
             let Some(tex) = &self.texture else {
                 return;
             };
-            let (rect, response) = ui.allocate_exact_size(avail, Sense::click_and_drag());
-            let plot_area = Rect::from_min_max(
-                Pos2::new(rect.left() + left_margin, rect.top() + top_margin),
-                rect.right_bottom(),
-            );
 
-            // Compute fit-to-canvas zoom first — used both as the
-            // lower bound for interactive zoom and as the initial
-            // zoom level for freshly loaded plots.
             let pw = plot.width as f32;
             let ph = plot.height as f32;
             let plot_w = plot_area.width().max(1.0);
             let plot_h = plot_area.height().max(1.0);
-            let fit_zoom_x = plot_w / pw.max(1.0);
-            let fit_zoom_y = plot_h / ph.max(1.0);
-            let fit_zoom = fit_zoom_x.min(fit_zoom_y);
 
-            // First render of a freshly loaded plot: snap to fit so
-            // the user sees the whole pixelmap.
-            if !self.view_initialised {
-                self.display_zoom = fit_zoom;
-                self.view_offset = Vec2::ZERO;
-                self.view_initialised = true;
-            }
-
-            // Pan with primary drag — only inside the plot area
-            // (drags into the axis margin don't pan).
-            if response.dragged() {
-                self.view_offset -= response.drag_delta() / self.display_zoom;
-            }
-            // Zoom with scroll, centered on cursor. Clamped against
-            // `[fit_zoom, 100.0]` *before* the anchor math so that
-            // hitting the floor doesn't re-bump `display_zoom`
-            // afterwards and drift the anchor.
-            let scroll = ctx.input(|i| i.smooth_scroll_delta.y);
-            if scroll.abs() > 0.0 {
-                if let Some(cursor) = response.hover_pos() {
-                    if plot_area.contains(cursor) {
-                        let factor = (scroll / 100.0).exp();
-                        let new_zoom =
-                            (self.display_zoom * factor).clamp(fit_zoom, 100.0);
-                        let cursor_local = cursor - plot_area.left_top();
-                        let world_under_cursor =
-                            self.view_offset + cursor_local / self.display_zoom;
-                        self.display_zoom = new_zoom;
-                        self.view_offset = world_under_cursor - cursor_local / self.display_zoom;
-                        // Stamp for the C2 zoom-settle recompute trigger.
-                        self.last_zoom_event = Some(std::time::Instant::now());
-                    }
-                }
-            }
-            // Double-click: zoom 2× centred on the click position,
-            // same anchor math as the wheel. Single-click still
-            // fires before this and sets the crosshair, so a
-            // double-click both moves the crosshair to the cursor
-            // and zooms in around it.
-            if response.double_clicked() {
-                if let Some(p) = response.interact_pointer_pos() {
-                    if plot_area.contains(p) {
-                        let new_zoom = (self.display_zoom * 2.0).clamp(fit_zoom, 100.0);
-                        let local = p - plot_area.left_top();
-                        let world_under_cursor =
-                            self.view_offset + local / self.display_zoom;
-                        self.display_zoom = new_zoom;
-                        self.view_offset = world_under_cursor - local / self.display_zoom;
-                        self.last_zoom_event = Some(std::time::Instant::now());
-                    }
-                }
-            }
-
-            // Constrain pan so the user can't scroll the pixelmap
-            // completely off-screen. With `display_zoom` already
-            // clamped at `fit_zoom`, the plot is always at least as
-            // big as the canvas in one axis; the other axis (if
-            // aspect ratios differ) gets auto-centred.
-            let cw = plot_w / self.display_zoom; // canvas width in pixelmap coords
-            let ch = plot_h / self.display_zoom;
-            if pw <= cw {
-                self.view_offset.x = -(cw - pw) / 2.0; // centre horizontally
+            // Clamp pan to keep the pixelmap on screen. With the
+            // dotter-faithful 1:1 model:
+            // - if pixelmap >= canvas in an axis, view_offset is
+            //   clamped to [0, pixelmap − canvas].
+            // - if pixelmap < canvas, the image is centred in the
+            //   canvas and view_offset is set to the negative half-
+            //   margin so the draw rect aligns with the centred
+            //   image.
+            if pw <= plot_w {
+                self.view_offset.x = -(plot_w - pw) / 2.0;
             } else {
-                self.view_offset.x = self.view_offset.x.clamp(0.0, pw - cw);
+                self.view_offset.x = self.view_offset.x.clamp(0.0, pw - plot_w);
             }
-            if ph <= ch {
-                self.view_offset.y = -(ch - ph) / 2.0;
+            if ph <= plot_h {
+                self.view_offset.y = -(plot_h - ph) / 2.0;
             } else {
-                self.view_offset.y = self.view_offset.y.clamp(0.0, ph - ch);
+                self.view_offset.y = self.view_offset.y.clamp(0.0, ph - plot_h);
             }
 
-            // Adaptive sampler: downsample with LINEAR, upsample with
-            // NEAREST. The crossover is on *physical_scale* —
-            // `display_zoom × pixels_per_point` — not logical
-            // display_zoom. On a HiDPI display (ppp=2), display_zoom
-            // = 0.5 already maps each texel to one physical pixel
-            // (physical_scale = 1.0), so NEAREST is correct.
-            // Crossover requires a texture rebuild because
-            // `TextureOptions` is fixed per `load_texture` call; flip
-            // `texture_dirty` so `ensure_texture` rebuilds with the
-            // new mode next frame.
-            let physical_scale_for_sampler =
-                self.display_zoom * self.measured_pixels_per_point.max(0.1);
-            let want_linear = physical_scale_for_sampler < 1.0;
-            if want_linear != self.texture_filter_linear {
-                self.texture_filter_linear = want_linear;
-                self.texture_dirty = true;
-            }
-
-            // Peak-preserving max-pool: at extreme zoom-out the GPU's
-            // LINEAR sampler would average single-pixel diagonals
-            // toward white, producing the "dashed diagonals at fit-
-            // zoom" artefact. Instead, pre-downsample the pixelmap
-            // ourselves with MAX-pool to ~1.5× the *physical* canvas
-            // (HiDPI-aware), then let the GPU's LINEAR sampler do
-            // mild antialiasing on top. The two-step pipeline (max-
-            // pool to preserve sparse diagonal evidence, then
-            // antialias on display) gives smooth continuous lines
-            // without inventing structure that isn't in the
-            // pixelmap.
-            //
-            // pool_factor = pixelmap_dim / target_texture_dim where
-            //   target_texture_dim = OVERSAMPLE × pixelmap_dim
-            //                          × display_zoom × pixels_per_point
-            // simplifies to:
-            //   pool_factor = 1 / (OVERSAMPLE × display_zoom × ppp)
-            const POOL_OVERSAMPLE: f32 = 1.5;
-            let ppp = ctx.pixels_per_point();
-            let raw_pool = (1.0
-                / (POOL_OVERSAMPLE * self.display_zoom.max(1e-6) * ppp.max(0.1)))
-            .ceil() as usize;
-            // Only engage pooling when it would actually shrink the
-            // texture (k >= 2). When display_zoom × ppp is large
-            // enough that the texture is already canvas-sized, the
-            // GPU sampler is sufficient.
-            let want_pool = if raw_pool >= 2 { raw_pool } else { 1 };
-            if want_pool != self.pool_factor {
-                self.pool_factor = want_pool;
-                self.texture_dirty = true;
-            }
-
-            // Click sets the crosshair (clicks in the margin are
-            // ignored).
+            // Single click (primary, no drag): set crosshair. Clicks
+            // in the margin are ignored.
             if response.clicked() {
                 if let Some(p) = response.interact_pointer_pos() {
                     if plot_area.contains(p) {
                         let local = p - plot_area.left_top();
-                        let world = self.view_offset + local / self.display_zoom;
-                        let q = world.x.floor() as i64;
-                        let s = world.y.floor() as i64;
+                        // 1:1 mapping — pixelmap_pixel = screen_pixel
+                        // + view_offset.
+                        let q = (local.x + self.view_offset.x).floor() as i64;
+                        let s = (local.y + self.view_offset.y).floor() as i64;
                         if q >= 0 && q < plot.width as i64 && s >= 0 && s < plot.height as i64 {
                             self.crosshair = Some((q as u32, s as u32));
                         }
@@ -1949,31 +1914,17 @@ impl DottirApp {
             // area gets the texture painted over it.
             ui.painter().rect_filled(rect, 0.0, Color32::from_gray(235));
 
-            // Compute on-screen rect for the pixelmap, then render
-            // it. Clip to `plot_area` so over-pan doesn't leak the
-            // texture into the margin.
-            //
-            // Snap the rect's min/max to integer *physical* pixel
-            // boundaries: with the display-matched compute zoom the
-            // pixelmap and the canvas are roughly the same physical
-            // resolution, and a fractional rect position introduces
-            // sub-pixel sampling phase that re-creates the moiré we
-            // worked to eliminate. Snapping aligns texel boundaries
-            // with screen pixels.
-            let plot_screen_w = pw * self.display_zoom;
-            let plot_screen_h = ph * self.display_zoom;
-            let plot_screen_x =
-                plot_area.left() - self.view_offset.x * self.display_zoom;
-            let plot_screen_y =
-                plot_area.top() - self.view_offset.y * self.display_zoom;
+            // Render the pixelmap at native 1:1 size. With pixelmap
+            // dim == screen pixels, NEAREST sampling reproduces each
+            // pixelmap cell verbatim. Snap to integer physical
+            // pixels to avoid sub-pixel sampling phase.
+            let plot_screen_x = plot_area.left() - self.view_offset.x;
+            let plot_screen_y = plot_area.top() - self.view_offset.y;
             let ppp_snap = ctx.pixels_per_point();
             let snap = |v: f32| ((v * ppp_snap).round()) / ppp_snap;
             let plot_rect = Rect::from_min_max(
                 Pos2::new(snap(plot_screen_x), snap(plot_screen_y)),
-                Pos2::new(
-                    snap(plot_screen_x + plot_screen_w),
-                    snap(plot_screen_y + plot_screen_h),
-                ),
+                Pos2::new(snap(plot_screen_x + pw), snap(plot_screen_y + ph)),
             );
             let clip_painter = ui.painter_at(plot_area);
             clip_painter.image(
@@ -1989,6 +1940,26 @@ impl DottirApp {
                 egui::Stroke::new(1.0, Color32::from_gray(110)),
             );
 
+            // Rubber-band rectangle while middle-mouse drag is in
+            // progress. Drawn over the pixelmap but under the
+            // crosshair / labels.
+            if let Some(rs) = self.rect_select {
+                let r = Rect::from_two_pos(rs.start_screen, rs.current_screen)
+                    .intersect(plot_area);
+                if r.width() > 0.5 && r.height() > 0.5 {
+                    clip_painter.rect_filled(
+                        r,
+                        0.0,
+                        Color32::from_rgba_unmultiplied(40, 100, 200, 24),
+                    );
+                    clip_painter.rect_stroke(
+                        r,
+                        0.0,
+                        egui::Stroke::new(1.0, Color32::from_rgb(40, 100, 200)),
+                    );
+                }
+            }
+
             // C3: breaklines for multi-record FASTA inputs. Vertical
             // lines at the query record boundaries; horizontal lines
             // at the subject record boundaries. Drawn underneath the
@@ -2003,7 +1974,7 @@ impl DottirApp {
                         continue;
                     }
                     let sx = plot_area.left()
-                        + ((pixel_x as f32) - self.view_offset.x) * self.display_zoom;
+                        + ((pixel_x as f32) - self.view_offset.x);
                     if sx < plot_area.left() || sx > plot_area.right() {
                         continue;
                     }
@@ -2023,7 +1994,7 @@ impl DottirApp {
                         continue;
                     }
                     let sy = plot_area.top()
-                        + ((pixel_y as f32) - self.view_offset.y) * self.display_zoom;
+                        + ((pixel_y as f32) - self.view_offset.y);
                     if sy < plot_area.top() || sy > plot_area.bottom() {
                         continue;
                     }
@@ -2045,9 +2016,9 @@ impl DottirApp {
             // area so the lines never run into the axis margin.
             if let Some((cq, cs)) = self.crosshair {
                 let cx =
-                    plot_area.left() + ((cq as f32 + 0.5) - self.view_offset.x) * self.display_zoom;
+                    plot_area.left() + ((cq as f32 + 0.5) - self.view_offset.x);
                 let cy =
-                    plot_area.top() + ((cs as f32 + 0.5) - self.view_offset.y) * self.display_zoom;
+                    plot_area.top() + ((cs as f32 + 0.5) - self.view_offset.y);
                 let stroke = egui::Stroke::new(1.0, Color32::from_rgb(255, 80, 80));
                 clip_painter.line_segment(
                     [
@@ -2129,9 +2100,9 @@ impl DottirApp {
         let zoom_us = plot.params.zoom.max(1) as f32;
         // World-pixel range visible inside the plot area.
         let world_x_lo = self.view_offset.x;
-        let world_x_hi = world_x_lo + plot_area.width() / self.display_zoom;
+        let world_x_hi = world_x_lo + plot_area.width();
         let world_y_lo = self.view_offset.y;
-        let world_y_hi = world_y_lo + plot_area.height() / self.display_zoom;
+        let world_y_hi = world_y_lo + plot_area.height();
         // Convert to sequence-residue range.
         let seq_q_lo = (world_x_lo * zoom_us).max(0.0) as u64;
         let seq_q_hi = (world_x_hi * zoom_us) as u64;
@@ -2149,13 +2120,13 @@ impl DottirApp {
         let tick_baseline_y = plot_area.top();
         let label_y = tick_baseline_y - 16.0; // text top
         let span_x = seq_q_hi.saturating_sub(seq_q_lo) as f32;
-        let pixels_per_residue_x = self.display_zoom / zoom_us;
+        let pixels_per_residue_x = 1.0_f32 / zoom_us;
         let step_x = nice_tick_step(span_x as f64, MIN_LABEL_SPACING_PX / pixels_per_residue_x);
         let mut t = (seq_q_lo / step_x as u64) * step_x as u64;
         while t < seq_q_hi.saturating_add(step_x as u64) {
             if t >= seq_q_lo && t <= seq_q_hi {
                 let sx = plot_area.left()
-                    + (t as f32 / zoom_us - self.view_offset.x) * self.display_zoom;
+                    + (t as f32 / zoom_us - self.view_offset.x);
                 if sx < plot_area.left() - 1.0 || sx > plot_area.right() + 1.0 {
                     t = t.saturating_add(step_x as u64);
                     if step_x == 0.0 {
@@ -2195,7 +2166,7 @@ impl DottirApp {
         while t < seq_s_hi.saturating_add(step_y as u64) {
             if t >= seq_s_lo && t <= seq_s_hi {
                 let sy =
-                    plot_area.top() + (t as f32 / zoom_us - self.view_offset.y) * self.display_zoom;
+                    plot_area.top() + (t as f32 / zoom_us - self.view_offset.y);
                 if sy < plot_area.top() - 1.0 || sy > plot_area.bottom() + 1.0 {
                     t = t.saturating_add(step_y as u64);
                     if step_y == 0.0 {
@@ -2240,9 +2211,9 @@ impl DottirApp {
                         continue;
                     }
                     let x0 = plot_area.left()
-                        + (r_start as f32 / zoom_us - self.view_offset.x) * self.display_zoom;
+                        + (r_start as f32 / zoom_us - self.view_offset.x);
                     let x1 = plot_area.left()
-                        + (r_end as f32 / zoom_us - self.view_offset.x) * self.display_zoom;
+                        + (r_end as f32 / zoom_us - self.view_offset.x);
                     let span = (x1 - x0).max(0.0);
                     if span < 18.0 {
                         continue;
@@ -2268,9 +2239,9 @@ impl DottirApp {
                         continue;
                     }
                     let y0 = plot_area.top()
-                        + (r_start as f32 / zoom_us - self.view_offset.y) * self.display_zoom;
+                        + (r_start as f32 / zoom_us - self.view_offset.y);
                     let y1 = plot_area.top()
-                        + (r_end as f32 / zoom_us - self.view_offset.y) * self.display_zoom;
+                        + (r_end as f32 / zoom_us - self.view_offset.y);
                     let span = (y1 - y0).max(0.0);
                     if span < 14.0 {
                         continue;
@@ -3012,7 +2983,9 @@ fn save_session(app: &mut DottirApp) {
         view: SessionView {
             offset_x: app.view_offset.x,
             offset_y: app.view_offset.y,
-            display_zoom: app.display_zoom,
+            // Always 1.0 under the dotter-faithful 1:1 model; field
+            // kept in the session schema for backward compatibility.
+            display_zoom: 1.0,
             crosshair: app.crosshair.map(|(q, s)| [q, s]),
             light_theme: app.light_theme,
             align_dock_visible: app.align_dock_visible,
@@ -3095,13 +3068,13 @@ fn open_session(app: &mut DottirApp) {
     // Apply view state AFTER the loads (load_fasta calls recompute
     // which doesn't touch view state, so applying here is safe).
     app.view_offset = Vec2::new(s.view.offset_x, s.view.offset_y);
-    app.display_zoom = s.view.display_zoom.max(0.1);
+    // `s.view.display_zoom` is ignored under the new always-1:1
+    // model — the saved field is kept for backward-compatible
+    // session files but doesn't influence rendering.
+    let _ = s.view.display_zoom;
     app.crosshair = s.view.crosshair.map(|[q, s]| (q, s));
     app.light_theme = s.view.light_theme;
     app.align_dock_visible = s.view.align_dock_visible;
-    // Session restore overrides the load_fasta-driven view reset:
-    // the saved transform is authoritative, don't snap-to-fit.
-    app.view_initialised = true;
     app.settings.align_window_size = s.view.align_window_size.clamp(20, 400);
     tracing::info!("loaded session {}", path.display());
 }
@@ -3137,72 +3110,3 @@ fn save_png(app: &mut DottirApp) {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::max_pool_downsample;
-
-    #[test]
-    fn max_pool_preserves_peak_in_each_block() {
-        // 4×4 input with one bright pixel per 2×2 block. With k=2,
-        // every output cell should be that bright value, not the
-        // averaged-down ~64 we'd get with mean-pool.
-        #[rustfmt::skip]
-        let src: Vec<u8> = vec![
-            255, 0, 0, 200,
-              0, 0, 0,   0,
-              0, 0, 0,   0,
-            150, 0, 0,  90,
-        ];
-        let (dst, w, h) = max_pool_downsample(&src, 4, 4, 2);
-        assert_eq!((w, h), (2, 2));
-        assert_eq!(dst, vec![255, 200, 150, 90]);
-    }
-
-    #[test]
-    fn max_pool_handles_uneven_division() {
-        // 5×3 input, k=2 → 3×2 output. Trailing partial block uses
-        // whatever cells exist (no padding).
-        #[rustfmt::skip]
-        let src: Vec<u8> = vec![
-            10, 20, 30, 40, 99,
-            50, 60, 70, 80,  5,
-             1,  2,  3,  4,  7,
-        ];
-        let (dst, w, h) = max_pool_downsample(&src, 5, 3, 2);
-        assert_eq!((w, h), (3, 2));
-        // Block (0,0) {10,20,50,60} → 60.
-        // Block (0,1) {30,40,70,80} → 80.
-        // Block (0,2) {99,5}        → 99.
-        // Block (1,0) {1,2}         → 2.
-        // Block (1,1) {3,4}         → 4.
-        // Block (1,2) {7}           → 7.
-        assert_eq!(dst, vec![60, 80, 99, 2, 4, 7]);
-    }
-
-    #[test]
-    fn max_pool_k1_is_identity_clone() {
-        let src: Vec<u8> = (0..24).map(|i| (i * 7) as u8).collect();
-        let (dst, w, h) = max_pool_downsample(&src, 6, 4, 1);
-        assert_eq!((w, h), (6, 4));
-        assert_eq!(dst, src);
-    }
-
-    /// Reasonably large input, k=10 — pure smoke check that diagonals
-    /// survive. A single non-zero pixel per row at position `y` should
-    /// appear in the pooled output at position `y / 10`.
-    #[test]
-    fn max_pool_keeps_sparse_diagonal_visible() {
-        let n = 100;
-        let mut src = vec![0u8; n * n];
-        for i in 0..n {
-            src[i * n + i] = 255;
-        }
-        let (dst, w, h) = max_pool_downsample(&src, n, n, 10);
-        assert_eq!((w, h), (10, 10));
-        // Every diagonal output cell holds 255 (the source diagonal
-        // hits inside that block).
-        for i in 0..10 {
-            assert_eq!(dst[i * 10 + i], 255, "diagonal lost at i={i}");
-        }
-    }
-}
