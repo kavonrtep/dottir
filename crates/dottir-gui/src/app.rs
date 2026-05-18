@@ -254,6 +254,16 @@ pub struct DottirApp {
     /// Crossover sets `texture_dirty = true` so the rebuild happens
     /// next frame.
     texture_filter_linear: bool,
+    /// Peak-preserving texture max-pool factor. `1` = no pooling
+    /// (texture = full pixelmap). `>1` = each output texture pixel is
+    /// the max of a `pool_factor × pool_factor` block of the
+    /// pixelmap, applied at extreme downsample (`display_zoom <
+    /// 0.5`). Solves the "dashed diagonals at fit-zoom" artefact:
+    /// LINEAR-sampling a sparse-diagonal pixelmap at 9:1 averages
+    /// most diagonal pixels into the white background; max-pool
+    /// preserves the peak so single-pixel diagonals stay visible.
+    /// Set in the paint loop; texture rebuild triggered on change.
+    pool_factor: usize,
 }
 
 impl DottirApp {
@@ -319,6 +329,7 @@ impl DottirApp {
             align_dock_visible: true,
             view_initialised: false,
             texture_filter_linear: false,
+            pool_factor: 1,
         };
 
         // Pre-load any sequences supplied on the command line. Errors
@@ -607,34 +618,56 @@ impl DottirApp {
             return;
         }
         let lut = self.greyramp.lut();
+        let (pw, ph) = (plot.width as usize, plot.height as usize);
+        let k = self.pool_factor.max(1);
+
+        // If pool_factor > 1, pre-downsample the raw channels with
+        // MAX-pool — preserves peak intensities so single-pixel
+        // diagonals stay visible at extreme zoom-out instead of
+        // averaging to near-white through the GPU's LINEAR sampler.
+        // Otherwise borrow the original channels directly.
+        let (fwd_buf, rev_buf, tex_w, tex_h);
+        let fwd_view: &[u8];
+        let rev_view: Option<&[u8]>;
+        if k > 1 {
+            let (pooled_fwd, dw, dh) = max_pool_downsample(&plot.pixels, pw, ph, k);
+            fwd_buf = pooled_fwd;
+            rev_buf = plot
+                .reverse_pixels
+                .as_deref()
+                .map(|r| max_pool_downsample(r, pw, ph, k).0);
+            tex_w = dw;
+            tex_h = dh;
+            fwd_view = &fwd_buf;
+            rev_view = rev_buf.as_deref();
+        } else {
+            tex_w = pw;
+            tex_h = ph;
+            fwd_view = plot.pixels.as_slice();
+            rev_view = plot.reverse_pixels.as_deref();
+        }
+
         // Spec §4.4.3 inverted-repeat highlighting: when the plot has
-        // a separate reverse channel, paint forward (`plot.pixels`) in
-        // grey and reverse (`plot.reverse_pixels`) in magenta —
-        // overlapping cells take whichever channel is stronger after
-        // the greyramp.
-        let mut rgba = Vec::with_capacity(plot.pixels.len() * 4);
-        match plot.reverse_pixels.as_deref() {
+        // a separate reverse channel, paint forward in grey and
+        // reverse in magenta — overlapping cells take whichever
+        // channel is stronger after the greyramp.
+        let mut rgba = Vec::with_capacity(tex_w * tex_h * 4);
+        match rev_view {
             Some(rev) if self.settings.inverted_repeat_colour => {
-                let fwd = plot.pixels.as_slice();
-                for i in 0..plot.pixels.len() {
-                    let f = lut[fwd[i] as usize]; // forward strength (0..255)
-                    let r = lut[rev[i] as usize]; // reverse strength
-                                                  // Forward → black on white (so darker means more
-                                                  // confident); reverse channel uses magenta (255,
-                                                  // 0, 255).
-                                                  // Blend: take the channel with the highest "ink"
-                                                  // (= 255 - lut value, since white = 255 means
-                                                  // "no ink"). If forward wins, render greyscale; if
-                                                  // reverse wins, render magenta-tinted.
+                for i in 0..fwd_view.len() {
+                    let f = lut[fwd_view[i] as usize];
+                    let r = lut[rev[i] as usize];
+                    // Forward → black on white; reverse uses magenta.
+                    // Pick whichever channel has more "ink" (= 255 -
+                    // LUT). If forward wins, render greyscale; if
+                    // reverse wins, render magenta-tinted.
                     let f_ink = 255 - f;
                     let r_ink = 255 - r;
                     let (cr, cg, cb) = if f_ink >= r_ink {
-                        (f, f, f) // greyscale forward
+                        (f, f, f)
                     } else {
-                        // Reverse hit. Render as magenta whose
-                        // intensity scales with r_ink.
                         let ink = r_ink as u16;
-                        let bg = 255_u16 - ink; // white background
+                        let bg = 255_u16 - ink;
                         (
                             (bg + ink * 220 / 255) as u8,
                             (bg) as u8,
@@ -645,27 +678,47 @@ impl DottirApp {
                 }
             }
             _ => {
-                // Plain greyscale: combined channel through the LUT.
-                // `combined()` borrows `pixels` directly when no
-                // separate reverse channel exists (the usual case);
-                // when one does and we got here because the user just
-                // toggled inverted-repeat colouring off, it merges
-                // forward + reverse into a fresh buffer so we render
-                // the unified view instead of just the forward channel.
-                for &v in plot.combined().as_ref() {
-                    let g = lut[v as usize];
-                    rgba.extend_from_slice(&[g, g, g, 255]);
+                // Plain greyscale through the LUT. When pool_factor =
+                // 1 and a separate reverse channel exists but
+                // inverted-repeat colouring is off, we want the
+                // *combined* (max-merged) view — use plot.combined()
+                // which borrows when there's no reverse channel and
+                // allocates a merged buffer otherwise.
+                if k > 1 {
+                    // Pooled buffers: merge in-place rather than
+                    // re-pooling combined() (which would allocate
+                    // again).
+                    let combined: Vec<u8> = if let Some(rev) = rev_view {
+                        fwd_view
+                            .iter()
+                            .zip(rev.iter())
+                            .map(|(&a, &b)| a.max(b))
+                            .collect()
+                    } else {
+                        fwd_view.to_vec()
+                    };
+                    for v in combined {
+                        let g = lut[v as usize];
+                        rgba.extend_from_slice(&[g, g, g, 255]);
+                    }
+                } else {
+                    for &v in plot.combined().as_ref() {
+                        let g = lut[v as usize];
+                        rgba.extend_from_slice(&[g, g, g, 255]);
+                    }
                 }
             }
         }
-        let image =
-            ColorImage::from_rgba_unmultiplied([plot.width as usize, plot.height as usize], &rgba);
-        // NEAREST = pixel-perfect blocks at display_zoom ≥ 1 (lets the
-        // user see individual cell values when zoomed in). LINEAR =
-        // smooth downsample at display_zoom < 1 (kills moiré on the
-        // periodic diagonals when the full plot is fit-zoomed to a
-        // smaller canvas).
-        let opts = if self.texture_filter_linear {
+        let image = ColorImage::from_rgba_unmultiplied([tex_w, tex_h], &rgba);
+        // Sampler choice:
+        // - pool_factor > 1: texture is already close to canvas size
+        //   (we did the peak-preserving downsample ourselves), so use
+        //   NEAREST — LINEAR would re-blur what max-pool just preserved.
+        // - pool_factor == 1, display_zoom < 1.0: hand off to GPU
+        //   LINEAR for a smooth mild downsample.
+        // - pool_factor == 1, display_zoom >= 1.0: NEAREST for
+        //   pixel-perfect inspection at high zoom.
+        let opts = if k == 1 && self.texture_filter_linear {
             TextureOptions::LINEAR
         } else {
             TextureOptions::NEAREST
@@ -674,6 +727,41 @@ impl DottirApp {
         self.texture = Some(handle);
         self.texture_dirty = false;
     }
+}
+
+/// Max-pool downsample a row-major byte buffer by integer factor `k`.
+/// Each output cell holds the maximum of its `k × k` source block.
+/// Output dims = `ceil(src_w / k), ceil(src_h / k)`.
+///
+/// Used at extreme display zoom-out (`display_zoom < 0.5`) to preserve
+/// peak intensities on sparse diagonals — the GPU's LINEAR sampler
+/// would average them toward white instead, producing the "dashed
+/// diagonals at fit-zoom" artefact.
+fn max_pool_downsample(src: &[u8], src_w: usize, src_h: usize, k: usize) -> (Vec<u8>, usize, usize) {
+    debug_assert_eq!(src.len(), src_w * src_h);
+    debug_assert!(k >= 1);
+    let dst_w = src_w.div_ceil(k);
+    let dst_h = src_h.div_ceil(k);
+    let mut dst = vec![0u8; dst_w * dst_h];
+    for dy in 0..dst_h {
+        let y0 = dy * k;
+        let y1 = (y0 + k).min(src_h);
+        for dx in 0..dst_w {
+            let x0 = dx * k;
+            let x1 = (x0 + k).min(src_w);
+            let mut m: u8 = 0;
+            for y in y0..y1 {
+                let row = &src[y * src_w + x0..y * src_w + x1];
+                for &v in row {
+                    if v > m {
+                        m = v;
+                    }
+                }
+            }
+            dst[dy * dst_w + dx] = m;
+        }
+    }
+    (dst, dst_w, dst_h)
 }
 
 #[derive(Clone, Copy)]
@@ -1621,6 +1709,29 @@ impl DottirApp {
             let want_linear = self.display_zoom < 1.0;
             if want_linear != self.texture_filter_linear {
                 self.texture_filter_linear = want_linear;
+                self.texture_dirty = true;
+            }
+
+            // Peak-preserving max-pool: at extreme zoom-out the GPU's
+            // LINEAR sampler would average single-pixel diagonals
+            // toward white, producing the "dashed diagonals at fit-
+            // zoom" artefact. Instead, pre-downsample the pixelmap
+            // ourselves with MAX-pool to ~2× the on-screen plot size,
+            // then upload that smaller texture with NEAREST. Only
+            // engages for `display_zoom < 0.5`; above that the GPU
+            // sampler does fine. Pool factor is the smallest integer
+            // `k` such that `pixelmap_dim / k ≈ 2 × canvas_dim`.
+            let want_pool = if self.display_zoom < 0.5 {
+                // texture_dim_target = 2 × on-screen plot dim
+                //   = 2 × pixelmap_dim × display_zoom
+                // k = pixelmap_dim / texture_dim_target
+                //   = 1 / (2 × display_zoom)
+                ((1.0 / (2.0 * self.display_zoom.max(1e-6))).ceil() as usize).max(2)
+            } else {
+                1
+            };
+            if want_pool != self.pool_factor {
+                self.pool_factor = want_pool;
                 self.texture_dirty = true;
             }
 
@@ -2814,6 +2925,76 @@ fn save_png(app: &mut DottirApp) {
         ) {
             Ok(()) => {}
             Err(e) => app.last_error = Some(format!("PNG save failed: {e}")),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::max_pool_downsample;
+
+    #[test]
+    fn max_pool_preserves_peak_in_each_block() {
+        // 4×4 input with one bright pixel per 2×2 block. With k=2,
+        // every output cell should be that bright value, not the
+        // averaged-down ~64 we'd get with mean-pool.
+        #[rustfmt::skip]
+        let src: Vec<u8> = vec![
+            255, 0, 0, 200,
+              0, 0, 0,   0,
+              0, 0, 0,   0,
+            150, 0, 0,  90,
+        ];
+        let (dst, w, h) = max_pool_downsample(&src, 4, 4, 2);
+        assert_eq!((w, h), (2, 2));
+        assert_eq!(dst, vec![255, 200, 150, 90]);
+    }
+
+    #[test]
+    fn max_pool_handles_uneven_division() {
+        // 5×3 input, k=2 → 3×2 output. Trailing partial block uses
+        // whatever cells exist (no padding).
+        #[rustfmt::skip]
+        let src: Vec<u8> = vec![
+            10, 20, 30, 40, 99,
+            50, 60, 70, 80,  5,
+             1,  2,  3,  4,  7,
+        ];
+        let (dst, w, h) = max_pool_downsample(&src, 5, 3, 2);
+        assert_eq!((w, h), (3, 2));
+        // Block (0,0) {10,20,50,60} → 60.
+        // Block (0,1) {30,40,70,80} → 80.
+        // Block (0,2) {99,5}        → 99.
+        // Block (1,0) {1,2}         → 2.
+        // Block (1,1) {3,4}         → 4.
+        // Block (1,2) {7}           → 7.
+        assert_eq!(dst, vec![60, 80, 99, 2, 4, 7]);
+    }
+
+    #[test]
+    fn max_pool_k1_is_identity_clone() {
+        let src: Vec<u8> = (0..24).map(|i| (i * 7) as u8).collect();
+        let (dst, w, h) = max_pool_downsample(&src, 6, 4, 1);
+        assert_eq!((w, h), (6, 4));
+        assert_eq!(dst, src);
+    }
+
+    /// Reasonably large input, k=10 — pure smoke check that diagonals
+    /// survive. A single non-zero pixel per row at position `y` should
+    /// appear in the pooled output at position `y / 10`.
+    #[test]
+    fn max_pool_keeps_sparse_diagonal_visible() {
+        let n = 100;
+        let mut src = vec![0u8; n * n];
+        for i in 0..n {
+            src[i * n + i] = 255;
+        }
+        let (dst, w, h) = max_pool_downsample(&src, n, n, 10);
+        assert_eq!((w, h), (10, 10));
+        // Every diagonal output cell holds 255 (the source diagonal
+        // hits inside that block).
+        for i in 0..10 {
+            assert_eq!(dst[i * 10 + i], 255, "diagonal lost at i={i}");
         }
     }
 }
