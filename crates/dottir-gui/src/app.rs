@@ -2,9 +2,7 @@
 
 use std::path::PathBuf;
 
-use dottir_core::{
-    pick_auto_zoom, BlastMode, DotPlot, PlotConfig, ScoreMatrix, Strand, Triangle,
-};
+use dottir_core::{BlastMode, DotPlot, PlotConfig, ScoreMatrix, Strand, Triangle};
 use dottir_io::{DetectedAlphabet, Sequence};
 use egui::{
     Color32, ColorImage, Context, Pos2, Rect, Sense, Slider, TextureHandle, TextureOptions, Vec2,
@@ -77,13 +75,15 @@ struct Settings {
     /// H2 alignment-dock window size (residues, centred on the
     /// crosshair). Clamped to [20, 400] at render time.
     align_window_size: u32,
-    /// When true, `load_fasta` picks an initial `zoom` such that the
-    /// largest output pixelmap dimension is at most
-    /// [`DEFAULT_AUTO_ZOOM_TARGET`] pixels, sidestepping the OOM that
-    /// otherwise hits large self-comparisons at zoom=1. The user can
-    /// override the slider afterwards; the override sticks until the
-    /// next sequence load. Default on.
-    auto_zoom_on_load: bool,
+    /// When true, the GUI picks `PlotConfig::zoom` such that the
+    /// computed pixelmap is roughly *physical-canvas-sized* — Dotter's
+    /// invariant of computing at display scale and rendering near 1:1.
+    /// Fires on (a) sequence load once the canvas has been measured,
+    /// and (b) window resizes that materially change the plot area
+    /// (`>= 25%` after a 200 ms idle). When off, `settings.zoom` is
+    /// respected verbatim (advanced users / reproducibility). Default
+    /// on. See `docs/rendering_review.md` for the rationale.
+    auto_fit_compute_zoom: bool,
     /// When true, `pixel_fac` is sent as 0 to the core (auto-derive
     /// from Karlin's expected residue score, dotter's default
     /// behaviour). When false, the slider value is used directly. The
@@ -93,13 +93,16 @@ struct Settings {
     auto_pixel_fac: bool,
 }
 
-/// Largest pixelmap edge produced by the load-time auto-zoom — matches
-/// dotter's `MAX_IMAGE_DIMENSION` (`dotplot.c:53`). Big enough that
-/// diagonals span many pixelmap cells and look continuous when
-/// downsampled to fit a canvas, leaving plenty of headroom for
-/// wheel-in. Memory cost: at 1 byte per pixel a 16 000² pixelmap is
-/// ~256 MB, well under the default 512 MB cap.
-const DEFAULT_AUTO_ZOOM_TARGET: u32 = 16000;
+/// Resize-retarget threshold: if the plot canvas grows or shrinks by
+/// more than this fraction relative to the canvas size at last
+/// successful compute, the GUI schedules a new auto-fit compute. Small
+/// drags are ignored — we don't want a recompute storm during a slow
+/// window-edge drag.
+const RESIZE_RETARGET_THRESHOLD: f32 = 0.25;
+
+/// Idle delay after a resize / wheel before a recompute fires. Same
+/// constant the wheel zoom-settle code uses.
+const RECOMPUTE_SETTLE_MS: u64 = 200;
 
 impl Default for Settings {
     fn default() -> Self {
@@ -117,7 +120,7 @@ impl Default for Settings {
             reverse_subject: false,
             inverted_repeat_colour: false,
             align_window_size: 100,
-            auto_zoom_on_load: true,
+            auto_fit_compute_zoom: true,
             auto_pixel_fac: true,
         }
     }
@@ -264,6 +267,32 @@ pub struct DottirApp {
     /// preserves the peak so single-pixel diagonals stay visible.
     /// Set in the paint loop; texture rebuild triggered on change.
     pool_factor: usize,
+    /// Plot rectangle dimensions (logical) measured on the most recent
+    /// canvas paint. `None` before the first paint. The
+    /// display-matched compute zoom (Dotter invariant) needs this to
+    /// choose `PlotConfig::zoom`, so the first compute is deferred
+    /// until this is set.
+    measured_plot_area: Option<(f32, f32)>,
+    /// `pixels_per_point` at the most recent paint. Used together with
+    /// `measured_plot_area` to compute the *physical* canvas dimensions.
+    /// Default 1.0 until first paint.
+    measured_pixels_per_point: f32,
+    /// `true` between a sequence-load and the first canvas paint —
+    /// i.e., we have sequences but no canvas measurement yet, so we
+    /// can't pick a display-matched compute zoom. `update()` fires
+    /// the deferred compute once `measured_plot_area` becomes `Some`.
+    pending_initial_compute: bool,
+    /// Timestamp of the most recent canvas-resize event significant
+    /// enough to retarget auto-fit. Updated on each paint whose
+    /// `plot_area` diverges by more than [`RESIZE_RETARGET_THRESHOLD`]
+    /// from `last_compute_canvas_size`. Cleared once the retarget
+    /// recompute fires (or once auto-fit is disabled).
+    pending_resize_retarget: Option<std::time::Instant>,
+    /// Canvas size (logical) used by the *most recently completed*
+    /// compute. Used as the reference for resize-retarget detection
+    /// — comparing against the live `measured_plot_area` would
+    /// re-trigger every frame during a slow drag.
+    last_compute_canvas_size: Option<(f32, f32)>,
 }
 
 impl DottirApp {
@@ -301,7 +330,7 @@ impl DottirApp {
             reverse_subject: false,
             inverted_repeat_colour: false,
             align_window_size: 100,
-            auto_zoom_on_load: true,
+            auto_fit_compute_zoom: true,
             auto_pixel_fac: startup_auto_pf,
         };
 
@@ -330,6 +359,11 @@ impl DottirApp {
             view_initialised: false,
             texture_filter_linear: false,
             pool_factor: 1,
+            measured_plot_area: None,
+            measured_pixels_per_point: 1.0,
+            pending_initial_compute: false,
+            pending_resize_retarget: None,
+            last_compute_canvas_size: None,
         };
 
         // Pre-load any sequences supplied on the command line. Errors
@@ -342,11 +376,13 @@ impl DottirApp {
         if let Some(p) = startup.subject {
             app.load_fasta(SeqRole::Subject, p);
         }
-        // Release the suspend and dispatch one initial compute if
-        // both inputs are present.
+        // Release the suspend. The first compute can't fire yet
+        // because the canvas hasn't been measured — `pending_initial_
+        // compute` is `true` and `update()` will fire it after the
+        // first paint records `measured_plot_area`.
         app.suspend_recompute = false;
         if app.query.is_some() && app.subject.is_some() {
-            app.recompute();
+            app.pending_initial_compute = true;
         }
         app
     }
@@ -371,8 +407,16 @@ impl DottirApp {
                 // opens fully zoomed out on its first render.
                 self.view_initialised = false;
                 self.maybe_switch_mode_from_alphabet(detected);
-                self.maybe_apply_auto_zoom();
-                self.recompute();
+                if self.maybe_apply_auto_zoom() {
+                    self.pending_initial_compute = false;
+                    self.recompute();
+                } else {
+                    // We don't yet know the canvas size (no paint has
+                    // happened) — defer the first compute until the
+                    // first frame measures `plot_area`. See
+                    // `update()`'s post-paint check.
+                    self.pending_initial_compute = true;
+                }
             }
             Err(e) => {
                 self.last_error = Some(format!("failed to load {}: {e}", path.display()));
@@ -380,31 +424,51 @@ impl DottirApp {
         }
     }
 
-    /// Pick an initial `zoom` for the current sequence pair so the
-    /// pixelmap stays under [`DEFAULT_AUTO_ZOOM_TARGET`] pixels along
-    /// its largest edge — sidesteps OOM at zoom=1 for self-comparisons
-    /// of multi-kb sequences and matches the user's expectation that
-    /// loading new data shows a fully-zoomed-out plot. Skipped when
-    /// either sequence is missing or `auto_zoom_on_load` is off. Wheel
-    /// zoom past 2× will still recompute at a finer tier via the C2
-    /// zoom-settle path.
-    fn maybe_apply_auto_zoom(&mut self) {
-        if !self.settings.auto_zoom_on_load {
-            return;
+    /// Pick a *display-matched* `PlotConfig::zoom` for the current
+    /// sequence pair following Dotter's invariant — the produced
+    /// pixelmap is roughly the size of the *physical* canvas, so it
+    /// renders close to 1:1 with no GPU resampling (no LINEAR blur,
+    /// no NEAREST moiré). Per-axis target:
+    /// ```text
+    /// target_zoom = max(
+    ///     ceil(qlen / physical_plot_width),
+    ///     ceil(slen / physical_plot_height),
+    ///     1,
+    /// )
+    /// ```
+    /// Returns `true` if a target zoom could be computed (sequences
+    /// loaded + canvas measured). `false` means the caller should
+    /// defer the recompute until the next paint (see
+    /// `pending_initial_compute`).
+    fn maybe_apply_auto_zoom(&mut self) -> bool {
+        if !self.settings.auto_fit_compute_zoom {
+            return true; // pass-through: respect manual settings.zoom
         }
         let (Some(q), Some(s)) = (self.query.as_ref(), self.subject.as_ref()) else {
-            return;
+            return false;
         };
-        let new_zoom = pick_auto_zoom(q.len(), s.len(), DEFAULT_AUTO_ZOOM_TARGET);
+        let Some((plot_w, plot_h)) = self.measured_plot_area else {
+            return false;
+        };
+        let ppp = self.measured_pixels_per_point.max(0.1);
+        let phys_w = (plot_w * ppp).max(1.0) as f64;
+        let phys_h = (plot_h * ppp).max(1.0) as f64;
+        let zoom_q = (q.len() as f64 / phys_w).ceil() as u32;
+        let zoom_s = (s.len() as f64 / phys_h).ceil() as u32;
+        let new_zoom = zoom_q.max(zoom_s).max(1);
         if new_zoom != self.settings.zoom {
             tracing::info!(
-                "auto-zoom: setting zoom = {new_zoom} (target = {} px, qlen = {}, slen = {})",
-                DEFAULT_AUTO_ZOOM_TARGET,
+                "auto-fit: zoom = {new_zoom} \
+                 (qlen={}, slen={}, plot={:.0}×{:.0} logical, ppp={:.2})",
                 q.len(),
                 s.len(),
+                plot_w,
+                plot_h,
+                ppp,
             );
             self.settings.zoom = new_zoom;
         }
+        true
     }
 
     /// If the freshly loaded sequence's detected alphabet conflicts
@@ -503,7 +567,11 @@ impl DottirApp {
     /// size and position when the new pixelmap arrives (seamless
     /// transition — no perceptible "jump" by the user).
     fn maybe_zoom_settle_recompute(&mut self, ctx: &Context) {
-        const ZOOM_SETTLE_MS: u64 = 200;
+        // Thresholds operate on `physical_scale = display_zoom × ppp`
+        // so HiDPI displays trigger tier changes at the right physical
+        // resolution (per docs/rendering_review.md): when the on-screen
+        // physical pixel count for the pixelmap diverges more than 2×
+        // from one texel per physical pixel, recompute.
         const ZOOM_IN_THRESHOLD: f32 = 2.0;
         const ZOOM_OUT_THRESHOLD: f32 = 0.5;
 
@@ -513,32 +581,33 @@ impl DottirApp {
         if self.compute_in_flight {
             // Wait for the in-flight job to land before scheduling
             // another tier change.
-            ctx.request_repaint_after(std::time::Duration::from_millis(ZOOM_SETTLE_MS));
+            ctx.request_repaint_after(std::time::Duration::from_millis(RECOMPUTE_SETTLE_MS));
             return;
         }
-        if t.elapsed().as_millis() < ZOOM_SETTLE_MS as u128 {
+        if t.elapsed().as_millis() < RECOMPUTE_SETTLE_MS as u128 {
             // Schedule another frame so we re-check after the
             // settle interval, even if no other event fires.
-            ctx.request_repaint_after(std::time::Duration::from_millis(ZOOM_SETTLE_MS));
+            ctx.request_repaint_after(std::time::Duration::from_millis(RECOMPUTE_SETTLE_MS));
             return;
         }
 
         let current_zoom = self.settings.zoom.max(1);
-        let (new_zoom, scale) = if self.display_zoom >= ZOOM_IN_THRESHOLD && current_zoom > 1 {
-            // Zoomed in past 2× — recompute at a finer tier
+        let physical_scale = self.display_zoom * self.measured_pixels_per_point.max(0.1);
+        let (new_zoom, scale) = if physical_scale >= ZOOM_IN_THRESHOLD && current_zoom > 1 {
+            // Zoomed in past 2× physical — recompute at a finer tier
             // (half the computation zoom, doubling pixelmap density).
             let n = (current_zoom / 2).max(1);
             let s = current_zoom as f32 / n as f32; // > 1, e.g. 2.0
             (n, s)
-        } else if self.display_zoom <= ZOOM_OUT_THRESHOLD && current_zoom < 64 {
-            // Zoomed out past 0.5× — recompute at a coarser tier
-            // (double the computation zoom, halving pixelmap density).
+        } else if physical_scale <= ZOOM_OUT_THRESHOLD && current_zoom < 64 {
+            // Zoomed out past 0.5× physical — recompute at a coarser
+            // tier (double the compute zoom, halving pixelmap density).
             let n = (current_zoom.saturating_mul(2)).min(64);
             let s = current_zoom as f32 / n as f32; // < 1, e.g. 0.5
             (n, s)
         } else {
-            // Within [0.5, 2.0] or already at a tier extreme: clear
-            // the timestamp and stop chasing.
+            // Within [0.5, 2.0] physical or already at a tier extreme:
+            // clear the timestamp and stop chasing.
             self.last_zoom_event = None;
             return;
         };
@@ -577,6 +646,39 @@ impl DottirApp {
         self.recompute();
     }
 
+    /// Resize-retarget settle: when the canvas grew/shrunk by more
+    /// than [`RESIZE_RETARGET_THRESHOLD`] relative to the canvas size
+    /// at the last successful compute, recompute at a new
+    /// display-matched zoom after [`RECOMPUTE_SETTLE_MS`] of resize
+    /// inactivity. Only fires when `auto_fit_compute_zoom` is on.
+    fn maybe_resize_retarget(&mut self, ctx: &Context) {
+        let Some(t) = self.pending_resize_retarget else {
+            return;
+        };
+        if !self.settings.auto_fit_compute_zoom {
+            self.pending_resize_retarget = None;
+            return;
+        }
+        if self.compute_in_flight {
+            ctx.request_repaint_after(std::time::Duration::from_millis(RECOMPUTE_SETTLE_MS));
+            return;
+        }
+        if t.elapsed().as_millis() < RECOMPUTE_SETTLE_MS as u128 {
+            ctx.request_repaint_after(std::time::Duration::from_millis(RECOMPUTE_SETTLE_MS));
+            return;
+        }
+        if self.maybe_apply_auto_zoom() {
+            self.pending_resize_retarget = None;
+            self.recompute();
+        } else {
+            // Couldn't compute target (sequences not loaded / no
+            // measurement). Drop the pending state; the deferred-
+            // initial-compute path will pick it up if/when sequences
+            // arrive.
+            self.pending_resize_retarget = None;
+        }
+    }
+
     /// Drain any completed worker results and apply the latest one
     /// (discarding stale results whose id is older than
     /// `last_dispatched_id`). Called once per frame.
@@ -602,6 +704,13 @@ impl DottirApp {
                     self.plot = Some(plot);
                     self.texture_dirty = true;
                     self.last_error = None;
+                    // Pin the canvas size that the new compute was
+                    // targeting (latest available measurement). The
+                    // resize-retarget detector compares future paints
+                    // against this — not against the previous frame's
+                    // measurement — so a slow drag accumulates but
+                    // only fires once it crosses the threshold.
+                    self.last_compute_canvas_size = self.measured_plot_area;
                 }
                 Err(e) => {
                     self.last_error = Some(format!("compute_dotplot failed: {e}"));
@@ -711,18 +820,20 @@ impl DottirApp {
         }
         let image = ColorImage::from_rgba_unmultiplied([tex_w, tex_h], &rgba);
         // Sampler choice:
-        // - pool_factor > 1: texture is already close to canvas size
-        //   (we did the peak-preserving downsample ourselves), so use
-        //   NEAREST — LINEAR would re-blur what max-pool just preserved.
-        // - pool_factor == 1, display_zoom < 1.0: hand off to GPU
-        //   LINEAR for a smooth mild downsample.
-        // - pool_factor == 1, display_zoom >= 1.0: NEAREST for
-        //   pixel-perfect inspection at high zoom.
-        let opts = if k == 1 && self.texture_filter_linear {
+        // - display_zoom >= 1.0 (upsample / inspect actual cells):
+        //   NEAREST — pixel-perfect.
+        // - display_zoom < 1.0 (downsample, pooled or not): LINEAR
+        //   for explicit antialiasing on top of the peak-preserving
+        //   max-pool. Two-step "max-pool then antialias on display"
+        //   gives smooth lines without re-blurring the peaks away
+        //   (max-pool kept the strong cells; LINEAR only smooths
+        //   between them).
+        let opts = if self.texture_filter_linear {
             TextureOptions::LINEAR
         } else {
             TextureOptions::NEAREST
         };
+        let _ = k; // intentionally unused now; sampler depends on display_zoom only
         let handle = ctx.load_texture("dottir-pixelmap", image, opts);
         self.texture = Some(handle);
         self.texture_dirty = false;
@@ -790,6 +901,18 @@ impl eframe::App for DottirApp {
             self.draw_alignment_dock(ctx);
         }
         self.draw_canvas(ctx);
+
+        // Deferred initial compute: pre-loaded sequences (CLI or
+        // load_fasta before the first paint) couldn't pick a
+        // display-matched zoom because no canvas size was known yet.
+        // After the first paint records `measured_plot_area`, fire it.
+        if self.pending_initial_compute && self.maybe_apply_auto_zoom() {
+            self.pending_initial_compute = false;
+            self.recompute();
+        }
+        // Resize-retarget: a debounced recompute fired when the canvas
+        // grew/shrunk enough to invalidate the previous compute zoom.
+        self.maybe_resize_retarget(ctx);
     }
 }
 
@@ -1237,19 +1360,22 @@ impl DottirApp {
                     }
                 });
                 ui.horizontal(|ui| {
-                    // Auto-zoom only fires on sequence load, so this
-                    // checkbox is informational between loads — toggling
-                    // it doesn't recompute. The tooltip explains.
+                    // Auto-fit fires on sequence load (deferred until
+                    // the first canvas paint measures the plot area)
+                    // and on subsequent window resizes that change
+                    // the canvas by > 25 %. The slider above is then
+                    // driven by auto-fit; turn the checkbox off to
+                    // take manual control of `Zoom`.
                     ui.checkbox(
-                        &mut self.settings.auto_zoom_on_load,
-                        "Auto-zoom on load",
+                        &mut self.settings.auto_fit_compute_zoom,
+                        "Auto-fit computation zoom",
                     )
-                    .on_hover_text(format!(
-                        "When a new sequence is loaded, pick an initial zoom so the largest \
-                         pixelmap dimension stays ≤ {} px. Wheel-zoom past 2× recomputes at a \
-                         finer tier automatically.",
-                        DEFAULT_AUTO_ZOOM_TARGET,
-                    ));
+                    .on_hover_text(
+                        "Pick `Zoom` so the computed pixelmap matches the physical canvas size \
+                         — dotter's invariant: compute at display scale, render near 1:1. \
+                         Triggers on sequence load and when the window resizes by more than \
+                         25 %. Turn off to drive `Zoom` manually (e.g. for reproducible figures).",
+                    );
                 });
                 ui.horizontal(|ui| {
                     let prev_auto = self.settings.auto_pixel_fac;
@@ -1584,24 +1710,12 @@ impl DottirApp {
     fn draw_canvas(&mut self, ctx: &Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
             self.ensure_texture(ctx);
-            let Some(plot) = &self.plot else {
-                ui.centered_and_justified(|ui| {
-                    ui.label("No plot. Load a query and subject FASTA (File menu).");
-                });
-                return;
-            };
-            let Some(tex) = &self.texture else {
-                return;
-            };
-            let avail = ui.available_size();
-            let (rect, response) = ui.allocate_exact_size(avail, Sense::click_and_drag());
 
-            // Reserve a margin band along the top + left for axis
-            // tick labels and record-name labels. The pixelmap and
-            // every world-coord overlay clip to `plot_rect`, which
-            // is `rect` with these margins removed. Multi-record
-            // FASTAs need extra space for the record-name label
-            // strip above the tick labels.
+            // Up-front canvas measurement, before any early returns
+            // for the no-plot case — the display-matched compute
+            // depends on this and it's required even *before* the
+            // first plot exists (deferred-initial-compute path).
+            let avail = ui.available_size();
             let multi_q = self
                 .query
                 .as_ref()
@@ -1614,6 +1728,39 @@ impl DottirApp {
                 .unwrap_or(false);
             let top_margin: f32 = if multi_q { 44.0 } else { 24.0 };
             let left_margin: f32 = if multi_s { 70.0 } else { 56.0 };
+            let approx_plot_w = (avail.x - left_margin).max(1.0);
+            let approx_plot_h = (avail.y - top_margin).max(1.0);
+            let new_area = (approx_plot_w, approx_plot_h);
+            let new_ppp = ctx.pixels_per_point();
+            // Detect resize-retarget BEFORE overwriting the previous
+            // measurement: compare against the canvas size at last
+            // successful compute, not the live frame-to-frame
+            // measurement (continuous drag would otherwise re-trigger
+            // every frame and never get below the threshold).
+            if self.settings.auto_fit_compute_zoom {
+                if let Some((prev_w, prev_h)) = self.last_compute_canvas_size {
+                    let dw =
+                        (new_area.0 - prev_w).abs() / prev_w.max(1.0);
+                    let dh =
+                        (new_area.1 - prev_h).abs() / prev_h.max(1.0);
+                    if dw > RESIZE_RETARGET_THRESHOLD || dh > RESIZE_RETARGET_THRESHOLD {
+                        self.pending_resize_retarget = Some(std::time::Instant::now());
+                    }
+                }
+            }
+            self.measured_plot_area = Some(new_area);
+            self.measured_pixels_per_point = new_ppp;
+
+            let Some(plot) = &self.plot else {
+                ui.centered_and_justified(|ui| {
+                    ui.label("No plot. Load a query and subject FASTA (File menu).");
+                });
+                return;
+            };
+            let Some(tex) = &self.texture else {
+                return;
+            };
+            let (rect, response) = ui.allocate_exact_size(avail, Sense::click_and_drag());
             let plot_area = Rect::from_min_max(
                 Pos2::new(rect.left() + left_margin, rect.top() + top_margin),
                 rect.right_bottom(),
@@ -1716,20 +1863,29 @@ impl DottirApp {
             // LINEAR sampler would average single-pixel diagonals
             // toward white, producing the "dashed diagonals at fit-
             // zoom" artefact. Instead, pre-downsample the pixelmap
-            // ourselves with MAX-pool to ~2× the on-screen plot size,
-            // then upload that smaller texture with NEAREST. Only
-            // engages for `display_zoom < 0.5`; above that the GPU
-            // sampler does fine. Pool factor is the smallest integer
-            // `k` such that `pixelmap_dim / k ≈ 2 × canvas_dim`.
-            let want_pool = if self.display_zoom < 0.5 {
-                // texture_dim_target = 2 × on-screen plot dim
-                //   = 2 × pixelmap_dim × display_zoom
-                // k = pixelmap_dim / texture_dim_target
-                //   = 1 / (2 × display_zoom)
-                ((1.0 / (2.0 * self.display_zoom.max(1e-6))).ceil() as usize).max(2)
-            } else {
-                1
-            };
+            // ourselves with MAX-pool to ~1.5× the *physical* canvas
+            // (HiDPI-aware), then let the GPU's LINEAR sampler do
+            // mild antialiasing on top. The two-step pipeline (max-
+            // pool to preserve sparse diagonal evidence, then
+            // antialias on display) gives smooth continuous lines
+            // without inventing structure that isn't in the
+            // pixelmap.
+            //
+            // pool_factor = pixelmap_dim / target_texture_dim where
+            //   target_texture_dim = OVERSAMPLE × pixelmap_dim
+            //                          × display_zoom × pixels_per_point
+            // simplifies to:
+            //   pool_factor = 1 / (OVERSAMPLE × display_zoom × ppp)
+            const POOL_OVERSAMPLE: f32 = 1.5;
+            let ppp = ctx.pixels_per_point();
+            let raw_pool = (1.0
+                / (POOL_OVERSAMPLE * self.display_zoom.max(1e-6) * ppp.max(0.1)))
+            .ceil() as usize;
+            // Only engage pooling when it would actually shrink the
+            // texture (k >= 2). When display_zoom × ppp is large
+            // enough that the texture is already canvas-sized, the
+            // GPU sampler is sufficient.
+            let want_pool = if raw_pool >= 2 { raw_pool } else { 1 };
             if want_pool != self.pool_factor {
                 self.pool_factor = want_pool;
                 self.texture_dirty = true;
@@ -1759,13 +1915,28 @@ impl DottirApp {
             // Compute on-screen rect for the pixelmap, then render
             // it. Clip to `plot_area` so over-pan doesn't leak the
             // texture into the margin.
+            //
+            // Snap the rect's min/max to integer *physical* pixel
+            // boundaries: with the display-matched compute zoom the
+            // pixelmap and the canvas are roughly the same physical
+            // resolution, and a fractional rect position introduces
+            // sub-pixel sampling phase that re-creates the moiré we
+            // worked to eliminate. Snapping aligns texel boundaries
+            // with screen pixels.
             let plot_screen_w = pw * self.display_zoom;
             let plot_screen_h = ph * self.display_zoom;
-            let plot_screen_x = plot_area.left() - self.view_offset.x * self.display_zoom;
-            let plot_screen_y = plot_area.top() - self.view_offset.y * self.display_zoom;
-            let plot_rect = Rect::from_min_size(
-                Pos2::new(plot_screen_x, plot_screen_y),
-                Vec2::new(plot_screen_w, plot_screen_h),
+            let plot_screen_x =
+                plot_area.left() - self.view_offset.x * self.display_zoom;
+            let plot_screen_y =
+                plot_area.top() - self.view_offset.y * self.display_zoom;
+            let ppp_snap = ctx.pixels_per_point();
+            let snap = |v: f32| ((v * ppp_snap).round()) / ppp_snap;
+            let plot_rect = Rect::from_min_max(
+                Pos2::new(snap(plot_screen_x), snap(plot_screen_y)),
+                Pos2::new(
+                    snap(plot_screen_x + plot_screen_w),
+                    snap(plot_screen_y + plot_screen_h),
+                ),
             );
             let clip_painter = ui.painter_at(plot_area);
             clip_painter.image(
