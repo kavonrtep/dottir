@@ -110,19 +110,48 @@ and writing an ADR.
 - **Determinism**: no `HashMap` iteration order in hot paths producing
   pixelmaps; use `BTreeMap` or sorted vectors where order matters.
 
-## Build / test (TBD until cargo scaffold lands)
+## Build / test
 
-Once Phase 0 is in:
+The Rust toolchain (1.95.0, matching `rust-toolchain.toml`) lives in a conda
+env inside the hermit sandbox — there is no rustup on the host. Activate it
+first, then run cargo as normal:
 
 ```bash
+source /opt/conda/etc/profile.d/conda.sh
+conda activate /envs/conda/envs/rust
+
 cargo build --release
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --check
 ```
 
+`rust-toolchain.toml` is informational only here — without rustup it cannot
+auto-install. If the channel pin in that file changes, recreate the env:
+`mamba install -p /envs/conda/envs/rust -c conda-forge rust=<version>`.
+
 CI matrix: Linux x86_64 + Windows x86_64. macOS optional. WASM as a separate
 "does it compile" job.
+
+## Sandbox environment (`hermit/`)
+
+The `hermit/` subdirectory is **not part of the dottir project**. It is a
+self-contained Singularity/Apptainer sandbox for running Claude Code / Codex
+CLI agents with read-only data mounts and persistent conda/pip/npm state
+under `/envs`. See `hermit/README.md` for layout and `hermit/CLAUDE.md` /
+`hermit/AGENTS.md` for the agent-facing context that loads inside the
+container.
+
+Practical implications for dottir work performed inside this sandbox:
+
+- The Rust toolchain is provisioned via `mamba create -p /envs/conda/envs/rust`,
+  not rustup. Activate it before running cargo (see Build / test above).
+- Bare `conda install` / `mamba install` / `pip install` are blocked by
+  hermit hooks. For single tools use `htool <name>`; for multi-package envs
+  use `mamba create -p /envs/conda/envs/<name> ...` directly.
+- The container mounts data paths at their original host locations — paths
+  in logs, scripts, and output match between inside and outside the
+  container. Do not introduce `/input`→`/output` translation.
 
 ## Out of scope (do not propose without checking spec §5)
 

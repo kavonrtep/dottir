@@ -27,3 +27,6 @@ docs/book/book/
 
 # Scratch output directory for CLI smoke runs
 tmp/
+
+# continer setting
+hermit
