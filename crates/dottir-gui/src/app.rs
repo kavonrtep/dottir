@@ -683,10 +683,16 @@ impl DottirApp {
         let cur_zoom_u = plot.params.zoom.max(1);
         let cur_zoom = cur_zoom_u as f32;
 
-        // Screen → pixelmap-pixel.
+        // Screen → pixelmap-pixel. Use the *rounded* view_offset
+        // to match what was drawn on screen (the paint path uses
+        // `draw_offset = view_offset.round()`); otherwise a sub-pixel
+        // discrepancy would shift the selected rectangle by one
+        // pixmap cell relative to where the user dragged it.
+        let draw_off_x = self.view_offset.x.round();
+        let draw_off_y = self.view_offset.y.round();
         let to_pix = |p: Pos2| -> (f32, f32) {
             let l = p - plot_area.left_top();
-            (l.x + self.view_offset.x, l.y + self.view_offset.y)
+            (l.x + draw_off_x, l.y + draw_off_y)
         };
         let (sx, sy) = to_pix(rs.start_screen);
         let (ex, ey) = to_pix(rs.current_screen);
@@ -2063,16 +2069,28 @@ impl DottirApp {
                 self.view_offset.y = self.view_offset.y.clamp(0.0, ph - plot_h);
             }
 
+            // Integer-pixel pan offset for *drawing* — keeps texel-
+            // to-pixel alignment so NEAREST sampling stays clean
+            // (any fractional offset locks texels to a sub-pixel
+            // phase that can produce stable-amplitude waves on
+            // periodic content). `view_offset` itself stays
+            // fractional so pan accumulates smoothly across many
+            // sub-pixel drag deltas — only the visible draw uses
+            // integers. Crosshair / breaklines / axes all use
+            // `draw_offset` too, so overlays don't drift relative
+            // to the texture.
+            let draw_offset = Vec2::new(self.view_offset.x.round(), self.view_offset.y.round());
+
             // Single click (primary, no drag): set crosshair. Clicks
-            // in the margin are ignored.
+            // in the margin are ignored. Use `draw_offset` so the
+            // crosshair lands on the pixmap cell the user *sees*
+            // under the cursor, not at a sub-pixel-shifted cell.
             if response.clicked() {
                 if let Some(p) = response.interact_pointer_pos() {
                     if plot_area.contains(p) {
                         let local = p - plot_area.left_top();
-                        // 1:1 mapping — pixelmap_pixel = screen_pixel
-                        // + view_offset.
-                        let q = (local.x + self.view_offset.x).floor() as i64;
-                        let s = (local.y + self.view_offset.y).floor() as i64;
+                        let q = (local.x + draw_offset.x).floor() as i64;
+                        let s = (local.y + draw_offset.y).floor() as i64;
                         if q >= 0 && q < plot.width as i64 && s >= 0 && s < plot.height as i64 {
                             self.crosshair = Some((q as u32, s as u32));
                         }
@@ -2085,17 +2103,18 @@ impl DottirApp {
             // area gets the texture painted over it.
             ui.painter().rect_filled(rect, 0.0, Color32::from_gray(235));
 
-            // Render the pixelmap at native 1:1 size. With pixelmap
-            // dim == screen pixels, NEAREST sampling reproduces each
-            // pixelmap cell verbatim. Snap to integer physical
-            // pixels to avoid sub-pixel sampling phase.
-            let plot_screen_x = plot_area.left() - self.view_offset.x;
-            let plot_screen_y = plot_area.top() - self.view_offset.y;
+            // Render the pixelmap at native 1:1 size. Snap the
+            // *origin* to a physical pixel boundary; use the exact
+            // texture dimensions for the size (NOT a second snap of
+            // the far edge — that could change the drawn width by ±1
+            // physical pixel and re-introduce sampling phase).
+            let plot_screen_x = plot_area.left() - draw_offset.x;
+            let plot_screen_y = plot_area.top() - draw_offset.y;
             let ppp_snap = ctx.pixels_per_point();
             let snap = |v: f32| ((v * ppp_snap).round()) / ppp_snap;
-            let plot_rect = Rect::from_min_max(
+            let plot_rect = Rect::from_min_size(
                 Pos2::new(snap(plot_screen_x), snap(plot_screen_y)),
-                Pos2::new(snap(plot_screen_x + pw), snap(plot_screen_y + ph)),
+                Vec2::new(pw, ph),
             );
             let clip_painter = ui.painter_at(plot_area);
             clip_painter.image(
@@ -2156,7 +2175,7 @@ impl DottirApp {
                         continue;
                     }
                     let sx = plot_area.left()
-                        + ((pixel_x as f32) - self.view_offset.x);
+                        + ((pixel_x as f32) - draw_offset.x);
                     if sx < plot_area.left() || sx > plot_area.right() {
                         continue;
                     }
@@ -2179,7 +2198,7 @@ impl DottirApp {
                         continue;
                     }
                     let sy = plot_area.top()
-                        + ((pixel_y as f32) - self.view_offset.y);
+                        + ((pixel_y as f32) - draw_offset.y);
                     if sy < plot_area.top() || sy > plot_area.bottom() {
                         continue;
                     }
@@ -2195,15 +2214,15 @@ impl DottirApp {
 
             // C4: tick labels in the top / left margin bands —
             // outside the plot area so they don't overlap the image.
-            self.draw_axis_labels(ui, rect, plot_area, plot);
+            self.draw_axis_labels(ui, rect, plot_area, plot, draw_offset);
 
             // Crosshair overlay + coord label — clipped to the plot
             // area so the lines never run into the axis margin.
             if let Some((cq, cs)) = self.crosshair {
                 let cx =
-                    plot_area.left() + ((cq as f32 + 0.5) - self.view_offset.x);
+                    plot_area.left() + ((cq as f32 + 0.5) - draw_offset.x);
                 let cy =
-                    plot_area.top() + ((cs as f32 + 0.5) - self.view_offset.y);
+                    plot_area.top() + ((cs as f32 + 0.5) - draw_offset.y);
                 let stroke = egui::Stroke::new(1.0, Color32::from_rgb(255, 80, 80));
                 clip_painter.line_segment(
                     [
@@ -2288,6 +2307,7 @@ impl DottirApp {
         outer: Rect,
         plot_area: Rect,
         plot: &dottir_core::DotPlot,
+        draw_offset: Vec2,
     ) {
         const MIN_LABEL_SPACING_PX: f32 = 80.0;
         let zoom_us = plot.params.zoom.max(1) as f32;
@@ -2298,10 +2318,12 @@ impl DottirApp {
             .as_ref()
             .map(|sl| (sl.q_range.start as u64, sl.s_range.start as u64))
             .unwrap_or((0, 0));
-        // World-pixel range visible inside the plot area.
-        let world_x_lo = self.view_offset.x;
+        // World-pixel range visible inside the plot area. Use the
+        // integer-rounded draw_offset so axis tick positions align
+        // exactly with the texture origin (which is also rounded).
+        let world_x_lo = draw_offset.x;
         let world_x_hi = world_x_lo + plot_area.width();
-        let world_y_lo = self.view_offset.y;
+        let world_y_lo = draw_offset.y;
         let world_y_hi = world_y_lo + plot_area.height();
         // Convert to absolute sequence-residue range.
         let seq_q_lo = q_off + (world_x_lo * zoom_us).max(0.0) as u64;
@@ -2326,7 +2348,7 @@ impl DottirApp {
         while t < seq_q_hi.saturating_add(step_x as u64) {
             if t >= seq_q_lo && t <= seq_q_hi {
                 let sx = plot_area.left()
-                    + ((t - q_off) as f32 / zoom_us - self.view_offset.x);
+                    + ((t - q_off) as f32 / zoom_us - draw_offset.x);
                 if sx < plot_area.left() - 1.0 || sx > plot_area.right() + 1.0 {
                     t = t.saturating_add(step_x as u64);
                     if step_x == 0.0 {
@@ -2366,7 +2388,7 @@ impl DottirApp {
         while t < seq_s_hi.saturating_add(step_y as u64) {
             if t >= seq_s_lo && t <= seq_s_hi {
                 let sy =
-                    plot_area.top() + ((t - s_off) as f32 / zoom_us - self.view_offset.y);
+                    plot_area.top() + ((t - s_off) as f32 / zoom_us - draw_offset.y);
                 if sy < plot_area.top() - 1.0 || sy > plot_area.bottom() + 1.0 {
                     t = t.saturating_add(step_y as u64);
                     if step_y == 0.0 {
@@ -2416,9 +2438,9 @@ impl DottirApp {
                         continue;
                     }
                     let x0 = plot_area.left()
-                        + (r_start as f32 / zoom_us - self.view_offset.x);
+                        + (r_start as f32 / zoom_us - draw_offset.x);
                     let x1 = plot_area.left()
-                        + (r_end as f32 / zoom_us - self.view_offset.x);
+                        + (r_end as f32 / zoom_us - draw_offset.x);
                     let span = (x1 - x0).max(0.0);
                     if span < 18.0 {
                         continue;
@@ -2447,9 +2469,9 @@ impl DottirApp {
                         continue;
                     }
                     let y0 = plot_area.top()
-                        + (r_start as f32 / zoom_us - self.view_offset.y);
+                        + (r_start as f32 / zoom_us - draw_offset.y);
                     let y1 = plot_area.top()
-                        + (r_end as f32 / zoom_us - self.view_offset.y);
+                        + (r_end as f32 / zoom_us - draw_offset.y);
                     let span = (y1 - y0).max(0.0);
                     if span < 14.0 {
                         continue;
