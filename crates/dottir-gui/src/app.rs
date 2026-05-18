@@ -269,12 +269,12 @@ pub struct DottirApp {
     /// view we can [`pop_history`] back to. Bounded to
     /// [`HISTORY_MAX`] entries — older ones drop off the bottom.
     history: std::collections::VecDeque<ViewSnapshot>,
-    /// LRU-style cache of recently computed pixelmaps, keyed by
-    /// compute zoom. Hitting Back to a cached zoom is instant;
-    /// otherwise the cache miss triggers a fresh compute. Cleared on
-    /// any settings change that would invalidate the pixelmap
-    /// (matrix, window size, strand, etc.).
-    pixelmap_cache: std::collections::VecDeque<(u32, DotPlot)>,
+    /// LRU-style cache of recently computed pixelmaps, keyed by the
+    /// `(slice, compute_zoom)` pair. Hitting Back to a cached view is
+    /// instant; otherwise the cache miss triggers a fresh compute.
+    /// Cleared on any settings change that would invalidate the
+    /// pixelmap (matrix, window size, strand, etc.).
+    pixelmap_cache: std::collections::VecDeque<(ViewSlice, u32, DotPlot)>,
     /// View offset to apply when the next compute result lands.
     /// Set by `action_rect_zoom` / `action_back` so the new pixelmap
     /// (which has different dims, hence different coord space) gets
@@ -292,18 +292,76 @@ pub struct DottirApp {
     /// coords; `current` is the latest mouse position. On release we
     /// compute a new zoom from the rectangle and push a history entry.
     rect_select: Option<RectSelect>,
+    /// Residue range covered by the most recently computed pixelmap.
+    /// `None` before any compute has completed. Coordinate transforms
+    /// in the paint loop add `slice.start` when converting
+    /// pixmap_pixel → residue.
+    current_slice: Option<ViewSlice>,
+    /// Slice to use for the *next* dispatched compute. Set by
+    /// `action_rect_zoom` / `action_fit` / `action_back` /
+    /// `load_fasta`; consumed in `recompute`. `None` means "use the
+    /// full sequence".
+    target_slice: Option<ViewSlice>,
+    /// Karlin-derived auto pixel_fac locked to the first compute of
+    /// the current settings. Reused on subsequent computes so
+    /// darkness stays consistent across slices (different sub-ranges
+    /// have slightly different residue composition, which would
+    /// otherwise re-derive a slightly different pixel_fac). Cleared
+    /// by `invalidate_caches` when settings change in a way that
+    /// affects Karlin (matrix, mode, sequences).
+    locked_pixel_fac: Option<u32>,
+    /// Slice that the latest dispatched compute is computing. Read
+    /// by `poll_compute_results` when the matching `id` lands to
+    /// update `current_slice`. Avoids plumbing slice through the
+    /// worker (which only sees pre-sliced bytes).
+    last_dispatched_slice: Option<ViewSlice>,
 }
 
 /// Maximum number of history entries kept around for Back. Older
 /// entries fall off the bottom. Also caps the pixelmap cache size.
 const HISTORY_MAX: usize = 5;
 
+/// Residue range covered by the currently displayed pixelmap. The
+/// canonical (fit) view spans the full sequences; a rect-zoom narrows
+/// the slice + a configurable margin (see `RECT_ZOOM_MARGIN`) so the
+/// user can pan around within the cached pixelmap without
+/// recomputing. Cache key includes the slice, so different sub-views
+/// don't collide.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct ViewSlice {
+    q_range: std::ops::Range<usize>,
+    s_range: std::ops::Range<usize>,
+}
+
+impl ViewSlice {
+    fn full(qlen: usize, slen: usize) -> Self {
+        Self {
+            q_range: 0..qlen,
+            s_range: 0..slen,
+        }
+    }
+    /// Self-comparison is the kernel's "same q axis as s axis" mode.
+    /// Off-diagonal sub-rectangles aren't self-comparisons even when
+    /// they come from the same underlying sequence.
+    fn is_self_comparison(&self) -> bool {
+        self.q_range == self.s_range
+    }
+}
+
+/// Fraction of the *selection* size to add as panning margin on each
+/// side of the slice during rect-zoom. With 0.5 the resulting pixelmap
+/// covers the selection plus 50 % of its size in each direction
+/// (clamped to the full sequence length), so the user can drag a
+/// short distance without triggering a recompute.
+const RECT_ZOOM_MARGIN: f64 = 0.5;
+
 /// One slot on the history stack: enough state to restore a view.
-/// Crosshair and view_offset are in *pixelmap coords for that zoom*
-/// — when restoring across a zoom change, they should be transformed
-/// via `(coord × old_zoom) / new_zoom` to track the same residue.
-#[derive(Clone, Copy, Debug)]
+/// `view_offset` and `crosshair` are in pixelmap-pixel coords that
+/// only make sense at this snapshot's `slice` and `compute_zoom` —
+/// they're restored together so they stay consistent.
+#[derive(Clone, Debug)]
 struct ViewSnapshot {
+    slice: ViewSlice,
     compute_zoom: u32,
     view_offset: Vec2,
     crosshair: Option<(u32, u32)>,
@@ -385,6 +443,10 @@ impl DottirApp {
             rect_select: None,
             pending_view_offset_after_compute: None,
             pending_rect_zoom: None,
+            current_slice: None,
+            target_slice: None,
+            locked_pixel_fac: None,
+            last_dispatched_slice: None,
         };
 
         // Pre-load any sequences supplied on the command line. Errors
@@ -424,11 +486,12 @@ impl DottirApp {
                     SeqRole::Subject => self.subject = Some(seq),
                 }
                 self.last_error = None;
-                // Fresh sequence data → reset view state.
+                // Fresh sequence data → reset view state and caches.
                 self.view_offset = Vec2::ZERO;
                 self.crosshair = None;
-                self.history.clear();
-                self.pixelmap_cache.clear();
+                self.current_slice = None;
+                self.target_slice = None;
+                self.invalidate_caches();
                 self.maybe_switch_mode_from_alphabet(detected);
                 if self.maybe_apply_auto_zoom() {
                     self.pending_initial_compute = false;
@@ -510,74 +573,93 @@ impl DottirApp {
         let Some(plot) = &self.plot else {
             return;
         };
+        let Some(slice) = self.current_slice.clone() else {
+            return;
+        };
         if self.history.len() >= HISTORY_MAX {
             self.history.pop_front();
         }
         self.history.push_back(ViewSnapshot {
+            slice,
             compute_zoom: plot.params.zoom,
             view_offset: self.view_offset,
             crosshair: self.crosshair,
         });
     }
 
-    /// Look up a cached pixelmap for the given compute zoom (LRU
-    /// "touch on read"). Cleared whenever settings that affect the
-    /// pixelmap change.
-    fn cache_get(&mut self, compute_zoom: u32) -> Option<DotPlot> {
+    /// Look up a cached pixelmap for the given `(slice, compute_zoom)`
+    /// (LRU "touch on read"). Cleared whenever settings that affect
+    /// the pixelmap change.
+    fn cache_get(&mut self, slice: &ViewSlice, compute_zoom: u32) -> Option<DotPlot> {
         let pos = self
             .pixelmap_cache
             .iter()
-            .position(|(z, _)| *z == compute_zoom)?;
-        let (z, plot) = self.pixelmap_cache.remove(pos)?;
+            .position(|(s, z, _)| *z == compute_zoom && s == slice)?;
+        let (s, z, plot) = self.pixelmap_cache.remove(pos)?;
         let restored = plot.clone();
-        self.pixelmap_cache.push_back((z, plot));
+        self.pixelmap_cache.push_back((s, z, plot));
         Some(restored)
     }
 
     /// Insert a freshly computed pixelmap into the cache; evict
     /// oldest if at capacity.
-    fn cache_insert(&mut self, compute_zoom: u32, plot: DotPlot) {
+    fn cache_insert(&mut self, slice: ViewSlice, compute_zoom: u32, plot: DotPlot) {
         self.pixelmap_cache
-            .retain(|(z, _)| *z != compute_zoom);
+            .retain(|(s, z, _)| *z != compute_zoom || s != &slice);
         if self.pixelmap_cache.len() >= HISTORY_MAX {
             self.pixelmap_cache.pop_front();
         }
-        self.pixelmap_cache.push_back((compute_zoom, plot));
+        self.pixelmap_cache.push_back((slice, compute_zoom, plot));
     }
 
     /// Drop everything pixel-dependent — call when settings that
     /// affect compute output change (matrix, window, strand, etc.).
+    /// Also clears the Karlin-locked pixel_fac so the next compute
+    /// re-derives it under the new settings.
     fn invalidate_caches(&mut self) {
         self.pixelmap_cache.clear();
         self.history.clear();
+        self.locked_pixel_fac = None;
     }
 
-    /// Restore the canonical (display-matched) compute zoom — what
-    /// you'd see right after a fresh load. Pushes the current view
-    /// onto Back so the user can return.
+    /// Restore the canonical (display-matched) compute zoom over the
+    /// full sequences — what you'd see right after a fresh load.
+    /// Pushes the current view onto Back so the user can return.
     fn action_fit(&mut self) {
         let Some(canon) = self.canonical_compute_zoom() else {
             return;
         };
-        let cur_zoom = self.plot.as_ref().map(|p| p.params.zoom).unwrap_or(0);
-        if cur_zoom == canon && self.view_offset == Vec2::ZERO {
+        let (Some(q), Some(s)) = (self.query.as_ref(), self.subject.as_ref()) else {
+            return;
+        };
+        let full_slice = ViewSlice::full(q.len(), s.len());
+        let already_canonical = self
+            .current_slice
+            .as_ref()
+            .map(|cs| cs == &full_slice)
+            .unwrap_or(false)
+            && self.plot.as_ref().map(|p| p.params.zoom).unwrap_or(0) == canon
+            && self.view_offset == Vec2::ZERO;
+        if already_canonical {
             return;
         }
         self.push_history();
         self.settings.zoom = canon;
+        self.target_slice = Some(full_slice);
         self.pending_view_offset_after_compute = Some(Vec2::ZERO);
         self.recompute();
     }
 
     /// Pop the history stack and recompute (or restore from cache)
-    /// at the previous view's compute zoom. No-op when history is
-    /// empty.
+    /// at the previous view's compute zoom + slice. No-op when
+    /// history is empty.
     fn action_back(&mut self) {
         let Some(prev) = self.history.pop_back() else {
             return;
         };
         self.settings.zoom = prev.compute_zoom;
         self.crosshair = prev.crosshair;
+        self.target_slice = Some(prev.slice);
         self.pending_view_offset_after_compute = Some(prev.view_offset);
         self.recompute();
     }
@@ -585,16 +667,22 @@ impl DottirApp {
     /// Zoom-into-rectangle (dotter classic): the user middle-mouse-
     /// dragged a rectangle on the canvas. Compute a new compute_zoom
     /// such that the selected residue range fills the physical
-    /// canvas, push the current view onto Back, and recompute.
-    /// After the result lands `poll_compute_results` applies the
-    /// pending `view_offset` so the user sees the selected region.
+    /// canvas, AND a new slice = selection ± [`RECT_ZOOM_MARGIN`] (so
+    /// the user can pan a bit without recomputing). Push the current
+    /// view onto Back and recompute. After the result lands
+    /// `poll_compute_results` applies the pending `view_offset` so
+    /// the user sees the selected region.
     fn action_rect_zoom(&mut self, plot_area: Rect, rs: RectSelect) {
-        let (Some(plot), Some(q), Some(s)) =
-            (self.plot.as_ref(), self.query.as_ref(), self.subject.as_ref())
-        else {
+        let (Some(plot), Some(q), Some(s), Some(cur_slice)) = (
+            self.plot.as_ref(),
+            self.query.as_ref(),
+            self.subject.as_ref(),
+            self.current_slice.clone(),
+        ) else {
             return;
         };
-        let cur_zoom = plot.params.zoom.max(1) as f32;
+        let cur_zoom_u = plot.params.zoom.max(1);
+        let cur_zoom = cur_zoom_u as f32;
 
         // Screen → pixelmap-pixel.
         let to_pix = |p: Pos2| -> (f32, f32) {
@@ -614,48 +702,71 @@ impl DottirApp {
         let px_hi_x = px_hi_x.max(px_lo_x).min(plot.width as f32);
         let px_hi_y = px_hi_y.max(px_lo_y).min(plot.height as f32);
 
-        // Pixelmap pixels → residues at the *current* compute zoom.
-        let res_lo_x = (px_lo_x * cur_zoom).floor().max(0.0) as usize;
-        let res_lo_y = (px_lo_y * cur_zoom).floor().max(0.0) as usize;
-        let res_hi_x = ((px_hi_x * cur_zoom).ceil() as usize).min(q.len());
-        let res_hi_y = ((px_hi_y * cur_zoom).ceil() as usize).min(s.len());
-        let residues_x = res_hi_x.saturating_sub(res_lo_x).max(1) as f64;
-        let residues_y = res_hi_y.saturating_sub(res_lo_y).max(1) as f64;
+        // Pixelmap pixels → *absolute* residues (offset by the
+        // current slice's start).
+        let sel_lo_x = cur_slice.q_range.start
+            + (px_lo_x * cur_zoom).floor().max(0.0) as usize;
+        let sel_lo_y = cur_slice.s_range.start
+            + (px_lo_y * cur_zoom).floor().max(0.0) as usize;
+        let sel_hi_x = (cur_slice.q_range.start
+            + (px_hi_x * cur_zoom).ceil() as usize)
+            .min(q.len());
+        let sel_hi_y = (cur_slice.s_range.start
+            + (px_hi_y * cur_zoom).ceil() as usize)
+            .min(s.len());
+        let sel_w = sel_hi_x.saturating_sub(sel_lo_x).max(1);
+        let sel_h = sel_hi_y.saturating_sub(sel_lo_y).max(1);
 
+        // New compute zoom so the *selection* (not the slice) fills
+        // the physical canvas.
         let ppp = self.measured_pixels_per_point.max(0.1);
         let phys_w = (plot_area.width() * ppp).max(1.0) as f64;
         let phys_h = (plot_area.height() * ppp).max(1.0) as f64;
-        // New zoom so the selection fills the physical canvas.
-        let zoom_x = (residues_x / phys_w).ceil() as u32;
-        let zoom_y = (residues_y / phys_h).ceil() as u32;
+        let zoom_x = ((sel_w as f64) / phys_w).ceil() as u32;
+        let zoom_y = ((sel_h as f64) / phys_h).ceil() as u32;
         let new_zoom = zoom_x.max(zoom_y).max(1);
 
-        if new_zoom == plot.params.zoom {
-            // No effective zoom change — just pan to the selection.
-            let new_off = Vec2::new(
-                (res_lo_x as f32) / (new_zoom as f32),
-                (res_lo_y as f32) / (new_zoom as f32),
-            );
-            self.view_offset = new_off;
-            return;
-        }
+        // New slice = selection ± RECT_ZOOM_MARGIN of its size,
+        // clamped to the full sequence. Gives a panning buffer
+        // without unbounded memory.
+        let margin_x = ((sel_w as f64) * RECT_ZOOM_MARGIN).ceil() as usize;
+        let margin_y = ((sel_h as f64) * RECT_ZOOM_MARGIN).ceil() as usize;
+        let slice_lo_x = sel_lo_x.saturating_sub(margin_x);
+        let slice_lo_y = sel_lo_y.saturating_sub(margin_y);
+        let slice_hi_x = sel_hi_x.saturating_add(margin_x).min(q.len());
+        let slice_hi_y = sel_hi_y.saturating_add(margin_y).min(s.len());
+        let new_slice = ViewSlice {
+            q_range: slice_lo_x..slice_hi_x,
+            s_range: slice_lo_y..slice_hi_y,
+        };
+
+        // The user's view should land on the selection inside the
+        // new slice's pixelmap coords:
+        //   pixel = (residue − slice.start) / new_zoom
+        let new_off_x =
+            ((sel_lo_x - new_slice.q_range.start) as f64 / new_zoom as f64) as f32;
+        let new_off_y =
+            ((sel_lo_y - new_slice.s_range.start) as f64 / new_zoom as f64) as f32;
 
         tracing::info!(
-            "rect-zoom: {} → {} (residues ~{}×{}, target phys ~{:.0}×{:.0})",
-            plot.params.zoom,
+            "rect-zoom: zoom {} → {} (sel {}×{} residues, slice {}..{} × {}..{})",
+            cur_zoom_u,
             new_zoom,
-            residues_x as u32,
-            residues_y as u32,
-            phys_w,
-            phys_h,
+            sel_w,
+            sel_h,
+            new_slice.q_range.start,
+            new_slice.q_range.end,
+            new_slice.s_range.start,
+            new_slice.s_range.end,
         );
         self.push_history();
         self.settings.zoom = new_zoom;
-        // Pending view_offset is in NEW pixelmap coords; applied when
-        // the result lands.
-        let new_off_x = (res_lo_x as f32) / (new_zoom as f32);
-        let new_off_y = (res_lo_y as f32) / (new_zoom as f32);
+        self.target_slice = Some(new_slice);
         self.pending_view_offset_after_compute = Some(Vec2::new(new_off_x, new_off_y));
+        // Crosshair coords are tied to the *old* slice/zoom — drop
+        // them rather than risk a misleading display. The user can
+        // re-click in the new view.
+        self.crosshair = None;
         self.recompute();
     }
 
@@ -697,12 +808,24 @@ impl DottirApp {
             return;
         }
         let target_zoom = self.settings.zoom.max(1);
-        // Cache hit: restore instantly, no worker dispatch. Cache is
-        // invalidated on any settings change that would alter the
-        // pixelmap (matrix, window, strand, …) so a hit really means
-        // "same plot for the same inputs".
-        if let Some(plot) = self.cache_get(target_zoom) {
-            tracing::info!("cache hit at zoom={target_zoom}");
+        // Resolve the target slice: explicit (`target_slice` set by
+        // action_*) wins; otherwise reuse the current slice if any;
+        // otherwise default to the full sequences.
+        let target_slice = self.target_slice.take().or_else(|| self.current_slice.clone());
+        let qlen = self.query.as_ref().map(|q| q.len()).unwrap_or(0);
+        let slen = self.subject.as_ref().map(|s| s.len()).unwrap_or(0);
+        let target_slice = target_slice.unwrap_or_else(|| ViewSlice::full(qlen, slen));
+
+        // Cache hit: restore instantly, no worker dispatch.
+        if let Some(plot) = self.cache_get(&target_slice, target_zoom) {
+            tracing::info!(
+                "cache hit at zoom={target_zoom}, slice {}..{} × {}..{}",
+                target_slice.q_range.start,
+                target_slice.q_range.end,
+                target_slice.s_range.start,
+                target_slice.s_range.end,
+            );
+            self.current_slice = Some(target_slice);
             self.plot = Some(plot);
             self.texture_dirty = true;
             self.last_error = None;
@@ -724,20 +847,31 @@ impl DottirApp {
                 return;
             }
         };
+        // Pixel-fac resolution:
+        // - Auto + first compute under current settings: pass 0 (core
+        //   derives from Karlin); we'll lock the resolved value once
+        //   the result lands.
+        // - Auto + already locked: pass the locked value so all slices
+        //   render with the same darkness scaling.
+        // - Manual: pass the slider value (max(1)).
+        let cfg_pixel_fac = if self.settings.auto_pixel_fac {
+            self.locked_pixel_fac.unwrap_or(0)
+        } else {
+            self.settings.pixel_fac.max(1)
+        };
         let mut cfg = PlotConfig {
             mode: self.settings.mode,
             matrix,
             window_size: self.settings.window_size,
             zoom: self.settings.zoom.max(1),
-            // 0 = auto (core derives from Karlin); otherwise pass the
-            // slider value through.
-            pixel_fac: if self.settings.auto_pixel_fac {
-                0
-            } else {
-                self.settings.pixel_fac.max(1)
-            },
+            pixel_fac: cfg_pixel_fac,
             strand: self.settings.strand,
-            self_comparison: self.settings.self_comparison,
+            // Self-comparison only applies on the diagonal — when the
+            // slice ranges are equal (i.e., the user is looking at the
+            // same residue range on both axes, typically the full view
+            // or a square selection along the main diagonal).
+            self_comparison: self.settings.self_comparison
+                && target_slice.is_self_comparison(),
             triangle: self.settings.triangle,
             disable_mirror: false,
             memory_limit_bytes: self.settings.memory_limit_bytes,
@@ -754,16 +888,34 @@ impl DottirApp {
 
         self.last_dispatched_id = self.last_dispatched_id.wrapping_add(1);
         let id = self.last_dispatched_id;
+        // Slice the sequence bytes for the compute. The core kernel
+        // operates on `&[u8]` so slicing in the GUI keeps the core
+        // API unchanged.
+        let q_bytes = q.bytes();
+        let s_bytes = s.bytes();
+        let q_slice = q_bytes
+            .get(target_slice.q_range.clone())
+            .unwrap_or(&[])
+            .to_vec();
+        let s_slice = s_bytes
+            .get(target_slice.s_range.clone())
+            .unwrap_or(&[])
+            .to_vec();
         let req = crate::compute_worker::ComputeRequest {
             id,
-            // Sequences are cloned per request — typically tens of
-            // MiB at worst. The clone is dwarfed by the compute time
-            // it triggers, and lets the worker outlive the borrow.
-            query: q.bytes().to_vec(),
-            subject: s.bytes().to_vec(),
+            // Sequences cloned per request — slice bytes only.
+            query: q_slice,
+            subject: s_slice,
             config: cfg,
         };
-        tracing::info!("dispatch compute id={id}");
+        tracing::info!(
+            "dispatch compute id={id}, zoom={target_zoom}, slice {}..{} × {}..{}",
+            target_slice.q_range.start,
+            target_slice.q_range.end,
+            target_slice.s_range.start,
+            target_slice.s_range.end,
+        );
+        self.last_dispatched_slice = Some(target_slice);
         self.worker.dispatch(req);
         self.compute_in_flight = true;
     }
@@ -817,18 +969,26 @@ impl DottirApp {
             match r.plot {
                 Ok(plot) => {
                     tracing::info!(
-                        "computed {}×{} pixelmap (W={}, zoom={})",
+                        "computed {}×{} pixelmap (W={}, zoom={}, resolved_pixel_fac={})",
                         plot.width,
                         plot.height,
                         plot.params.window_size,
                         r.config_zoom,
+                        plot.params.pixel_fac,
                     );
-                    // Insert into LRU cache for instant restore on
-                    // Back / Fit cycling. Clone is a one-shot pixel
-                    // copy (cheap relative to the compute that
-                    // produced it).
-                    let cached = plot.clone();
-                    self.cache_insert(plot.params.zoom, cached);
+                    // Apply the slice that was paired with this dispatch.
+                    if let Some(slice) = self.last_dispatched_slice.take() {
+                        // Insert into LRU cache for instant restore on
+                        // Back / Fit cycling.
+                        self.cache_insert(slice.clone(), plot.params.zoom, plot.clone());
+                        self.current_slice = Some(slice);
+                    }
+                    // Lock the resolved auto pixel_fac on the first
+                    // compute after a settings change, so subsequent
+                    // sliced computes use the same darkness scaling.
+                    if self.settings.auto_pixel_fac && self.locked_pixel_fac.is_none() {
+                        self.locked_pixel_fac = Some(plot.params.pixel_fac);
+                    }
                     self.plot = Some(plot);
                     self.texture_dirty = true;
                     self.last_error = None;
@@ -853,8 +1013,9 @@ impl DottirApp {
                 Err(e) => {
                     self.last_error = Some(format!("compute_dotplot failed: {e}"));
                     // Failed compute leaves the previous pixelmap (if
-                    // any) intact and drops the pending offset.
+                    // any) intact and drops the pending state.
                     self.pending_view_offset_after_compute = None;
+                    self.last_dispatched_slice = None;
                 }
             }
         }
@@ -1614,10 +1775,15 @@ impl DottirApp {
                     if let Some((q, s)) = self.crosshair {
                         let idx = (s as usize) * (plot.width as usize) + (q as usize);
                         let v = plot.pixels.get(idx).copied().unwrap_or(0);
-                        // Map pixelmap coord → sequence coord (zoom).
+                        // Pixmap pixel → absolute residue (zoom + slice).
                         let z = plot.params.zoom as usize;
-                        let q_seq = (q as usize) * z + z / 2;
-                        let s_seq = (s as usize) * z + z / 2;
+                        let (q_off, s_off) = self
+                            .current_slice
+                            .as_ref()
+                            .map(|sl| (sl.q_range.start, sl.s_range.start))
+                            .unwrap_or((0, 0));
+                        let q_seq = q_off + (q as usize) * z + z / 2;
+                        let s_seq = s_off + (s as usize) * z + z / 2;
                         ui.separator();
                         ui.label(format!(
                             "q = {}, s = {}, value = {}",
@@ -1675,10 +1841,18 @@ impl DottirApp {
                 };
 
                 // Centre coordinates in *residue* space (translate
-                // pixelmap coords back through the kernel zoom).
+                // pixelmap coords back through the kernel zoom + add
+                // the slice origin so we get absolute residues into
+                // the full sequence — alignment-dock walks the full
+                // sequence bytes, not the slice).
                 let kzoom = plot.params.zoom.max(1) as usize;
-                let q_centre = (cq_pix as usize) * kzoom + kzoom / 2;
-                let s_centre = (cs_pix as usize) * kzoom + kzoom / 2;
+                let (q_off, s_off) = self
+                    .current_slice
+                    .as_ref()
+                    .map(|sl| (sl.q_range.start, sl.s_range.start))
+                    .unwrap_or((0, 0));
+                let q_centre = q_off + (cq_pix as usize) * kzoom + kzoom / 2;
+                let s_centre = s_off + (cs_pix as usize) * kzoom + kzoom / 2;
 
                 // Header row: coords + window-size spinner.
                 ui.horizontal(|ui| {
@@ -1963,13 +2137,24 @@ impl DottirApp {
             // C3: breaklines for multi-record FASTA inputs. Vertical
             // lines at the query record boundaries; horizontal lines
             // at the subject record boundaries. Drawn underneath the
-            // crosshair so it stays visible.
+            // crosshair so it stays visible. The pixelmap is sliced
+            // to `current_slice`, so a break at absolute residue B
+            // shows at pixmap pixel (B − slice.start) / zoom (only
+            // when inside the slice).
             let zoom_us = plot.params.zoom.max(1) as usize;
             let break_stroke =
                 egui::Stroke::new(1.0, Color32::from_rgba_unmultiplied(80, 160, 80, 220));
+            let (q_off, s_off) = self
+                .current_slice
+                .as_ref()
+                .map(|sl| (sl.q_range.start, sl.s_range.start))
+                .unwrap_or((0, 0));
             if let Some(q_seq) = &self.query {
                 for &break_coord in &q_seq.breaks() {
-                    let pixel_x = break_coord / zoom_us;
+                    if break_coord < q_off {
+                        continue;
+                    }
+                    let pixel_x = (break_coord - q_off) / zoom_us;
                     if pixel_x >= plot.width as usize {
                         continue;
                     }
@@ -1989,7 +2174,10 @@ impl DottirApp {
             }
             if let Some(s_seq) = &self.subject {
                 for &break_coord in &s_seq.breaks() {
-                    let pixel_y = break_coord / zoom_us;
+                    if break_coord < s_off {
+                        continue;
+                    }
+                    let pixel_y = (break_coord - s_off) / zoom_us;
                     if pixel_y >= plot.height as usize {
                         continue;
                     }
@@ -2035,10 +2223,18 @@ impl DottirApp {
                     stroke,
                 );
 
-                // Coord label next to the cross.
+                // Coord label next to the cross. Convert pixmap-pixel
+                // → absolute residue by adding the current slice
+                // origin (so the crosshair always reports residue
+                // coords, not slice-local pixmap coords).
                 let z = plot.params.zoom.max(1) as usize;
-                let q_seq = (cq as usize) * z + z / 2;
-                let s_seq = (cs as usize) * z + z / 2;
+                let (cq_off, cs_off) = self
+                    .current_slice
+                    .as_ref()
+                    .map(|sl| (sl.q_range.start, sl.s_range.start))
+                    .unwrap_or((0, 0));
+                let q_seq = cq_off + (cq as usize) * z + z / 2;
+                let s_seq = cs_off + (cs as usize) * z + z / 2;
                 let label = format!(
                     "q = {}, s = {}",
                     format_coord(self.query.as_ref(), q_seq),
@@ -2098,16 +2294,23 @@ impl DottirApp {
     ) {
         const MIN_LABEL_SPACING_PX: f32 = 80.0;
         let zoom_us = plot.params.zoom.max(1) as f32;
+        // Slice origin offset — labels show absolute residues, not
+        // slice-local positions.
+        let (q_off, s_off) = self
+            .current_slice
+            .as_ref()
+            .map(|sl| (sl.q_range.start as u64, sl.s_range.start as u64))
+            .unwrap_or((0, 0));
         // World-pixel range visible inside the plot area.
         let world_x_lo = self.view_offset.x;
         let world_x_hi = world_x_lo + plot_area.width();
         let world_y_lo = self.view_offset.y;
         let world_y_hi = world_y_lo + plot_area.height();
-        // Convert to sequence-residue range.
-        let seq_q_lo = (world_x_lo * zoom_us).max(0.0) as u64;
-        let seq_q_hi = (world_x_hi * zoom_us) as u64;
-        let seq_s_lo = (world_y_lo * zoom_us).max(0.0) as u64;
-        let seq_s_hi = (world_y_hi * zoom_us) as u64;
+        // Convert to absolute sequence-residue range.
+        let seq_q_lo = q_off + (world_x_lo * zoom_us).max(0.0) as u64;
+        let seq_q_hi = q_off + (world_x_hi * zoom_us) as u64;
+        let seq_s_lo = s_off + (world_y_lo * zoom_us).max(0.0) as u64;
+        let seq_s_hi = s_off + (world_y_hi * zoom_us) as u64;
 
         let painter = ui.painter();
         let tick_color = Color32::from_rgba_unmultiplied(80, 80, 80, 220);
@@ -2126,7 +2329,7 @@ impl DottirApp {
         while t < seq_q_hi.saturating_add(step_x as u64) {
             if t >= seq_q_lo && t <= seq_q_hi {
                 let sx = plot_area.left()
-                    + (t as f32 / zoom_us - self.view_offset.x);
+                    + ((t - q_off) as f32 / zoom_us - self.view_offset.x);
                 if sx < plot_area.left() - 1.0 || sx > plot_area.right() + 1.0 {
                     t = t.saturating_add(step_x as u64);
                     if step_x == 0.0 {
@@ -2166,7 +2369,7 @@ impl DottirApp {
         while t < seq_s_hi.saturating_add(step_y as u64) {
             if t >= seq_s_lo && t <= seq_s_hi {
                 let sy =
-                    plot_area.top() + (t as f32 / zoom_us - self.view_offset.y);
+                    plot_area.top() + ((t - s_off) as f32 / zoom_us - self.view_offset.y);
                 if sy < plot_area.top() - 1.0 || sy > plot_area.bottom() + 1.0 {
                     t = t.saturating_add(step_y as u64);
                     if step_y == 0.0 {
@@ -2205,8 +2408,13 @@ impl DottirApp {
             if q.records.len() > 1 {
                 let rec_y = outer.top() + 2.0;
                 for rec in &q.records {
-                    let r_start = rec.range.start as u64;
-                    let r_end = rec.range.end as u64;
+                    // Record ranges are absolute residue positions;
+                    // translate into slice-local pixmap pixels.
+                    if rec.range.end as u64 <= q_off {
+                        continue;
+                    }
+                    let r_start = (rec.range.start as u64).saturating_sub(q_off);
+                    let r_end = (rec.range.end as u64).saturating_sub(q_off);
                     if r_end <= r_start {
                         continue;
                     }
@@ -2233,8 +2441,11 @@ impl DottirApp {
             if s.records.len() > 1 {
                 let rec_x = outer.left() + 2.0;
                 for rec in &s.records {
-                    let r_start = rec.range.start as u64;
-                    let r_end = rec.range.end as u64;
+                    if rec.range.end as u64 <= s_off {
+                        continue;
+                    }
+                    let r_start = (rec.range.start as u64).saturating_sub(s_off);
+                    let r_end = (rec.range.end as u64).saturating_sub(s_off);
                     if r_end <= r_start {
                         continue;
                     }
