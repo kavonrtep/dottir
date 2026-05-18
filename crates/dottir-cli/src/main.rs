@@ -71,7 +71,10 @@ struct BatchArgs {
     zoom: u32,
 
     /// Pixel factor (multiplier in `min(255, score * pixel_fac / W)`).
-    #[arg(long, default_value_t = 50)]
+    /// `0` = auto-derive from Karlin's expected residue score (dotter's
+    /// default behaviour). The resolved value is reported in the
+    /// params sidecar.
+    #[arg(long, default_value_t = 0)]
     pixel_fac: u32,
 
     /// Strand selection. BLASTP ignores this.
@@ -290,7 +293,12 @@ fn run_batch(args: BatchArgs) -> Result<()> {
     let dottir_version = env!("CARGO_PKG_VERSION");
     let resolved = format!(
         "mode={:?};matrix={};W={};zoom={};pixel_fac={};strand={:?}",
-        cfg.mode, cfg.matrix.name, plot.params.window_size, cfg.zoom, cfg.pixel_fac, cfg.strand
+        cfg.mode,
+        cfg.matrix.name,
+        plot.params.window_size,
+        cfg.zoom,
+        plot.params.pixel_fac, // resolved value (may differ from cfg if auto)
+        cfg.strand
     );
     let text_chunks = [
         ("dottir-version", dottir_version),
@@ -411,7 +419,7 @@ fn run_batch(args: BatchArgs) -> Result<()> {
             zoom: cfg.zoom as f64,
             width: plot.width,
             height: plot.height,
-            pixel_fac: Some(cfg.pixel_fac as i32),
+            pixel_fac: Some(plot.params.pixel_fac as i32),
             sliding_window_size: Some(plot.params.window_size as i32),
             matrix_name: Some(cfg.matrix.name.clone()),
             matrix: Some(matrix24),
@@ -447,7 +455,7 @@ fn run_batch(args: BatchArgs) -> Result<()> {
                 strand: format!("{:?}", cfg.strand),
                 window_size: plot.params.window_size,
                 zoom: cfg.zoom,
-                pixel_fac: cfg.pixel_fac,
+                pixel_fac: plot.params.pixel_fac,
                 self_comparison: cfg.self_comparison,
                 karlin: plot.params.karlin.map(|k| KarlinInfo {
                     lambda: k.lambda,

@@ -260,6 +260,12 @@ fn reverse_query_flag_matches_external_revcomp() {
     cfg.strand = Strand::Forward;
     cfg.window_size = Some(8);
     cfg.zoom = 1;
+    // Fix pixel_fac so the comparison is about *compute* equivalence,
+    // not auto-pixel-fac calibration. Auto mode would run Karlin over
+    // (q, s) in Path A and (revcomp(q), s) in Path B — those have
+    // different residue compositions, so the auto-derived pixel_fac
+    // would differ slightly and the pixelmaps wouldn't be byte-equal.
+    cfg.pixel_fac = 50;
 
     // Path A: flag.
     let mut cfg_a = cfg.clone();
@@ -289,6 +295,46 @@ fn rev_flags_are_noop_for_blastp() {
     cfg.reverse_subject = true;
     let plot_on = compute_dotplot(&q, &s, &cfg).unwrap();
     assert_eq!(plot_off.pixels, plot_on.pixels);
+}
+
+/// Auto pixel_fac (sentinel value 0) derives from Karlin's
+/// expected_residue_score via dotter's `0.2 * 256 / expRes` formula
+/// (`dotplot.c:854`). For DNA identity 5/-4 on a mixed sequence the
+/// expected residue score lands in the 3-6 range, so auto pixel_fac
+/// should land in the ~9-17 range — and the resolved value gets
+/// reported back via `params.pixel_fac`.
+#[test]
+fn auto_pixel_fac_from_karlin() {
+    let q = b"ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT".to_vec();
+    let s = q.clone();
+    let mut cfg = PlotConfig::default_blastn(ScoreMatrix::dna_identity());
+    cfg.strand = Strand::Forward;
+    cfg.window_size = Some(8); // user fixed W; auto pixel_fac still triggers Karlin
+    cfg.zoom = 1;
+    cfg.pixel_fac = 0; // sentinel = auto
+
+    let p = compute_dotplot(&q, &s, &cfg).unwrap();
+    // Resolved value reported back.
+    assert!(
+        p.params.pixel_fac >= 1,
+        "resolved pixel_fac must be >= 1, got {}",
+        p.params.pixel_fac
+    );
+    // Karlin ran even though window_size was user-fixed, because
+    // pixel_fac was auto.
+    let karlin = p.params.karlin.expect("Karlin should have run for auto pixel_fac");
+    let expected = ((0.2 * 256.0 / karlin.expected_residue_score).round() as u32).max(1);
+    assert_eq!(
+        p.params.pixel_fac, expected,
+        "resolved pixel_fac mismatch: got {}, expected {} (expRes = {:.3})",
+        p.params.pixel_fac, expected, karlin.expected_residue_score
+    );
+    // Sanity: explicit pixel_fac path should NOT run Karlin if W is fixed.
+    let mut cfg2 = cfg.clone();
+    cfg2.pixel_fac = 80;
+    let p2 = compute_dotplot(&q, &s, &cfg2).unwrap();
+    assert_eq!(p2.params.pixel_fac, 80);
+    assert!(p2.params.karlin.is_none(), "Karlin should be skipped when both W and pixel_fac are user-set");
 }
 
 /// Determinism across thread counts placeholder — for Phase 3 we'll

@@ -49,6 +49,13 @@ pub struct PlotConfig {
     /// `zoom × zoom` block size per output pixel. Spec §4.1.5.
     pub zoom: u32,
     /// Multiplier in the final scale step `min(255, score * pixel_fac / W)`.
+    ///
+    /// `0` means **auto** — derive from Karlin's expected residue score
+    /// in MSP via dotter's formula `round(0.2 * 256 / exp_res_score)`
+    /// (see `dotplot.c:854`). This positions a Karlin-expected match
+    /// residue at ~1/5 of the displayable range and pushes background
+    /// noise toward white. The resolved value is reported back via
+    /// [`PlotParams::pixel_fac`].
     pub pixel_fac: u32,
     pub strand: Strand,
     pub self_comparison: bool,
@@ -70,15 +77,16 @@ pub struct PlotConfig {
 }
 
 impl PlotConfig {
-    /// Sensible BLASTN defaults: forward+reverse, zoom 1, pixel_fac matching
-    /// C dotter (50), 0.5 GiB cap.
+    /// Sensible BLASTN defaults: forward+reverse, zoom 1, auto pixel_fac
+    /// (matches dotter — derived from Karlin's expected residue score),
+    /// 0.5 GiB cap.
     pub fn default_blastn(matrix: ScoreMatrix) -> Self {
         Self {
             mode: BlastMode::Blastn,
             matrix,
             window_size: None,
             zoom: 1,
-            pixel_fac: 50,
+            pixel_fac: 0, // auto
             strand: Strand::Both,
             self_comparison: false,
             triangle: Triangle::Both,
@@ -97,7 +105,7 @@ impl PlotConfig {
             matrix,
             window_size: None,
             zoom: 1,
-            pixel_fac: 50,
+            pixel_fac: 0, // auto
             strand: Strand::Forward,
             self_comparison: false,
             triangle: Triangle::Both,
@@ -239,9 +247,8 @@ pub fn compute_dotplot(
     if config.zoom == 0 {
         return Err(DottirError::InvalidConfig("zoom must be >= 1".into()));
     }
-    if config.pixel_fac == 0 {
-        return Err(DottirError::InvalidConfig("pixel_fac must be >= 1".into()));
-    }
+    // `config.pixel_fac == 0` means "auto-derive from Karlin's
+    // expected_residue_score" — handled below once Karlin has run.
     if config.mode == BlastMode::Blastx {
         return compute_blastx(query, subject, config);
     }
@@ -258,19 +265,53 @@ pub fn compute_dotplot(
         ));
     }
 
-    // Karlin window estimate or override.
-    let (window, karlin_result) = match config.window_size {
-        Some(w) => (w, None),
-        None => {
-            let r = karlin_window_size(&config.matrix, query, subject, config.mode)?;
-            (r.window_size, Some(r))
-        }
+    // Karlin window estimate (and/or `expected_residue_score` for the
+    // auto pixel-factor). We need Karlin whenever EITHER the window
+    // size or pixel_fac is on auto. Matches dotter `dotplot.c:1104-1106`
+    // which calls `winsizeFromlambdak` even when the user fixed W in
+    // order to get `expResScore`.
+    let need_karlin = config.window_size.is_none() || config.pixel_fac == 0;
+    let karlin_result = if need_karlin {
+        Some(karlin_window_size(
+            &config.matrix,
+            query,
+            subject,
+            config.mode,
+        )?)
+    } else {
+        None
+    };
+    let window = match config.window_size {
+        Some(w) => w,
+        None => karlin_result
+            .as_ref()
+            .expect("karlin_result is Some when window_size is None")
+            .window_size,
     };
     if window < 1 {
         return Err(DottirError::InvalidConfig(
             "window size must be >= 1".into(),
         ));
     }
+    // Resolve `pixel_fac == 0` to dotter's auto formula
+    // (dotplot.c:854): `0.2 * NUM_COLORS / expected_residue_score`. The
+    // intent is that a Karlin-expected MSP residue scores at 1/5 of the
+    // displayable range, leaving headroom for exceptional matches and
+    // pushing background noise toward white.
+    let pixel_fac = if config.pixel_fac == 0 {
+        let exp_res = karlin_result
+            .as_ref()
+            .expect("karlin_result is Some when pixel_fac == 0")
+            .expected_residue_score;
+        if !(exp_res.is_finite() && exp_res > 0.0) {
+            return Err(DottirError::InvalidConfig(format!(
+                "auto pixel_fac requires positive Karlin expected_residue_score, got {exp_res:.3}"
+            )));
+        }
+        ((0.2 * 256.0 / exp_res).round() as u32).max(1)
+    } else {
+        config.pixel_fac
+    };
 
     let alpha = config.mode.alphabet();
     // Spec §4.1.10: `-r` / `-v` reverse-complement the corresponding
@@ -346,7 +387,7 @@ pub fn compute_dotplot(
             &s_encoded_forward,
             window,
             config.zoom,
-            config.pixel_fac,
+            pixel_fac,
             Direction::Forward,
             config.self_comparison,
             &view,
@@ -369,7 +410,7 @@ pub fn compute_dotplot(
                     &s_encoded_forward,
                     window,
                     config.zoom,
-                    config.pixel_fac,
+                    pixel_fac,
                     Direction::Reverse,
                     config.self_comparison,
                     &view,
@@ -383,7 +424,7 @@ pub fn compute_dotplot(
                 &s_encoded_forward,
                 window,
                 config.zoom,
-                config.pixel_fac,
+                pixel_fac,
                 Direction::Reverse,
                 config.self_comparison,
                 &view,
@@ -440,7 +481,7 @@ pub fn compute_dotplot(
         params: PlotParams {
             window_size: window,
             zoom: config.zoom,
-            pixel_fac: config.pixel_fac,
+            pixel_fac,
             karlin: karlin_result,
         },
     })
@@ -572,18 +613,45 @@ fn compute_blastx(
             "BLASTX query is too short to translate (<3 bases)".into(),
         ));
     }
-    let (window, karlin_result) = match config.window_size {
-        Some(w) => (w, None),
-        None => {
-            let r = karlin_window_size(&config.matrix, &frame0, subject, BlastMode::Blastp)?;
-            (r.window_size, Some(r))
-        }
+    // Same auto-Karlin logic as compute_dotplot: run Karlin when
+    // either window_size OR pixel_fac is on auto.
+    let need_karlin = config.window_size.is_none() || config.pixel_fac == 0;
+    let karlin_result = if need_karlin {
+        Some(karlin_window_size(
+            &config.matrix,
+            &frame0,
+            subject,
+            BlastMode::Blastp,
+        )?)
+    } else {
+        None
+    };
+    let window = match config.window_size {
+        Some(w) => w,
+        None => karlin_result
+            .as_ref()
+            .expect("karlin_result is Some when window_size is None")
+            .window_size,
     };
     if window < 1 {
         return Err(DottirError::InvalidConfig(
             "window size must be >= 1".into(),
         ));
     }
+    let pixel_fac = if config.pixel_fac == 0 {
+        let exp_res = karlin_result
+            .as_ref()
+            .expect("karlin_result is Some when pixel_fac == 0")
+            .expected_residue_score;
+        if !(exp_res.is_finite() && exp_res > 0.0) {
+            return Err(DottirError::InvalidConfig(format!(
+                "auto pixel_fac requires positive Karlin expected_residue_score, got {exp_res:.3}"
+            )));
+        }
+        ((0.2 * 256.0 / exp_res).round() as u32).max(1)
+    } else {
+        config.pixel_fac
+    };
 
     // Each frame has length ⌈(qlen − f) / 3⌉; the C dotter sizes the
     // image to pepQSeqLen = qlen / 3. Match that. Frames whose
@@ -619,7 +687,7 @@ fn compute_blastx(
             &s_encoded,
             window,
             config.zoom,
-            config.pixel_fac,
+            pixel_fac,
             Direction::Forward,
             false, // self-comparison not supported for BLASTX
             &view,
@@ -634,7 +702,7 @@ fn compute_blastx(
         params: PlotParams {
             window_size: window,
             zoom: config.zoom,
-            pixel_fac: config.pixel_fac,
+            pixel_fac,
             karlin: karlin_result,
         },
     })

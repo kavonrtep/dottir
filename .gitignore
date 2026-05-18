@@ -1,5 +1,5 @@
 # Vendored upstream reference, not part of dottir
-third_party/seqtools/
+third_party/
 
 # Rust build artifacts
 target/

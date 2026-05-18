@@ -47,6 +47,9 @@ fn unrelated_sequences_mostly_dark() {
     cfg.strand = Strand::Forward;
     cfg.window_size = Some(5);
     cfg.zoom = 1;
+    // Auto pixel_fac (= default) calls Karlin, which can't compute a
+    // valid distribution on this degenerate single-letter input.
+    cfg.pixel_fac = 50;
 
     let p = compute_dotplot(&q, &s, &cfg).unwrap();
     // No 5-mer of A-stretch or C-stretch matches any 5-mer of G-stretch
@@ -83,6 +86,8 @@ fn zoom_factor_reduces_dimensions() {
     cfg.strand = Strand::Forward;
     cfg.window_size = Some(5);
     cfg.zoom = 10;
+    // Bypass auto pixel_fac — Karlin can't run on single-letter inputs.
+    cfg.pixel_fac = 50;
 
     let p = compute_dotplot(&q, &s, &cfg).unwrap();
     assert_eq!(p.width, 10);
@@ -109,6 +114,8 @@ fn memory_limit_enforced() {
     cfg.strand = Strand::Forward;
     cfg.window_size = Some(5);
     cfg.zoom = 1;
+    // Bypass auto pixel_fac — Karlin can't run on single-letter inputs.
+    cfg.pixel_fac = 50;
     cfg.memory_limit_bytes = 1024; // way too small
     let err = compute_dotplot(&q, &s, &cfg).unwrap_err();
     let s = format!("{err}");

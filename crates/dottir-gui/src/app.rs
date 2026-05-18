@@ -35,7 +35,7 @@ impl Default for StartupConfig {
             matrix_name: "DNA+5/-4".into(),
             window_size: None,
             zoom: 1,
-            pixel_fac: 50,
+            pixel_fac: 0, // auto (Karlin-derived)
             strand: Strand::Both,
             self_comparison: false,
             memory_limit_bytes: 512 * 1024 * 1024,
@@ -84,13 +84,22 @@ struct Settings {
     /// override the slider afterwards; the override sticks until the
     /// next sequence load. Default on.
     auto_zoom_on_load: bool,
+    /// When true, `pixel_fac` is sent as 0 to the core (auto-derive
+    /// from Karlin's expected residue score, dotter's default
+    /// behaviour). When false, the slider value is used directly. The
+    /// last resolved value lives on `DottirApp::resolved_pixel_fac` so
+    /// the slider can seed itself sensibly when the user toggles auto
+    /// off mid-session.
+    auto_pixel_fac: bool,
 }
 
-/// Largest pixelmap edge produced by the load-time auto-zoom. Roughly
-/// 2-4× a typical canvas width so wheel-in past 2× display zoom can
-/// still reveal detail before the C2 zoom-settle code recomputes at a
-/// finer tier.
-const DEFAULT_AUTO_ZOOM_TARGET: u32 = 4096;
+/// Largest pixelmap edge produced by the load-time auto-zoom — matches
+/// dotter's `MAX_IMAGE_DIMENSION` (`dotplot.c:53`). Big enough that
+/// diagonals span many pixelmap cells and look continuous when
+/// downsampled to fit a canvas, leaving plenty of headroom for
+/// wheel-in. Memory cost: at 1 byte per pixel a 16 000² pixelmap is
+/// ~256 MB, well under the default 512 MB cap.
+const DEFAULT_AUTO_ZOOM_TARGET: u32 = 16000;
 
 impl Default for Settings {
     fn default() -> Self {
@@ -99,7 +108,7 @@ impl Default for Settings {
             matrix_name: "DNA+5/-4".into(),
             window_size: None,
             zoom: 1,
-            pixel_fac: 50,
+            pixel_fac: 50, // slider seed only; ignored when auto_pixel_fac
             strand: Strand::Both,
             self_comparison: false,
             triangle: Triangle::Both,
@@ -109,6 +118,7 @@ impl Default for Settings {
             inverted_repeat_colour: false,
             align_window_size: 100,
             auto_zoom_on_load: true,
+            auto_pixel_fac: true,
         }
     }
 }
@@ -236,6 +246,14 @@ pub struct DottirApp {
     /// fit-to-canvas. Cleared whenever a new pixelmap arrives so
     /// every freshly loaded plot opens fully zoomed out.
     view_initialised: bool,
+    /// Adaptive texture sampling regime — set to `true` when
+    /// `display_zoom < 1.0` (downsampling) so the texture is rebuilt
+    /// with `TextureOptions::LINEAR`, killing nearest-neighbour
+    /// moiré on the periodic diagonals. Flipped back to `false`
+    /// (NEAREST = pixel-perfect upsample) when `display_zoom ≥ 1.0`.
+    /// Crossover sets `texture_dirty = true` so the rebuild happens
+    /// next frame.
+    texture_filter_linear: bool,
 }
 
 impl DottirApp {
@@ -254,12 +272,17 @@ impl DottirApp {
             ctx_for_repaint.request_repaint();
         });
 
+        // `startup.pixel_fac == 0` is the "auto" sentinel; map it onto
+        // the auto_pixel_fac checkbox and seed the slider at 50 so it
+        // has a sensible value if the user later toggles auto off.
+        let startup_auto_pf = startup.pixel_fac == 0;
+        let startup_slider_pf = if startup_auto_pf { 50 } else { startup.pixel_fac };
         let settings = Settings {
             mode: startup.mode,
             matrix_name: startup.matrix_name.clone(),
             window_size: startup.window_size,
             zoom: startup.zoom.max(1),
-            pixel_fac: startup.pixel_fac.max(1),
+            pixel_fac: startup_slider_pf,
             strand: startup.strand,
             self_comparison: startup.self_comparison,
             triangle: Triangle::Both,
@@ -269,6 +292,7 @@ impl DottirApp {
             inverted_repeat_colour: false,
             align_window_size: 100,
             auto_zoom_on_load: true,
+            auto_pixel_fac: startup_auto_pf,
         };
 
         let mut app = Self {
@@ -294,6 +318,7 @@ impl DottirApp {
             last_zoom_event: None,
             align_dock_visible: true,
             view_initialised: false,
+            texture_filter_linear: false,
         };
 
         // Pre-load any sequences supplied on the command line. Errors
@@ -420,7 +445,13 @@ impl DottirApp {
             matrix,
             window_size: self.settings.window_size,
             zoom: self.settings.zoom.max(1),
-            pixel_fac: self.settings.pixel_fac.max(1),
+            // 0 = auto (core derives from Karlin); otherwise pass the
+            // slider value through.
+            pixel_fac: if self.settings.auto_pixel_fac {
+                0
+            } else {
+                self.settings.pixel_fac.max(1)
+            },
             strand: self.settings.strand,
             self_comparison: self.settings.self_comparison,
             triangle: self.settings.triangle,
@@ -616,7 +647,17 @@ impl DottirApp {
         }
         let image =
             ColorImage::from_rgba_unmultiplied([plot.width as usize, plot.height as usize], &rgba);
-        let handle = ctx.load_texture("dottir-pixelmap", image, TextureOptions::NEAREST);
+        // NEAREST = pixel-perfect blocks at display_zoom ≥ 1 (lets the
+        // user see individual cell values when zoomed in). LINEAR =
+        // smooth downsample at display_zoom < 1 (kills moiré on the
+        // periodic diagonals when the full plot is fit-zoomed to a
+        // smaller canvas).
+        let opts = if self.texture_filter_linear {
+            TextureOptions::LINEAR
+        } else {
+            TextureOptions::NEAREST
+        };
+        let handle = ctx.load_texture("dottir-pixelmap", image, opts);
         self.texture = Some(handle);
         self.texture_dirty = false;
     }
@@ -1097,11 +1138,51 @@ impl DottirApp {
                     ));
                 });
                 ui.horizontal(|ui| {
+                    let prev_auto = self.settings.auto_pixel_fac;
+                    let resp = ui
+                        .checkbox(
+                            &mut self.settings.auto_pixel_fac,
+                            "Auto pixel factor (Karlin)",
+                        )
+                        .on_hover_text(
+                            "Auto-derive the pixel factor from Karlin's expected residue \
+                             score, dotter's default: positions an expected match residue \
+                             at ~1/5 of the displayable range and pushes background noise \
+                             toward white. Uncheck to drive the slider manually.",
+                        );
+                    if resp.changed() {
+                        changed = true;
+                        // Seed the slider from the last resolved value
+                        // when the user toggles auto off — so the
+                        // slider lands at "what auto picked" instead of
+                        // a surprise jump.
+                        if prev_auto && !self.settings.auto_pixel_fac {
+                            if let Some(plot) = self.plot.as_ref() {
+                                self.settings.pixel_fac =
+                                    plot.params.pixel_fac.clamp(1, 255);
+                            }
+                        }
+                    }
+                });
+                ui.horizontal(|ui| {
                     ui.label("Pixel factor:");
-                    if ui
-                        .add(Slider::new(&mut self.settings.pixel_fac, 1..=255))
-                        .changed()
+                    let mut display_value = if self.settings.auto_pixel_fac {
+                        // While auto, show the resolved value from the
+                        // last compute (read-only).
+                        self.plot
+                            .as_ref()
+                            .map(|p| p.params.pixel_fac)
+                            .unwrap_or(self.settings.pixel_fac)
+                    } else {
+                        self.settings.pixel_fac
+                    };
+                    let slider = Slider::new(&mut display_value, 1..=255);
+                    let resp = ui.add_enabled(!self.settings.auto_pixel_fac, slider);
+                    if !self.settings.auto_pixel_fac
+                        && resp.changed()
+                        && display_value != self.settings.pixel_fac
                     {
+                        self.settings.pixel_fac = display_value;
                         changed = true;
                     }
                 });
@@ -1504,6 +1585,17 @@ impl DottirApp {
                 self.view_offset.y = -(ch - ph) / 2.0;
             } else {
                 self.view_offset.y = self.view_offset.y.clamp(0.0, ph - ch);
+            }
+
+            // Adaptive sampler: downsample with LINEAR, upsample with
+            // NEAREST. Crossover (1.0 boundary) requires a texture
+            // rebuild because `TextureOptions` is fixed per
+            // `load_texture` call; flip `texture_dirty` so
+            // `ensure_texture` rebuilds with the new mode next frame.
+            let want_linear = self.display_zoom < 1.0;
+            if want_linear != self.texture_filter_linear {
+                self.texture_filter_linear = want_linear;
+                self.texture_dirty = true;
             }
 
             // Click sets the crosshair (clicks in the margin are
@@ -2549,7 +2641,13 @@ fn save_session(app: &mut DottirApp) {
             matrix_name: app.settings.matrix_name.clone(),
             window_size: app.settings.window_size,
             zoom: app.settings.zoom,
-            pixel_fac: app.settings.pixel_fac,
+            // Encode auto pixel_fac as 0 in the session — matches the
+            // core's sentinel convention.
+            pixel_fac: if app.settings.auto_pixel_fac {
+                0
+            } else {
+                app.settings.pixel_fac
+            },
             strand: codec::strand_to_str(app.settings.strand).to_string(),
             self_comparison: app.settings.self_comparison,
             triangle: codec::triangle_to_str(app.settings.triangle).to_string(),
@@ -2605,7 +2703,15 @@ fn open_session(app: &mut DottirApp) {
     app.settings.matrix_name = s.plot.matrix_name;
     app.settings.window_size = s.plot.window_size;
     app.settings.zoom = s.plot.zoom.max(1);
-    app.settings.pixel_fac = s.plot.pixel_fac.max(1);
+    // `pixel_fac = 0` in the session means "auto" (matches the core's
+    // sentinel). Restore the checkbox; leave the slider at a default 50.
+    if s.plot.pixel_fac == 0 {
+        app.settings.auto_pixel_fac = true;
+        app.settings.pixel_fac = 50;
+    } else {
+        app.settings.auto_pixel_fac = false;
+        app.settings.pixel_fac = s.plot.pixel_fac;
+    }
     if let Some(st) = codec::strand_from_str(&s.plot.strand) {
         app.settings.strand = st;
     }
