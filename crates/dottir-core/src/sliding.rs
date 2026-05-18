@@ -23,7 +23,7 @@
 //! the next iteration without per-iteration allocation.
 
 use crate::antidiag::keep_dot;
-use crate::pixel::PixelMap;
+use crate::pixel::PixelView;
 use crate::score_vec::ScoreVec;
 
 /// Direction along the subject axis. Forward iterates `s = 0..slen`,
@@ -72,7 +72,7 @@ pub fn sliding_window_pass(
     pixel_fac: u32,
     direction: Direction,
     self_comp: bool,
-    out: &PixelMap,
+    out: &PixelView<'_>,
 ) {
     sliding_window_pass_chunked(
         score_vec,
@@ -105,7 +105,7 @@ pub fn sliding_window_pass_chunked(
     direction: Direction,
     self_comp: bool,
     s_emit_range: std::ops::Range<usize>,
-    out: &PixelMap,
+    out: &PixelView<'_>,
 ) {
     let qlen = score_vec.qlen;
     let slen = subject_encoded.len();
@@ -240,7 +240,7 @@ fn emit_pixel(
     zoom: usize,
     pixel_fac: u32,
     direction: Direction,
-    out: &PixelMap,
+    out: &PixelView<'_>,
 ) {
     // C uses `incrementVal*win2` for the subject offset. Forward: subtract
     // win2; reverse: add win2 (since incrementVal = -1).

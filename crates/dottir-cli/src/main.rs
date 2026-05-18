@@ -10,7 +10,8 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 
 use dottir_core::{
-    compute_dotplot, BlastMode, PlotConfig, ScoreMatrix, Strand, Triangle, PIXELMAP_FORMAT_VERSION,
+    compute_dotplot, pick_auto_zoom, BlastMode, PlotConfig, ScoreMatrix, Strand, Triangle,
+    PIXELMAP_FORMAT_VERSION,
 };
 use dottir_io::{
     fasta,
@@ -232,10 +233,7 @@ fn run_batch(args: BatchArgs) -> Result<()> {
 
     // auto-zoom: pick zoom so max(qlen, slen) / zoom <= auto_zoom.
     let zoom = match args.auto_zoom {
-        Some(target) => {
-            let max_dim = query.len().max(subject.len()) as u32;
-            max_dim.div_ceil(target).max(1)
-        }
+        Some(target) => pick_auto_zoom(query.len(), subject.len(), target),
         None => args.zoom,
     };
     if zoom != args.zoom {

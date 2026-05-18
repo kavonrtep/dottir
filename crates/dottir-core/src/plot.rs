@@ -8,7 +8,7 @@ use crate::alphabet::{complement_encoded, encode, reverse_complement_dna};
 use crate::error::DottirError;
 use crate::karlin::{karlin_window_size, KarlinResult};
 use crate::matrix::{BlastMode, ScoreMatrix};
-use crate::pixel::{image_dimension, merge_max_into, PixelMap};
+use crate::pixel::{image_dimension, PixelMap, PixelView};
 use crate::score_vec::ScoreVec;
 use crate::sliding::{sliding_window_pass_chunked, Direction};
 
@@ -110,6 +110,34 @@ impl PlotConfig {
     }
 }
 
+/// Pick a `zoom` value such that the largest output pixelmap dimension
+/// (`max(qlen, slen).div_ceil(zoom)`) is at most `target_max_dim`.
+///
+/// Returns at least `1`. `target_max_dim` is clamped to `>= 1` to avoid
+/// a divide-by-zero edge case. Used by the CLI's `--auto-zoom` flag and
+/// the GUI's load-time auto-zoom (spec §4.4.8 — "avoid surprise OOMs on
+/// large inputs").
+///
+/// # Examples
+///
+/// ```
+/// use dottir_core::pick_auto_zoom;
+/// // Tiny inputs already fit — zoom stays at 1.
+/// assert_eq!(pick_auto_zoom(100, 100, 4096), 1);
+/// // 27 000 residues squashed into 4096 px each axis → zoom 7.
+/// assert_eq!(pick_auto_zoom(27_000, 27_000, 4096), 7);
+/// // Asymmetric: pick zoom for the larger axis.
+/// assert_eq!(pick_auto_zoom(1_000, 100_000, 4096), 25);
+/// ```
+pub fn pick_auto_zoom(qlen: usize, slen: usize, target_max_dim: u32) -> u32 {
+    let target = target_max_dim.max(1) as u64;
+    let max_dim = qlen.max(slen) as u64;
+    if max_dim == 0 {
+        return 1;
+    }
+    (max_dim.div_ceil(target)).max(1).min(u32::MAX as u64) as u32
+}
+
 /// Resolved parameters for a completed dotplot. Mirrors `KarlinResult` plus
 /// the inputs that the user might not have specified.
 #[derive(Debug, Clone, Copy)]
@@ -120,17 +148,59 @@ pub struct PlotParams {
     pub karlin: Option<KarlinResult>,
 }
 
-/// A computed dotplot. `pixels.len() == width * height`; `forward_pixels`
-/// and `reverse_pixels` are populated only when
-/// [`PlotConfig::separate_strand_channels`] is set.
+/// A computed dotplot. `pixels.len() == width * height`.
+///
+/// **Channel semantics:**
+/// - When [`Self::reverse_pixels`] is `None` (the common case), `pixels` is
+///   the only channel — the merged "combined" view if both strands ran,
+///   or the single strand's output if only one ran.
+/// - When `reverse_pixels` is `Some` (set only by callers that pass
+///   [`PlotConfig::separate_strand_channels`] = `true`), `pixels` holds
+///   the **forward** channel and `reverse_pixels` holds the reverse
+///   channel. Use [`Self::combined`] to get a merged view on demand —
+///   the merge is *not* precomputed, saving ~33 % of the peak memory
+///   when separate channels are requested.
 #[derive(Debug, Clone)]
 pub struct DotPlot {
     pub width: u32,
     pub height: u32,
     pub pixels: Vec<u8>,
-    pub forward_pixels: Option<Vec<u8>>,
     pub reverse_pixels: Option<Vec<u8>>,
     pub params: PlotParams,
+}
+
+impl DotPlot {
+    /// Borrow the primary channel. Always equivalent to `&self.pixels`.
+    /// Useful at call sites that want to signal "I treat this as the
+    /// combined view" — when separate channels are off, `pixels` *is*
+    /// the merged view; when on, callers should usually go through
+    /// [`Self::combined`] instead.
+    #[inline]
+    pub fn primary(&self) -> &[u8] {
+        &self.pixels
+    }
+
+    /// Return a merged forward+reverse view.
+    ///
+    /// - When `reverse_pixels.is_none()`: returns `pixels` borrowed
+    ///   (no allocation) — `pixels` already *is* the merged view.
+    /// - When `reverse_pixels.is_some()`: allocates and returns a fresh
+    ///   buffer that is the element-wise max of `pixels` (forward) and
+    ///   `reverse_pixels`.
+    ///
+    /// This replaces the eagerly-stored `forward + reverse + combined`
+    /// triple from earlier versions of the type: the combined channel
+    /// is built lazily here only when a caller asks.
+    pub fn combined(&self) -> std::borrow::Cow<'_, [u8]> {
+        match &self.reverse_pixels {
+            None => std::borrow::Cow::Borrowed(&self.pixels),
+            Some(rev) => {
+                let mut out = self.pixels.clone();
+                crate::pixel::merge_max_into(&mut out, rev);
+                std::borrow::Cow::Owned(out)
+            }
+        }
+    }
 }
 
 /// Compute a dotplot for a `(query, subject)` pair.
@@ -225,17 +295,6 @@ pub fn compute_dotplot(
     let width = image_dimension(q_encoded.len(), config.zoom);
     let height = image_dimension(s_encoded_forward.len(), config.zoom);
 
-    let score_vec = ScoreVec::build(&config.matrix, &q_encoded);
-
-    // Per spec §4.4.3, separate-strand channels keep forward and reverse
-    // hits distinct (used for inverted-repeat highlighting in the GUI).
-    // Otherwise both passes max-merge into a single pixelmap.
-    //
-    // After Phase A1 these are *atomic* PixelMaps — at most one per
-    // strand for the entire pass, shared across all rayon workers.
-    let forward_map = PixelMap::new_checked(width, height, config.memory_limit_bytes)?;
-    let mut reverse_map: Option<PixelMap> = None;
-
     // Decide which passes to run. For BLASTN, Strand::Both = forward +
     // reverse; Strand::Forward = forward only; Strand::Reverse = reverse
     // only. For BLASTP, always Forward.
@@ -244,7 +303,44 @@ pub fn compute_dotplot(
     let do_reverse =
         config.mode == BlastMode::Blastn && matches!(config.strand, Strand::Reverse | Strand::Both);
 
+    // Honest up-front memory budget. The peak holding cost is one
+    // pixelmap per *retained* channel — 2 when the caller asked for
+    // separate forward/reverse channels and both strands run, 1
+    // otherwise. The kernel's ping-pong sum buffers are i32 × qlen ×
+    // n_threads ≈ negligible compared to width×height. Checking once
+    // here is the source of truth; `PixelMap::new_checked`'s own
+    // check becomes a secondary guard for direct callers.
+    let per_channel = (width as u64) * (height as u64);
+    let channels: u32 = if do_reverse && config.separate_strand_channels {
+        2
+    } else {
+        1
+    };
+    let requested = per_channel.saturating_mul(channels as u64);
+    if requested > config.memory_limit_bytes {
+        return Err(DottirError::OutOfMemory {
+            requested,
+            per_channel,
+            channels,
+            limit: config.memory_limit_bytes,
+        });
+    }
+
+    let score_vec = ScoreVec::build(&config.matrix, &q_encoded);
+
+    // Per spec §4.4.3, separate-strand channels keep forward and reverse
+    // hits distinct (used for inverted-repeat highlighting in the GUI).
+    // Otherwise both passes max-merge into a single pixelmap.
+    //
+    // After Phase A1 these are owner-side `PixelMap`s — at most one per
+    // strand for the entire pass; each pass borrows a transient
+    // [`PixelView`] from its target map (atomic write lens shared
+    // across all rayon workers).
+    let mut forward_map = PixelMap::new_checked(width, height, config.memory_limit_bytes)?;
+    let mut reverse_map: Option<PixelMap> = None;
+
     if do_forward {
+        let view = forward_map.view_mut();
         run_pass(
             &score_vec,
             &s_encoded_forward,
@@ -253,7 +349,7 @@ pub fn compute_dotplot(
             config.pixel_fac,
             Direction::Forward,
             config.self_comparison,
-            &forward_map,
+            &view,
         );
     }
 
@@ -263,31 +359,41 @@ pub fn compute_dotplot(
         // for the same effect), then scan the subject backwards.
         let q_complement = complement_encoded(&q_encoded);
         let score_vec_rev = ScoreVec::build(&config.matrix, &q_complement);
-        let target_map: &PixelMap = if config.separate_strand_channels {
-            reverse_map = Some(PixelMap::new_checked(
-                width,
-                height,
-                config.memory_limit_bytes,
-            )?);
-            reverse_map.as_ref().unwrap()
+        if config.separate_strand_channels {
+            let mut rm =
+                PixelMap::new_checked(width, height, config.memory_limit_bytes)?;
+            {
+                let view = rm.view_mut();
+                run_pass(
+                    &score_vec_rev,
+                    &s_encoded_forward,
+                    window,
+                    config.zoom,
+                    config.pixel_fac,
+                    Direction::Reverse,
+                    config.self_comparison,
+                    &view,
+                );
+            }
+            reverse_map = Some(rm);
         } else {
-            &forward_map
-        };
-        run_pass(
-            &score_vec_rev,
-            &s_encoded_forward,
-            window,
-            config.zoom,
-            config.pixel_fac,
-            Direction::Reverse,
-            config.self_comparison,
-            target_map,
-        );
+            let view = forward_map.view_mut();
+            run_pass(
+                &score_vec_rev,
+                &s_encoded_forward,
+                window,
+                config.zoom,
+                config.pixel_fac,
+                Direction::Reverse,
+                config.self_comparison,
+                &view,
+            );
+        }
     }
 
-    // Compute is done — drop into raw bytes for post-processing. All
-    // workers have completed (rayon::for_each is synchronous), so the
-    // PixelMaps' atomic cells are now exclusive and consume cleanly.
+    // Compute is done — drop into raw bytes for post-processing. The
+    // views' lifetimes ended with each `run_pass` call, so the
+    // PixelMaps are now exclusively owned and `into_vec` is zero-copy.
     let mut forward_pixels = forward_map.into_vec();
     let mut reverse_pixels = reverse_map.map(|m| m.into_vec());
 
@@ -311,25 +417,26 @@ pub fn compute_dotplot(
         }
     }
 
-    let (combined, fwd_split, rev_split) =
-        if config.separate_strand_channels && reverse_pixels.is_some() {
-            // Combined channel: max-merge of forward + reverse for
-            // downstream code that wants the unified view.
-            let mut combined = forward_pixels.clone();
-            if let Some(ref r) = reverse_pixels {
-                merge_max_into(&mut combined, r);
-            }
-            (combined, Some(forward_pixels), reverse_pixels)
-        } else {
-            (forward_pixels, None, None)
-        };
+    // Channel-storage decision:
+    // - separate=true with both strands: keep them split (forward in
+    //   `pixels`, reverse in `reverse_pixels`). The combined view is
+    //   built lazily via `DotPlot::combined()` if a caller asks.
+    // - otherwise: a single channel, with `reverse_pixels = None`.
+    //   When `do_reverse` ran without separate channels, it merged
+    //   into the same map as forward at compute time (see the run_pass
+    //   target_map decision above), so `forward_pixels` already holds
+    //   the combined bytes.
+    let (pixels, reverse_pixels) = if config.separate_strand_channels && reverse_pixels.is_some() {
+        (forward_pixels, reverse_pixels)
+    } else {
+        (forward_pixels, None)
+    };
 
     Ok(DotPlot {
         width,
         height,
-        pixels: combined,
-        forward_pixels: fwd_split,
-        reverse_pixels: rev_split,
+        pixels,
+        reverse_pixels,
         params: PlotParams {
             window_size: window,
             zoom: config.zoom,
@@ -371,7 +478,7 @@ fn run_pass(
     pixel_fac: u32,
     direction: Direction,
     self_comp: bool,
-    out: &PixelMap,
+    out: &PixelView<'_>,
 ) {
     #[cfg(feature = "rayon")]
     {
@@ -486,7 +593,7 @@ fn compute_blastx(
     let s_encoded = crate::alphabet::encode(subject, alpha);
     let width = image_dimension(pepqlen, config.zoom);
     let height = image_dimension(subject.len(), config.zoom);
-    let pixmap = PixelMap::new_checked(width, height, config.memory_limit_bytes)?;
+    let mut pixmap = PixelMap::new_checked(width, height, config.memory_limit_bytes)?;
 
     for frame_offset in 0..3 {
         let translated = crate::translation::translate_frame(query, frame_offset);
@@ -506,6 +613,7 @@ fn compute_blastx(
         };
         let q_encoded = crate::alphabet::encode(&translated_padded, alpha);
         let score_vec = ScoreVec::build(&config.matrix, &q_encoded);
+        let view = pixmap.view_mut();
         run_pass(
             &score_vec,
             &s_encoded,
@@ -514,7 +622,7 @@ fn compute_blastx(
             config.pixel_fac,
             Direction::Forward,
             false, // self-comparison not supported for BLASTX
-            &pixmap,
+            &view,
         );
     }
 
@@ -522,7 +630,6 @@ fn compute_blastx(
         width,
         height,
         pixels: pixmap.into_vec(),
-        forward_pixels: None,
         reverse_pixels: None,
         params: PlotParams {
             window_size: window,

@@ -20,7 +20,12 @@
 //! byte-identical pixelmaps across runs and thread counts. The core
 //! deliberately avoids `HashMap` iteration in hot paths.
 
-#![forbid(unsafe_code)]
+// Default-deny unsafe; locally-allowed only where the std lib's
+// equivalent safe API is still nightly. See `pixel::PixelMap::view_mut`
+// and `pixel::PixelMap::into_vec` — both transmute between
+// layout-identical types (`u8` ↔ `AtomicU8`) and document why they
+// are sound.
+#![deny(unsafe_code)]
 #![warn(missing_debug_implementations)]
 
 pub mod alphabet;
@@ -38,7 +43,8 @@ pub use error::DottirError;
 pub use karlin::{karlin_window_size, KarlinConfig, KarlinResult};
 pub use matrix::{BlastMode, ScoreMatrix};
 pub use plot::{
-    compute_dotplot, reverse_complement, DotPlot, PlotConfig, PlotParams, Strand, Triangle,
+    compute_dotplot, pick_auto_zoom, reverse_complement, DotPlot, PlotConfig, PlotParams, Strand,
+    Triangle,
 };
 
 /// Bumped whenever the algorithmic contract changes such that previously

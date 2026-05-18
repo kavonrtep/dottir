@@ -2,7 +2,9 @@
 
 use std::path::PathBuf;
 
-use dottir_core::{BlastMode, DotPlot, PlotConfig, ScoreMatrix, Strand, Triangle};
+use dottir_core::{
+    pick_auto_zoom, BlastMode, DotPlot, PlotConfig, ScoreMatrix, Strand, Triangle,
+};
 use dottir_io::{DetectedAlphabet, Sequence};
 use egui::{
     Color32, ColorImage, Context, Pos2, Rect, Sense, Slider, TextureHandle, TextureOptions, Vec2,
@@ -75,7 +77,20 @@ struct Settings {
     /// H2 alignment-dock window size (residues, centred on the
     /// crosshair). Clamped to [20, 400] at render time.
     align_window_size: u32,
+    /// When true, `load_fasta` picks an initial `zoom` such that the
+    /// largest output pixelmap dimension is at most
+    /// [`DEFAULT_AUTO_ZOOM_TARGET`] pixels, sidestepping the OOM that
+    /// otherwise hits large self-comparisons at zoom=1. The user can
+    /// override the slider afterwards; the override sticks until the
+    /// next sequence load. Default on.
+    auto_zoom_on_load: bool,
 }
+
+/// Largest pixelmap edge produced by the load-time auto-zoom. Roughly
+/// 2-4× a typical canvas width so wheel-in past 2× display zoom can
+/// still reveal detail before the C2 zoom-settle code recomputes at a
+/// finer tier.
+const DEFAULT_AUTO_ZOOM_TARGET: u32 = 4096;
 
 impl Default for Settings {
     fn default() -> Self {
@@ -93,6 +108,7 @@ impl Default for Settings {
             reverse_subject: false,
             inverted_repeat_colour: false,
             align_window_size: 100,
+            auto_zoom_on_load: true,
         }
     }
 }
@@ -252,6 +268,7 @@ impl DottirApp {
             reverse_subject: false,
             inverted_repeat_colour: false,
             align_window_size: 100,
+            auto_zoom_on_load: true,
         };
 
         let mut app = Self {
@@ -318,11 +335,39 @@ impl DottirApp {
                 // opens fully zoomed out on its first render.
                 self.view_initialised = false;
                 self.maybe_switch_mode_from_alphabet(detected);
+                self.maybe_apply_auto_zoom();
                 self.recompute();
             }
             Err(e) => {
                 self.last_error = Some(format!("failed to load {}: {e}", path.display()));
             }
+        }
+    }
+
+    /// Pick an initial `zoom` for the current sequence pair so the
+    /// pixelmap stays under [`DEFAULT_AUTO_ZOOM_TARGET`] pixels along
+    /// its largest edge — sidesteps OOM at zoom=1 for self-comparisons
+    /// of multi-kb sequences and matches the user's expectation that
+    /// loading new data shows a fully-zoomed-out plot. Skipped when
+    /// either sequence is missing or `auto_zoom_on_load` is off. Wheel
+    /// zoom past 2× will still recompute at a finer tier via the C2
+    /// zoom-settle path.
+    fn maybe_apply_auto_zoom(&mut self) {
+        if !self.settings.auto_zoom_on_load {
+            return;
+        }
+        let (Some(q), Some(s)) = (self.query.as_ref(), self.subject.as_ref()) else {
+            return;
+        };
+        let new_zoom = pick_auto_zoom(q.len(), s.len(), DEFAULT_AUTO_ZOOM_TARGET);
+        if new_zoom != self.settings.zoom {
+            tracing::info!(
+                "auto-zoom: setting zoom = {new_zoom} (target = {} px, qlen = {}, slen = {})",
+                DEFAULT_AUTO_ZOOM_TARGET,
+                q.len(),
+                s.len(),
+            );
+            self.settings.zoom = new_zoom;
         }
     }
 
@@ -518,16 +563,15 @@ impl DottirApp {
             return;
         }
         let lut = self.greyramp.lut();
-        // Spec §4.4.3 inverted-repeat highlighting: when both
-        // forward+reverse channels are populated, paint forward in
-        // grey and reverse in magenta (overlapping cells take
-        // whichever channel is stronger after the greyramp).
+        // Spec §4.4.3 inverted-repeat highlighting: when the plot has
+        // a separate reverse channel, paint forward (`plot.pixels`) in
+        // grey and reverse (`plot.reverse_pixels`) in magenta —
+        // overlapping cells take whichever channel is stronger after
+        // the greyramp.
         let mut rgba = Vec::with_capacity(plot.pixels.len() * 4);
-        match (
-            plot.forward_pixels.as_deref(),
-            plot.reverse_pixels.as_deref(),
-        ) {
-            (Some(fwd), Some(rev)) if self.settings.inverted_repeat_colour => {
+        match plot.reverse_pixels.as_deref() {
+            Some(rev) if self.settings.inverted_repeat_colour => {
+                let fwd = plot.pixels.as_slice();
                 for i in 0..plot.pixels.len() {
                     let f = lut[fwd[i] as usize]; // forward strength (0..255)
                     let r = lut[rev[i] as usize]; // reverse strength
@@ -558,7 +602,13 @@ impl DottirApp {
             }
             _ => {
                 // Plain greyscale: combined channel through the LUT.
-                for &v in &plot.pixels {
+                // `combined()` borrows `pixels` directly when no
+                // separate reverse channel exists (the usual case);
+                // when one does and we got here because the user just
+                // toggled inverted-repeat colouring off, it merges
+                // forward + reverse into a fresh buffer so we render
+                // the unified view instead of just the forward channel.
+                for &v in plot.combined().as_ref() {
                     let g = lut[v as usize];
                     rgba.extend_from_slice(&[g, g, g, 255]);
                 }
@@ -1030,6 +1080,21 @@ impl DottirApp {
                     {
                         changed = true;
                     }
+                });
+                ui.horizontal(|ui| {
+                    // Auto-zoom only fires on sequence load, so this
+                    // checkbox is informational between loads — toggling
+                    // it doesn't recompute. The tooltip explains.
+                    ui.checkbox(
+                        &mut self.settings.auto_zoom_on_load,
+                        "Auto-zoom on load",
+                    )
+                    .on_hover_text(format!(
+                        "When a new sequence is loaded, pick an initial zoom so the largest \
+                         pixelmap dimension stays ≤ {} px. Wheel-zoom past 2× recomputes at a \
+                         finer tier automatically.",
+                        DEFAULT_AUTO_ZOOM_TARGET,
+                    ));
                 });
                 ui.horizontal(|ui| {
                     ui.label("Pixel factor:");

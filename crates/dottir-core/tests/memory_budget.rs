@@ -16,7 +16,7 @@
 //! 2. Sweeping thread counts at a tight memory cap that's well below
 //!    `2 × W × H` still produces byte-identical output.
 
-use dottir_core::{compute_dotplot, BlastMode, PlotConfig, ScoreMatrix, Strand};
+use dottir_core::{compute_dotplot, BlastMode, DottirError, PlotConfig, ScoreMatrix, Strand};
 
 fn run_with_thread_pool<F, R>(n: usize, f: F) -> R
 where
@@ -161,4 +161,36 @@ fn undersized_budget_fails_uniformly() {
         compute_dotplot(b"MKTAYIAKQRQI", b"MAATKRIIRQRY", &cfg2)
     });
     assert!(r.is_err());
+}
+
+/// D: the upfront budget check accounts for *all* retained channels.
+/// `separate_strand_channels=true` with both strands needs 2 × W × H,
+/// so a cap that's enough for one pixelmap but less than two must
+/// reject at the entry, with an error that reports `channels = 2`.
+#[test]
+fn upfront_check_rejects_separate_channels_at_one_pixelmap_cap() {
+    let (q, s) = make_input();
+    let mut cfg = PlotConfig::default_blastn(ScoreMatrix::dna_identity());
+    cfg.strand = Strand::Both;
+    cfg.window_size = Some(8);
+    cfg.zoom = 1;
+    cfg.separate_strand_channels = true;
+    let pixelmap_bytes = (q.len() as u64) * (s.len() as u64);
+    cfg.memory_limit_bytes = pixelmap_bytes; // enough for ONE channel, not two
+
+    let err = compute_dotplot(&q, &s, &cfg).expect_err("should reject upfront");
+    match err {
+        DottirError::OutOfMemory {
+            requested,
+            per_channel,
+            channels,
+            limit,
+        } => {
+            assert_eq!(per_channel, pixelmap_bytes);
+            assert_eq!(channels, 2);
+            assert_eq!(requested, 2 * pixelmap_bytes);
+            assert_eq!(limit, pixelmap_bytes);
+        }
+        other => panic!("unexpected error variant: {other:?}"),
+    }
 }

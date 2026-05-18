@@ -23,10 +23,20 @@ pub enum DottirError {
     NoScorableResidues,
 
     #[error(
-        "pixelmap allocation of {requested} bytes exceeds memory_limit_bytes = {limit}; \
-         try a larger zoom factor"
+        "pixelmap allocation of {requested} bytes ({channels} channel(s) × {per_channel} bytes) \
+         exceeds memory_limit_bytes = {limit}; try a larger zoom factor or raise the limit"
     )]
-    OutOfMemory { requested: u64, limit: u64 },
+    OutOfMemory {
+        /// Total bytes the compute would allocate (`channels × per_channel`).
+        requested: u64,
+        /// Bytes per channel — `width × height`.
+        per_channel: u64,
+        /// Number of distinct pixelmaps the compute will hold at peak.
+        /// `1` for the typical case, `2` for forward + separate reverse.
+        channels: u32,
+        /// The active cap (typically [`PlotConfig::memory_limit_bytes`]).
+        limit: u64,
+    },
 
     #[error("invalid configuration: {0}")]
     InvalidConfig(String),

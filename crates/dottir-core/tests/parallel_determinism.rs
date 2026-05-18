@@ -57,14 +57,15 @@ fn blastn_both_strands_byte_identical_across_thread_counts() {
     let baseline = run_with_thread_pool(1, || compute_dotplot(&q, &s, &cfg).unwrap());
     for n in [2_usize, 4, 8] {
         let p = run_with_thread_pool(n, || compute_dotplot(&q, &s, &cfg).unwrap());
-        assert_eq!(p.pixels, baseline.pixels, "combined differs at n={n}");
-        assert_eq!(
-            p.forward_pixels, baseline.forward_pixels,
-            "fwd differs at n={n}"
-        );
+        assert_eq!(p.pixels, baseline.pixels, "fwd differs at n={n}");
         assert_eq!(
             p.reverse_pixels, baseline.reverse_pixels,
             "rev differs at n={n}"
+        );
+        assert_eq!(
+            p.combined().as_ref(),
+            baseline.combined().as_ref(),
+            "combined differs at n={n}"
         );
     }
 }

@@ -204,8 +204,9 @@ fn self_comparison_disable_mirror_skips_postprocess() {
     }
 }
 
-/// Separate strand channels: forward_pixels and reverse_pixels populated,
-/// and their element-wise max equals pixels.
+/// Separate strand channels: `pixels` holds the forward channel,
+/// `reverse_pixels` holds the reverse, and `combined()` returns their
+/// element-wise max.
 #[test]
 fn separate_strand_channels_split_and_recombine() {
     let q = b"ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT".to_vec();
@@ -217,13 +218,18 @@ fn separate_strand_channels_split_and_recombine() {
     cfg.zoom = 1;
 
     let p = compute_dotplot(&q, &s, &cfg).unwrap();
-    let fwd = p.forward_pixels.as_ref().expect("forward_pixels populated");
+    let fwd: &[u8] = &p.pixels;
     let rev = p.reverse_pixels.as_ref().expect("reverse_pixels populated");
-    assert_eq!(fwd.len(), p.pixels.len());
-    assert_eq!(rev.len(), p.pixels.len());
+    assert_eq!(rev.len(), fwd.len());
 
-    for (i, &v) in p.pixels.iter().enumerate() {
-        assert_eq!(v, fwd[i].max(rev[i]), "combined != max(fwd, rev) at {i}");
+    let combined = p.combined();
+    assert_eq!(combined.len(), fwd.len());
+    for i in 0..fwd.len() {
+        assert_eq!(
+            combined[i],
+            fwd[i].max(rev[i]),
+            "combined != max(fwd, rev) at {i}"
+        );
     }
 }
 
@@ -300,6 +306,5 @@ fn determinism_extended_modes() {
     let p1 = compute_dotplot(&q, &s, &cfg).unwrap();
     let p2 = compute_dotplot(&q, &s, &cfg).unwrap();
     assert_eq!(p1.pixels, p2.pixels);
-    assert_eq!(p1.forward_pixels, p2.forward_pixels);
     assert_eq!(p1.reverse_pixels, p2.reverse_pixels);
 }
