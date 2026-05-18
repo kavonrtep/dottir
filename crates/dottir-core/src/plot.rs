@@ -146,6 +146,73 @@ pub fn pick_auto_zoom(qlen: usize, slen: usize, target_max_dim: u32) -> u32 {
     (max_dim.div_ceil(target)).max(1).min(u32::MAX as u64) as u32
 }
 
+/// Snap an automatically chosen zoom to a divisor of the supplied repeat
+/// periods when a nearby divisor exists.
+///
+/// This is a visualization aid for tandem-repeat inputs: if the repeat
+/// period is not divisible by the compute zoom, identical monomer tiles can
+/// land on different pixel phases. The function is intentionally conservative:
+/// it prefers divisors at or above `base_zoom` so auto-fit does not silently
+/// allocate a larger pixelmap. If no coarser nearby divisor exists, it may pick
+/// a finer divisor inside the tolerance window.
+pub fn snap_zoom_to_period_divisor(base_zoom: u32, periods: &[usize], tolerance: f64) -> u32 {
+    let base = base_zoom.max(1);
+    if periods.is_empty() || !tolerance.is_finite() || tolerance < 1.0 {
+        return base;
+    }
+
+    let mut common = 0usize;
+    for &period in periods.iter().filter(|&&p| p > 1) {
+        common = if common == 0 {
+            period
+        } else {
+            gcd_usize(common, period)
+        };
+    }
+    if common == 0 || common % base as usize == 0 {
+        return base;
+    }
+
+    let min_zoom = ((base as f64) / tolerance).ceil().max(1.0) as u32;
+    let max_zoom = ((base as f64) * tolerance).floor().max(base as f64) as u32;
+
+    let mut coarser: Option<u32> = None;
+    let mut finer: Option<u32> = None;
+    let limit = (common as f64).sqrt() as usize;
+    for d in 1..=limit {
+        if common % d != 0 {
+            continue;
+        }
+        for cand in [d, common / d] {
+            if cand == 0 || cand > u32::MAX as usize {
+                continue;
+            }
+            let z = cand as u32;
+            if z < min_zoom || z > max_zoom {
+                continue;
+            }
+            if z >= base {
+                if coarser.is_none_or(|best| z < best) {
+                    coarser = Some(z);
+                }
+            } else if finer.is_none_or(|best| z > best) {
+                finer = Some(z);
+            }
+        }
+    }
+
+    coarser.or(finer).unwrap_or(base)
+}
+
+fn gcd_usize(mut a: usize, mut b: usize) -> usize {
+    while b != 0 {
+        let r = a % b;
+        a = b;
+        b = r;
+    }
+    a
+}
+
 /// Resolved parameters for a completed dotplot. Mirrors `KarlinResult` plus
 /// the inputs that the user might not have specified.
 #[derive(Debug, Clone, Copy)]
@@ -283,10 +350,12 @@ pub fn compute_dotplot(
     };
     let window = match config.window_size {
         Some(w) => w,
-        None => karlin_result
-            .as_ref()
-            .expect("karlin_result is Some when window_size is None")
-            .window_size,
+        None => {
+            karlin_result
+                .as_ref()
+                .expect("karlin_result is Some when window_size is None")
+                .window_size
+        }
     };
     if window < 1 {
         return Err(DottirError::InvalidConfig(
@@ -401,8 +470,7 @@ pub fn compute_dotplot(
         let q_complement = complement_encoded(&q_encoded);
         let score_vec_rev = ScoreVec::build(&config.matrix, &q_complement);
         if config.separate_strand_channels {
-            let mut rm =
-                PixelMap::new_checked(width, height, config.memory_limit_bytes)?;
+            let mut rm = PixelMap::new_checked(width, height, config.memory_limit_bytes)?;
             {
                 let view = rm.view_mut();
                 run_pass(
@@ -628,10 +696,12 @@ fn compute_blastx(
     };
     let window = match config.window_size {
         Some(w) => w,
-        None => karlin_result
-            .as_ref()
-            .expect("karlin_result is Some when window_size is None")
-            .window_size,
+        None => {
+            karlin_result
+                .as_ref()
+                .expect("karlin_result is Some when window_size is None")
+                .window_size
+        }
     };
     if window < 1 {
         return Err(DottirError::InvalidConfig(

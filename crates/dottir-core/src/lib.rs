@@ -44,12 +44,10 @@ pub use error::DottirError;
 pub use karlin::{karlin_window_size, KarlinConfig, KarlinResult};
 pub use matrix::{BlastMode, ScoreMatrix};
 pub use plot::{
-    compute_dotplot, pick_auto_zoom, reverse_complement, DotPlot, PlotConfig, PlotParams, Strand,
-    Triangle,
+    compute_dotplot, pick_auto_zoom, reverse_complement, snap_zoom_to_period_divisor, DotPlot,
+    PlotConfig, PlotParams, Strand, Triangle,
 };
-pub use ridges::{
-    extract_ridges, extract_ridges_from_pixels, Ridge, RidgeDirection, RidgeParams,
-};
+pub use ridges::{extract_ridges, extract_ridges_from_pixels, Ridge, RidgeDirection, RidgeParams};
 
 /// Bumped whenever the algorithmic contract changes such that previously
 /// pinned golden pixelmaps must be regenerated. See CLAUDE.md.

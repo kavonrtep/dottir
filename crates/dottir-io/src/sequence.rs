@@ -96,6 +96,13 @@ impl Sequence {
         self.seq.is_empty()
     }
 
+    /// Return a repeat-period hint from record lengths, when the FASTA
+    /// contains multiple records. Equal-length repeat arrays return that
+    /// length; mixed lengths return their greatest common divisor.
+    pub fn record_period_hint(&self) -> Option<usize> {
+        record_period_hint(&self.records)
+    }
+
     /// Inter-record offsets in the concatenated buffer. The result has
     /// `records.len() - 1` entries — one per gap between adjacent
     /// records. Empty for single-record inputs. Used by spec §4.4.6
@@ -141,6 +148,31 @@ impl Sequence {
     pub fn detect_alphabet(&self) -> DetectedAlphabet {
         detect_alphabet(&self.seq)
     }
+}
+
+/// Return a repeat-period hint from record lengths, when useful.
+pub fn record_period_hint(records: &[RecordSpan]) -> Option<usize> {
+    if records.len() < 2 {
+        return None;
+    }
+    let mut period = 0usize;
+    for len in records.iter().map(RecordSpan::len).filter(|&len| len > 0) {
+        period = if period == 0 {
+            len
+        } else {
+            gcd_usize(period, len)
+        };
+    }
+    (period > 1).then_some(period)
+}
+
+fn gcd_usize(mut a: usize, mut b: usize) -> usize {
+    while b != 0 {
+        let r = a % b;
+        a = b;
+        b = r;
+    }
+    a
 }
 
 /// Result of [`Sequence::detect_alphabet`] / [`detect_alphabet`].
@@ -218,6 +250,21 @@ mod tests {
     fn breaks_empty_for_single_record() {
         let s = Sequence::from_records(vec![rec("only", b"ACGT")], None);
         assert!(s.breaks().is_empty());
+    }
+
+    #[test]
+    fn record_period_hint_uses_equal_record_length() {
+        let s = Sequence::from_records(
+            vec![rec("a", b"AAAA"), rec("b", b"CCCC"), rec("c", b"GGGG")],
+            None,
+        );
+        assert_eq!(s.record_period_hint(), Some(4));
+    }
+
+    #[test]
+    fn record_period_hint_uses_gcd_for_mixed_lengths() {
+        let s = Sequence::from_records(vec![rec("a", b"AAAAAA"), rec("b", b"CCCCCCCCC")], None);
+        assert_eq!(s.record_period_hint(), Some(3));
     }
 
     #[test]

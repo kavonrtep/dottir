@@ -655,6 +655,100 @@ pub fn resize_nearest(pixels: &[u8], src_w: u32, src_h: u32, dst_w: u32) -> (Vec
     (out, dst_w, dst_h)
 }
 
+/// Downsample a residue-resolution pixelmap tile-by-tile using FASTA record
+/// boundaries and a max reducer.
+///
+/// This is intended for repeat-uniform display/export rasters. Each
+/// record-vs-record tile is sampled in tile-local coordinates, so identical
+/// records get identical sampling phase even when `target_zoom` does not divide
+/// the record length. The input is expected to be the authoritative raw
+/// pixelmap at `zoom=1` (`src_w == total query residues`, `src_h == total
+/// subject residues`). The returned pixels are still raw dotplot values, not
+/// inverted display greys.
+pub fn downsample_record_tiles_max(
+    pixels: &[u8],
+    src_w: u32,
+    src_h: u32,
+    target_zoom: u32,
+    x_records: &[crate::sequence::RecordSpan],
+    y_records: &[crate::sequence::RecordSpan],
+) -> Option<(Vec<u8>, u32, u32)> {
+    let z = target_zoom.max(1) as usize;
+    let src_w_us = src_w as usize;
+    let src_h_us = src_h as usize;
+    if pixels.len() != src_w_us.checked_mul(src_h_us)?
+        || x_records.is_empty()
+        || y_records.is_empty()
+    {
+        return None;
+    }
+    if x_records.last()?.range.end > src_w_us || y_records.last()?.range.end > src_h_us {
+        return None;
+    }
+
+    let x_widths: Vec<usize> = x_records
+        .iter()
+        .map(|r| r.len().div_ceil(z).max(1))
+        .collect();
+    let y_heights: Vec<usize> = y_records
+        .iter()
+        .map(|r| r.len().div_ceil(z).max(1))
+        .collect();
+    let dst_w_us: usize = x_widths.iter().sum();
+    let dst_h_us: usize = y_heights.iter().sum();
+    if dst_w_us == 0
+        || dst_h_us == 0
+        || dst_w_us > u32::MAX as usize
+        || dst_h_us > u32::MAX as usize
+    {
+        return None;
+    }
+
+    let mut x_offsets = Vec::with_capacity(x_widths.len());
+    let mut acc = 0usize;
+    for &w in &x_widths {
+        x_offsets.push(acc);
+        acc += w;
+    }
+    let mut y_offsets = Vec::with_capacity(y_heights.len());
+    acc = 0;
+    for &h in &y_heights {
+        y_offsets.push(acc);
+        acc += h;
+    }
+
+    let mut out = vec![0_u8; dst_w_us * dst_h_us];
+    for (yr_i, yr) in y_records.iter().enumerate() {
+        let tile_h = y_heights[yr_i];
+        let dst_y0 = y_offsets[yr_i];
+        for (xr_i, xr) in x_records.iter().enumerate() {
+            let tile_w = x_widths[xr_i];
+            let dst_x0 = x_offsets[xr_i];
+            for ty in 0..tile_h {
+                let sy0 = yr.range.start + ty * z;
+                let sy1 = (sy0 + z).min(yr.range.end);
+                for tx in 0..tile_w {
+                    let sx0 = xr.range.start + tx * z;
+                    let sx1 = (sx0 + z).min(xr.range.end);
+                    let mut max_v = 0_u8;
+                    for sy in sy0..sy1 {
+                        let src_row = sy * src_w_us;
+                        for sx in sx0..sx1 {
+                            let v = pixels[src_row + sx];
+                            if v > max_v {
+                                max_v = v;
+                            }
+                        }
+                    }
+                    out[(dst_y0 + ty) * dst_w_us + dst_x0 + tx] = max_v;
+                }
+            }
+        }
+    }
+
+    Some((out, dst_w_us as u32, dst_h_us as u32))
+}
+
 /// Invert a greyscale pixelmap in place: `v = 255 - v`. Turns the raw
 /// "0 = no hit (black), 255 = strong hit (white)" output from
 /// `compute_dotplot` into the analysis-friendly "white background,
@@ -675,6 +769,60 @@ pub fn inverted(pixels: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn record_tile_downsample_uses_tile_local_phase() {
+        use crate::sequence::RecordSpan;
+
+        let records = vec![
+            RecordSpan {
+                id: "a".into(),
+                description: None,
+                range: 0..10,
+            },
+            RecordSpan {
+                id: "b".into(),
+                description: None,
+                range: 10..20,
+            },
+        ];
+        let mut pixels = vec![0_u8; 20 * 20];
+        for yr in &records {
+            for xr in &records {
+                for k in 0..10 {
+                    pixels[(yr.range.start + k) * 20 + xr.range.start + k] = 200;
+                }
+            }
+        }
+
+        let (out, w, h) = downsample_record_tiles_max(&pixels, 20, 20, 6, &records, &records)
+            .expect("valid tile downsample");
+        assert_eq!((w, h), (4, 4));
+        let top_left = [out[0], out[1], out[4], out[5]];
+        for tile_y in 0..2 {
+            for tile_x in 0..2 {
+                let base = tile_y * 2 * w as usize + tile_x * 2;
+                let got = [
+                    out[base],
+                    out[base + 1],
+                    out[base + w as usize],
+                    out[base + w as usize + 1],
+                ];
+                assert_eq!(got, top_left);
+            }
+        }
+    }
+
+    #[test]
+    fn record_tile_downsample_rejects_bad_dimensions() {
+        use crate::sequence::RecordSpan;
+        let records = vec![RecordSpan {
+            id: "a".into(),
+            description: None,
+            range: 0..10,
+        }];
+        assert!(downsample_record_tiles_max(&[0; 10], 20, 20, 5, &records, &records).is_none());
+    }
 
     #[test]
     fn inversion_round_trips() {

@@ -10,8 +10,8 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 
 use dottir_core::{
-    compute_dotplot, pick_auto_zoom, BlastMode, PlotConfig, ScoreMatrix, Strand, Triangle,
-    PIXELMAP_FORMAT_VERSION,
+    compute_dotplot, pick_auto_zoom, snap_zoom_to_period_divisor, BlastMode, PlotConfig,
+    ScoreMatrix, Strand, Triangle, PIXELMAP_FORMAT_VERSION,
 };
 use dottir_io::{
     fasta,
@@ -115,9 +115,17 @@ struct BatchArgs {
 
     /// If set, automatically pick `zoom` so the largest output dimension
     /// is at most this. Avoids surprise OOMs on large inputs
-    /// (spec §4.4.8).
+    /// (spec §4.4.8). Multi-record repeat arrays may snap to a nearby
+    /// divisor zoom so identical records tile uniformly.
     #[arg(long, value_name = "PIXELS")]
     auto_zoom: Option<u32>,
+
+    /// Render PNG/SVG from a boundary-aware normalized raster. This computes
+    /// a zoom=1 source pixelmap, then downsamples each FASTA record tile in
+    /// tile-local coordinates. The `.dot` export remains the authoritative
+    /// Dotter-style pixelmap at `--zoom` / `--auto-zoom`.
+    #[arg(long, default_value_t = false)]
+    repeat_uniform_rendering: bool,
 
     /// Skip writing the `.params.toml` sidecar.
     #[arg(long, default_value_t = false)]
@@ -235,8 +243,21 @@ fn run_batch(args: BatchArgs) -> Result<()> {
     );
 
     // auto-zoom: pick zoom so max(qlen, slen) / zoom <= auto_zoom.
+    // For repeat arrays, snap to a nearby record-period divisor so
+    // identical records land on the same pixel phase.
+    let period_hints = zoom_period_hints(&query, &subject, is_self_comparison);
     let zoom = match args.auto_zoom {
-        Some(target) => pick_auto_zoom(query.len(), subject.len(), target),
+        Some(target) => {
+            let base = pick_auto_zoom(query.len(), subject.len(), target);
+            let snapped = snap_zoom_to_period_divisor(base, &period_hints, 2.0);
+            if snapped != base {
+                tracing::info!(
+                    "auto_zoom snapped zoom {base} -> {snapped} using period hints {:?}",
+                    period_hints
+                );
+            }
+            snapped
+        }
         None => args.zoom,
     };
     if zoom != args.zoom {
@@ -300,18 +321,65 @@ fn run_batch(args: BatchArgs) -> Result<()> {
         plot.params.pixel_fac, // resolved value (may differ from cfg if auto)
         cfg.strand
     );
-    let text_chunks = [
-        ("dottir-version", dottir_version),
+    let pixelmap_format_version = PIXELMAP_FORMAT_VERSION.to_string();
+    let mut text_chunks = vec![
+        ("dottir-version".to_string(), dottir_version.to_string()),
         (
-            "dottir-pixelmap-format-version",
-            &PIXELMAP_FORMAT_VERSION.to_string(),
+            "dottir-pixelmap-format-version".to_string(),
+            pixelmap_format_version,
         ),
-        ("dottir-parameters", &resolved),
+        ("dottir-parameters".to_string(), resolved),
     ];
-    let text_chunk_refs: Vec<(&str, &str)> =
-        text_chunks.iter().map(|(a, b)| (*a, *b as &str)).collect();
 
-    // Resize the pixelmap to the requested PNG width (preserving
+    let (render_pixels, render_w, render_h) = if args.repeat_uniform_rendering {
+        let mut render_cfg = cfg.clone();
+        render_cfg.zoom = 1;
+        tracing::info!("repeat-uniform rendering: computing zoom=1 source raster");
+        let source_plot = if plot.params.zoom == 1 {
+            plot.clone()
+        } else {
+            compute_dotplot(query.bytes(), subject.bytes(), &render_cfg)
+                .context("repeat-uniform zoom=1 compute_dotplot failed")?
+        };
+        match dottir_io::text_overlay::downsample_record_tiles_max(
+            &source_plot.pixels,
+            source_plot.width,
+            source_plot.height,
+            cfg.zoom,
+            &query.records,
+            &subject.records,
+        ) {
+            Some((pixels, w, h)) => {
+                tracing::info!(
+                    "repeat-uniform rendering downsampled {}x{} -> {}x{} at zoom {}",
+                    source_plot.width,
+                    source_plot.height,
+                    w,
+                    h,
+                    cfg.zoom
+                );
+                text_chunks.push((
+                    "dottir-rendering".to_string(),
+                    "repeat-uniform-boundary-aware".to_string(),
+                ));
+                (pixels, w, h)
+            }
+            None => {
+                tracing::warn!(
+                    "repeat-uniform rendering unavailable; using authoritative pixelmap"
+                );
+                (plot.pixels.clone(), plot.width, plot.height)
+            }
+        }
+    } else {
+        (plot.pixels.clone(), plot.width, plot.height)
+    };
+    let text_chunk_refs: Vec<(&str, &str)> = text_chunks
+        .iter()
+        .map(|(a, b)| (a.as_str(), b.as_str()))
+        .collect();
+
+    // Resize the render pixelmap to the requested PNG width (preserving
     // aspect ratio). `--width 0` is the opt-out. Cap at a generous
     // upper bound so a stray digit can't OOM. SVG keeps the native
     // resolution (SVG renderers scale themselves).
@@ -321,15 +389,15 @@ fn run_batch(args: BatchArgs) -> Result<()> {
         tracing::warn!("PNG width {} clamped to {MAX_PNG_WIDTH}", args.width);
     }
     let (png_pixels, png_w, png_h) = if requested_w > 0 {
-        dottir_io::text_overlay::resize_nearest(&plot.pixels, plot.width, plot.height, requested_w)
+        dottir_io::text_overlay::resize_nearest(&render_pixels, render_w, render_h, requested_w)
     } else {
-        (plot.pixels.clone(), plot.width, plot.height)
+        (render_pixels.clone(), render_w, render_h)
     };
-    if png_w != plot.width {
+    if png_w != render_w {
         tracing::info!(
-            "PNG resized {}×{} → {}×{} (--width {})",
-            plot.width,
-            plot.height,
+            "PNG resized {}x{} -> {}x{} (--width {})",
+            render_w,
+            render_h,
             png_w,
             png_h,
             args.width
@@ -389,9 +457,9 @@ fn run_batch(args: BatchArgs) -> Result<()> {
     if let Some(svg_path) = &args.svg {
         dottir_io::svg_export::write_svg(
             svg_path,
-            plot.width,
-            plot.height,
-            &plot.pixels,
+            render_w,
+            render_h,
+            &render_pixels,
             png_margin,
             &axis_records_x,
             &axis_records_y,
@@ -511,6 +579,20 @@ fn input_info(
         n_records: recs.len(),
         total_residues: sequence.len(),
     })
+}
+
+fn zoom_period_hints(
+    query: &dottir_io::Sequence,
+    subject: &dottir_io::Sequence,
+    is_self_comparison: bool,
+) -> Vec<usize> {
+    if is_self_comparison {
+        return query.record_period_hint().into_iter().collect();
+    }
+    match (query.record_period_hint(), subject.record_period_hint()) {
+        (Some(q), Some(s)) => vec![q, s],
+        _ => Vec::new(),
+    }
 }
 
 fn sidecar_path(output: &Path) -> PathBuf {

@@ -3,8 +3,8 @@
 use std::path::PathBuf;
 
 use dottir_core::{
-    extract_ridges_from_pixels, BlastMode, DotPlot, PlotConfig, Ridge, RidgeDirection,
-    RidgeParams, ScoreMatrix, Strand, Triangle,
+    extract_ridges_from_pixels, snap_zoom_to_period_divisor, BlastMode, DotPlot, PlotConfig, Ridge,
+    RidgeDirection, RidgeParams, ScoreMatrix, Strand, Triangle,
 };
 use dottir_io::{DetectedAlphabet, Sequence};
 use egui::{
@@ -585,7 +585,28 @@ impl DottirApp {
         let log_h = (plot_h as f64).max(1.0);
         let zoom_q = (q.len() as f64 / log_w).ceil() as u32;
         let zoom_s = (s.len() as f64 / log_h).ceil() as u32;
-        Some(zoom_q.max(zoom_s).max(1))
+        let base = zoom_q.max(zoom_s).max(1);
+        Some(snap_zoom_to_period_divisor(
+            base,
+            &self.zoom_period_hints(),
+            2.0,
+        ))
+    }
+
+    fn zoom_period_hints(&self) -> Vec<usize> {
+        let Some(q) = self.query.as_ref() else {
+            return Vec::new();
+        };
+        let Some(s) = self.subject.as_ref() else {
+            return Vec::new();
+        };
+        if self.settings.self_comparison {
+            return q.record_period_hint().into_iter().collect();
+        }
+        match (q.record_period_hint(), s.record_period_hint()) {
+            (Some(qp), Some(sp)) => vec![qp, sp],
+            _ => Vec::new(),
+        }
     }
 
     fn maybe_apply_auto_zoom(&mut self) -> bool {
@@ -601,7 +622,8 @@ impl DottirApp {
             let (pw, ph) = self.measured_plot_area.unwrap_or((0.0, 0.0));
             tracing::info!(
                 "auto-fit: zoom = {new_zoom} \
-                 (qlen={qlen}, slen={slen}, plot={pw:.0}×{ph:.0} logical)",
+                 (qlen={qlen}, slen={slen}, plot={pw:.0}x{ph:.0} logical, periods={:?})",
+                self.zoom_period_hints(),
             );
             self.settings.zoom = new_zoom;
         }
