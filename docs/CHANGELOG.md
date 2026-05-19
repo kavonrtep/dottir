@@ -5,7 +5,84 @@ All notable changes to dottir are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.0] - 2026-05-19
+
+### Added
+
+* New `dottir-render` crate — pure, GUI-free rendering pipeline with
+  a tandem-repeat fidelity fixture and a `long_horizontal_runs`
+  metric. The `RenderPolicy` enum lets candidate rendering fixes be
+  graded numerically against synthetic data instead of GUI
+  screenshots.
+* GUI: rectangle-select discrete zoom with history stack
+  (middle-drag for selection, Esc/Backspace for Back), single-residue
+  keyboard crosshair nudge in absolute residue coords (Shift = ×10,
+  Ctrl = ×100), double-click 2× zoom, and an explicit Fit button.
+* GUI: vector ridge overlay — anti-aliased line segments over
+  coherent diagonal runs in the raster, with a single-click toggle
+  in the side panel.
+* GUI: integer-pixel pan snap (texel-aligned, no sub-pixel sampling
+  phase).
+* PNG export now includes margins, axis ticks, labels, and
+  multi-record sequence names (matches the SVG / CLI output).
+* Minor (unlabeled) ticks at step/5 between every labelled tick —
+  in the GUI and in PNG/SVG exports.
+* Documentation: `docs/reviews/dotter-sizing-model.md` (read of
+  C dotter's sizing model) and
+  `docs/reviews/gui-nearest-upscale-jaggedness.md` (resampling
+  artifact analysis and severity framing).
+* CLAUDE.md note on the hermit sandbox; `hermit/` tree ignored.
+
+### Changed
+
+* **GUI render path: the pixmap is now sized to the *physical*
+  canvas (one texture texel = one physical framebuffer pixel)**
+  instead of the logical canvas. Fixes the diagonal-staircase
+  artifact on HiDPI / fractional display scales that injected
+  false jogs into pure-diagonal regions — a correctness problem
+  since it generated false positives for exactly the indel
+  patterns dotplot users scan for. See Option C in
+  `docs/reviews/dotter-sizing-model.md`. Cost: pixmap memory and
+  compute time scale as `pixels_per_point²` (~2.25× at 1.5×,
+  4× at 2×).
+* Sequences are now sliced on rect-zoom — compute runs only on
+  the selection plus margin instead of the full input, dropping
+  recompute cost on deeply-zoomed views.
+* Peak memory cut ~3–10× via auto-zoom on load, peak-preserving
+  max-pool texture downsample at fit-zoom, and a bounded-memory
+  parallel pixelmap allocation that shares one atomic buffer
+  across all rayon workers.
+* Compute uses auto `pixel_fac`, a bigger pixelmap, and an
+  adaptive sampler — intensity output now matches C dotter.
+* Axis labels use one decimal in the 1k–10k range so adjacent
+  ticks are distinguishable (`9.0k / 9.1k / 9.2k` instead of
+  three `9k`s). Both GUI and exports.
+* Default greyramp restored to dotter's 40/100; ridge overlay
+  default off.
+* **API change in `dottir-io`**:
+  `png_export::write_grayscale_png_with_axes` and
+  `svg_export::write_svg` now take an explicit
+  `invert_pixels: bool` parameter. CLI callers pass `true`
+  (raw kernel input → invert); GUI callers pass `false`
+  (greyramp-mapped input is already in display space).
+
+### Fixed
+
+* SVG export was double-inverting greyramp-mapped pixels — the
+  output was flipped relative to the GUI screen. Now matches.
+* Scroll-wheel zoom drift on cursor — zoom now stays centred on
+  the cursor instead of pulling the view sideways.
+* Initial view shows the full data at fit zoom instead of an
+  arbitrary zoomed-in portion.
+* Crosshair off-by-one at certain compute zoom levels.
+* Crosshair coord label background is now transparent so it
+  doesn't occlude dotplot diagonals underneath.
+
+## [0.1.2]
+
+> Legacy bundled entry for the 0.1.x line (no per-version history was
+> kept). The list below documents the state at the v0.1.2 tag; split
+> per-release later if useful.
 
 ### Added
 

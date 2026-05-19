@@ -866,7 +866,7 @@ dependencies = [
 
 [[package]]
 name = "dottir-cli"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -878,7 +878,7 @@ dependencies = [
 
 [[package]]
 name = "dottir-core"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "proptest",
  "rayon",
@@ -888,7 +888,7 @@ dependencies = [
 
 [[package]]
 name = "dottir-gui"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -906,7 +906,7 @@ dependencies = [
 
 [[package]]
 name = "dottir-io"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -922,7 +922,7 @@ dependencies = [
 
 [[package]]
 name = "dottir-render"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "dottir-core",
 ]
