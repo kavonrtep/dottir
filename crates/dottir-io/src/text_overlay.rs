@@ -344,6 +344,28 @@ pub fn compose_image_with_axes(
         .ceil()
         .max(1.0) as u32;
     let step_x = nice_tick_step(coord_w_safe as u64, min_coord_step_x);
+    // Minor ticks (no labels) at step/5 — four subdivisions between
+    // each labelled tick. Drawn first; the longer labelled ticks
+    // paint on top.
+    let minor_step_x = step_x / 5;
+    if minor_step_x >= 1 {
+        let mut t = 0_u64;
+        while t <= coord_w_safe as u64 {
+            let x = m + (t as f64 * px_per_coord_x).round() as usize;
+            if x >= stride_out {
+                break;
+            }
+            draw_vline(
+                &mut canvas,
+                stride_out,
+                x,
+                top.saturating_sub(3),
+                top,
+                frame_ink,
+            );
+            t = t.saturating_add(minor_step_x);
+        }
+    }
     let mut t = 0_u64;
     while t <= coord_w_safe as u64 {
         let x = m + (t as f64 * px_per_coord_x).round() as usize;
@@ -375,6 +397,25 @@ pub fn compose_image_with_axes(
     }
     // Left axis (subject).
     let step_y = nice_tick_step(coord_h_safe as u64, min_coord_step_y);
+    let minor_step_y = step_y / 5;
+    if minor_step_y >= 1 {
+        let mut t = 0_u64;
+        while t <= coord_h_safe as u64 {
+            let y = m + (t as f64 * px_per_coord_y).round() as usize;
+            if y >= total_h as usize {
+                break;
+            }
+            draw_hline(
+                &mut canvas,
+                stride_out,
+                left.saturating_sub(3),
+                left,
+                y,
+                frame_ink,
+            );
+            t = t.saturating_add(minor_step_y);
+        }
+    }
     let mut t = 0_u64;
     while t <= coord_h_safe as u64 {
         let y = m + (t as f64 * px_per_coord_y).round() as usize;

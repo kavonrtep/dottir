@@ -115,8 +115,24 @@ pub fn write_svg<P: AsRef<Path>>(
          fill=\"none\" stroke=\"#444\" stroke-width=\"1\"/>"
     )?;
 
-    // Top-axis ticks.
+    // Top-axis ticks. Minor (unlabeled, 3 px) at step/5; major
+    // (labelled, 6 px) at step. Minor drawn first so major paints on
+    // top.
     let step_x = nice_step(width as u64);
+    let minor_step_x = step_x / 5;
+    if minor_step_x >= 1 {
+        let mut t = 0u64;
+        while t <= width as u64 {
+            let x = margin + t as u32;
+            writeln!(
+                w,
+                "  <line x1=\"{x}\" y1=\"{}\" x2=\"{x}\" y2=\"{}\" stroke=\"#444\" stroke-width=\"1\"/>",
+                margin,
+                margin.saturating_sub(3),
+            )?;
+            t += minor_step_x;
+        }
+    }
     let mut t = 0u64;
     while t <= width as u64 {
         let x = margin + t as u32;
@@ -137,6 +153,20 @@ pub fn write_svg<P: AsRef<Path>>(
     }
     // Left-axis ticks.
     let step_y = nice_step(height as u64);
+    let minor_step_y = step_y / 5;
+    if minor_step_y >= 1 {
+        let mut t = 0u64;
+        while t <= height as u64 {
+            let y = margin + t as u32;
+            writeln!(
+                w,
+                "  <line x1=\"{}\" y1=\"{y}\" x2=\"{}\" y2=\"{y}\" stroke=\"#444\" stroke-width=\"1\"/>",
+                margin,
+                margin.saturating_sub(3),
+            )?;
+            t += minor_step_y;
+        }
+    }
     let mut t = 0u64;
     while t <= height as u64 {
         let y = margin + t as u32;
@@ -242,15 +272,7 @@ fn nice_step(span: u64) -> u64 {
     base.max(1)
 }
 
-fn format_kb(n: u64) -> String {
-    if n >= 1_000_000 {
-        format!("{:.1}M", n as f64 / 1_000_000.0)
-    } else if n >= 1_000 {
-        format!("{}k", n / 1_000)
-    } else {
-        format!("{n}")
-    }
-}
+use crate::text_overlay::format_kb;
 
 #[cfg(test)]
 mod tests {
