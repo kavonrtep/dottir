@@ -2810,8 +2810,7 @@ impl DottirApp {
             let mut t = (seq_s_lo / minor_step_y) * minor_step_y;
             while t < seq_s_hi.saturating_add(minor_step_y) {
                 if t >= seq_s_lo && t <= seq_s_hi {
-                    let sy =
-                        plot_area.top() + (t - s_off) as f32 / (zoom_us * ppp) - draw_offset.y;
+                    let sy = plot_area.top() + (t - s_off) as f32 / (zoom_us * ppp) - draw_offset.y;
                     if sy >= plot_area.top() - 1.0 && sy <= plot_area.bottom() + 1.0 {
                         painter.line_segment(
                             [
@@ -3679,6 +3678,7 @@ fn save_svg(app: &mut DottirApp) {
                 ("greyramp-white", &app.greyramp.white.to_string()),
                 ("greyramp-black", &app.greyramp.black.to_string()),
             ],
+            false, // mapped is already in display space (greyramp applied)
         ) {
             Ok(()) => {}
             Err(e) => app.last_error = Some(format!("SVG save failed: {e}")),
@@ -3841,16 +3841,71 @@ fn save_png(app: &mut DottirApp) {
         // Apply the greyramp LUT before saving so the on-disk image
         // matches what's on screen.
         let mapped: Vec<u8> = plot.pixels.iter().map(|&v| lut[v as usize]).collect();
-        match dottir_io::png_export::write_grayscale_png(
+        let recs_x: Vec<_> = app
+            .query
+            .as_ref()
+            .map(|q| {
+                q.records
+                    .iter()
+                    .map(|r| {
+                        dottir_io::text_overlay::AxisRecord::new(
+                            r.id.clone(),
+                            r.range.start as u32,
+                            r.range.end as u32,
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let recs_y: Vec<_> = app
+            .subject
+            .as_ref()
+            .map(|s| {
+                s.records
+                    .iter()
+                    .map(|r| {
+                        dottir_io::text_overlay::AxisRecord::new(
+                            r.id.clone(),
+                            r.range.start as u32,
+                            r.range.end as u32,
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        // Bigger margin when we have record names so the extra label
+        // row above the ticks has breathing room (matches CLI).
+        let margin = if recs_x.len() > 1 || recs_y.len() > 1 {
+            70
+        } else {
+            50
+        };
+        let qlen = app
+            .query
+            .as_ref()
+            .map(|q| q.len() as u32)
+            .unwrap_or(plot.width);
+        let slen = app
+            .subject
+            .as_ref()
+            .map(|s| s.len() as u32)
+            .unwrap_or(plot.height);
+        match dottir_io::png_export::write_grayscale_png_with_axes(
             &path,
             plot.width,
             plot.height,
+            qlen,
+            slen,
             &mapped,
+            margin,
+            &recs_x,
+            &recs_y,
             &[
                 ("dottir-gui", env!("CARGO_PKG_VERSION")),
                 ("greyramp-white", &app.greyramp.white.to_string()),
                 ("greyramp-black", &app.greyramp.black.to_string()),
             ],
+            false, // mapped is already in display space (greyramp applied)
         ) {
             Ok(()) => {}
             Err(e) => app.last_error = Some(format!("PNG save failed: {e}")),

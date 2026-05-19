@@ -22,10 +22,14 @@ pub enum PngError {
 }
 
 /// Write a greyscale 8-bit PNG with a margin, axis ticks, and
-/// numeric labels around the pixelmap. The input `pixels` is
-/// inverted on the way out (raw kernel output is "0 = no hit", we
-/// emit "no hit = white") so the result is the analysis-friendly
-/// light-background plot.
+/// numeric labels around the pixelmap.
+///
+/// `invert_pixels = true` flips the input via `255 - v` before
+/// composing — pass `true` when the caller is handing in raw kernel
+/// output (0 = no hit / black) and wants the analysis-conventional
+/// "white background, dark hits" look; pass `false` when the caller
+/// has already mapped through a greyramp LUT (so the pixels are
+/// already in display space and should be written as-is).
 ///
 /// `coord_w` and `coord_h` are the coordinate-space dimensions
 /// shown along the axes (typically the input sequence lengths in
@@ -45,6 +49,7 @@ pub fn write_grayscale_png_with_axes<P: AsRef<Path>>(
     axis_records_x: &[crate::text_overlay::AxisRecord],
     axis_records_y: &[crate::text_overlay::AxisRecord],
     text_chunks: &[(&str, &str)],
+    invert_pixels: bool,
 ) -> Result<(), PngError> {
     if pixels.len() != (width as usize).saturating_mul(height as usize) {
         return Err(PngError::DimensionMismatch {
@@ -53,9 +58,13 @@ pub fn write_grayscale_png_with_axes<P: AsRef<Path>>(
             len: pixels.len(),
         });
     }
-    let inverted = crate::text_overlay::inverted(pixels);
+    let composed_input: std::borrow::Cow<'_, [u8]> = if invert_pixels {
+        std::borrow::Cow::Owned(crate::text_overlay::inverted(pixels))
+    } else {
+        std::borrow::Cow::Borrowed(pixels)
+    };
     let (canvas, total_w, total_h) = crate::text_overlay::compose_image_with_axes(
-        &inverted,
+        &composed_input,
         width,
         height,
         coord_w,

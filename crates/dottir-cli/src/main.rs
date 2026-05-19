@@ -451,6 +451,7 @@ fn run_batch(args: BatchArgs) -> Result<()> {
         &axis_records_x,
         &axis_records_y,
         &text_chunk_refs,
+        true, // raw kernel output → invert for "white bg, dark hits"
     )?;
     tracing::info!("wrote {}", args.output.display());
 
@@ -464,6 +465,7 @@ fn run_batch(args: BatchArgs) -> Result<()> {
             &axis_records_x,
             &axis_records_y,
             &text_chunk_refs,
+            true, // raw kernel output → invert for "white bg, dark hits"
         )
         .context("SVG export failed")?;
         tracing::info!("wrote {}", svg_path.display());

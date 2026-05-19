@@ -35,6 +35,13 @@ pub enum SvgError {
 /// `metadata` is an optional list of (key, value) pairs included as
 /// `<dottir:KEY>VALUE</dottir:KEY>` elements inside the SVG
 /// `<metadata>` block. Mirror what the PNG `tEXt` writer accepts.
+///
+/// `invert_pixels = true` flips the input via `255 - v` before
+/// encoding — pass `true` when the caller is handing in raw kernel
+/// output (0 = no hit / black) and wants the analysis-conventional
+/// "white background, dark hits" look; pass `false` when the caller
+/// has already mapped through a greyramp LUT (so the pixels are
+/// already in display space and should be written as-is).
 #[allow(clippy::too_many_arguments)]
 pub fn write_svg<P: AsRef<Path>>(
     path: P,
@@ -45,6 +52,7 @@ pub fn write_svg<P: AsRef<Path>>(
     axis_records_x: &[crate::text_overlay::AxisRecord],
     axis_records_y: &[crate::text_overlay::AxisRecord],
     metadata: &[(&str, &str)],
+    invert_pixels: bool,
 ) -> Result<(), SvgError> {
     if pixels.len() != (width as usize) * (height as usize) {
         return Err(SvgError::DimensionMismatch {
@@ -54,18 +62,19 @@ pub fn write_svg<P: AsRef<Path>>(
         });
     }
 
-    // Invert before encoding: raw kernel output uses 0 = no hit
-    // (black), but SVG viewers expect the analysis-conventional
-    // "white background, dark hits" look.
-    let inverted = crate::text_overlay::inverted(pixels);
-    let mut png_buf = Vec::with_capacity(inverted.len() + 1024);
+    let png_input: std::borrow::Cow<'_, [u8]> = if invert_pixels {
+        std::borrow::Cow::Owned(crate::text_overlay::inverted(pixels))
+    } else {
+        std::borrow::Cow::Borrowed(pixels)
+    };
+    let mut png_buf = Vec::with_capacity(png_input.len() + 1024);
     {
         let cursor = Cursor::new(&mut png_buf);
         let mut encoder = png::Encoder::new(cursor, width, height);
         encoder.set_color(png::ColorType::Grayscale);
         encoder.set_depth(png::BitDepth::Eight);
         let mut writer = encoder.write_header()?;
-        writer.write_image_data(&inverted)?;
+        writer.write_image_data(&png_input)?;
     }
     let png_b64 = base64::engine::general_purpose::STANDARD.encode(&png_buf);
 
@@ -292,6 +301,7 @@ mod tests {
             &[],
             &[],
             &[("matrix", "BLOSUM62"), ("window", "25")],
+            true,
         )
         .unwrap();
         let s = std::fs::read_to_string(&path).unwrap();
@@ -306,7 +316,7 @@ mod tests {
     fn dimension_mismatch_errors() {
         let dir = std::env::temp_dir();
         let path = dir.join("dottir_svg_test_mismatch.svg");
-        let err = write_svg(&path, 10, 10, &[0_u8; 50], 30, &[], &[], &[]).unwrap_err();
+        let err = write_svg(&path, 10, 10, &[0_u8; 50], 30, &[], &[], &[], true).unwrap_err();
         assert!(matches!(err, SvgError::DimensionMismatch { .. }));
     }
 
