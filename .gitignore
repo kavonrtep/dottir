@@ -30,3 +30,6 @@ tmp/
 
 # continer setting
 hermit
+
+# External tool clone (for combined-pipeline exploration)
+kitehor/
