@@ -39,6 +39,7 @@ pub mod plot;
 pub mod ridges;
 pub mod score_vec;
 pub mod sliding;
+pub mod spectrum;
 pub mod translation;
 
 pub use error::DottirError;
@@ -53,6 +54,7 @@ pub use plot::{
     PlotConfig, PlotParams, Strand, Triangle,
 };
 pub use ridges::{extract_ridges, extract_ridges_from_pixels, Ridge, RidgeDirection, RidgeParams};
+pub use spectrum::{spectrum_of_signal, DetrendMode, Spectrum, SpectrumConfig, WindowFn};
 
 /// Bumped whenever the algorithmic contract changes such that previously
 /// pinned golden pixelmaps must be regenerated. See CLAUDE.md.
