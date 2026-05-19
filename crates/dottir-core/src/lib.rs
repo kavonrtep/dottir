@@ -31,6 +31,7 @@
 pub mod alphabet;
 pub mod antidiag;
 pub mod error;
+pub mod find_peaks;
 pub mod karlin;
 pub mod matrix;
 pub mod periodogram;
@@ -43,6 +44,10 @@ pub mod spectrum;
 pub mod translation;
 
 pub use error::DottirError;
+pub use find_peaks::{
+    find_peaks_in_periodogram, find_peaks_in_spectrum, HarmonicDirection, Peak, PeakKind,
+    PeaksConfig, SubrepeatConfig,
+};
 pub use karlin::{karlin_window_size, KarlinConfig, KarlinResult};
 pub use matrix::{BlastMode, ScoreMatrix};
 pub use periodogram::{
