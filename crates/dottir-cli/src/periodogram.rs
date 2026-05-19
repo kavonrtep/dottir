@@ -107,10 +107,15 @@ pub struct PeriodogramArgs {
     pub fft: Option<PathBuf>,
 
     /// Which periodogram column to feed into the FFT.
-    /// `z_score` is denoised (recommended). `signal_mean` keeps the
-    /// raw spectral shape, including any low-amplitude periodic
-    /// baseline. Ignored when `--fft` is not set.
-    #[arg(long, value_enum, default_value_t = FftInputArg::ZScore)]
+    /// `signal_mean` (default) is the raw periodogram shape —
+    /// robust regardless of z-score mode, and the right choice
+    /// for analytical z-score (where the z_score column has
+    /// uniformly-inflated noise that would FFT into spurious
+    /// short-period peaks). `z_score` remains available for users
+    /// who deliberately want denoised input; it's only meaningful
+    /// when the source used empirical z-score. Ignored when `--fft`
+    /// is not set.
+    #[arg(long, value_enum, default_value_t = FftInputArg::SignalMean)]
     pub fft_input: FftInputArg,
 
     /// Number of local-maximum bins to mark with a rank in the FFT
@@ -130,13 +135,14 @@ pub enum ZScoreModeArg {
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
 pub enum FftInputArg {
-    /// Per-bin z-score (default). Pre-denoised — peaks in the FFT
-    /// correspond to periodic structure above noise.
-    ZScore,
-    /// Per-bin signal mean = `signal_sum / n_pairs`. Raw spectral
-    /// shape; picks up periodic structure including low-amplitude
-    /// baselines.
+    /// Per-bin signal mean = `signal_sum / n_pairs`. Default.
+    /// Robust regardless of z-score mode — the raw spectral shape.
     SignalMean,
+    /// Per-bin z-score. Only meaningful when source used
+    /// `--z-score empirical` (clean z). Under analytical mode the
+    /// z_score column has uniformly-inflated noise that FFTs into
+    /// spurious short-period peaks.
+    ZScore,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
