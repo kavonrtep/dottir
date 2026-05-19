@@ -6,6 +6,8 @@
 
 - [Installation](./install.md)
 - [The `dottir batch` CLI](./cli.md)
+- [The `dottir periodogram` CLI](./periodogram.md)
+- [The `dottir find-peaks` CLI](./find-peaks.md)
 - [The `dottir-gui` interactive viewer](./gui.md)
 
 # Concepts
