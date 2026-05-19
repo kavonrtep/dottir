@@ -33,6 +33,7 @@ pub mod antidiag;
 pub mod error;
 pub mod karlin;
 pub mod matrix;
+pub mod periodogram;
 pub mod pixel;
 pub mod plot;
 pub mod ridges;
@@ -43,6 +44,10 @@ pub mod translation;
 pub use error::DottirError;
 pub use karlin::{karlin_window_size, KarlinConfig, KarlinResult};
 pub use matrix::{BlastMode, ScoreMatrix};
+pub use periodogram::{
+    analytical_null, analytical_z_scores, compute_periodogram, compute_periodogram_parallel,
+    empirical_null_stats, AnalyticalNull, Periodogram, PeriodogramConfig, Sensitivity,
+};
 pub use plot::{
     compute_dotplot, pick_auto_zoom, reverse_complement, snap_zoom_to_period_divisor, DotPlot,
     PlotConfig, PlotParams, Strand, Triangle,
