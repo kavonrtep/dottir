@@ -2743,6 +2743,29 @@ impl DottirApp {
         // logical via `/ ppp`.
         let pixels_per_residue_x = 1.0_f32 / (zoom_us * ppp);
         let step_x = nice_tick_step(span_x as f64, MIN_LABEL_SPACING_PX / pixels_per_residue_x);
+        // Minor ticks (unlabeled) at step/5 intervals — gives 4
+        // subdivisions between every labelled tick. Drawn first so
+        // the longer labelled ticks paint on top.
+        let minor_step_x = (step_x / 5.0).floor() as u64;
+        if minor_step_x >= 1 {
+            let mut t = (seq_q_lo / minor_step_x) * minor_step_x;
+            while t < seq_q_hi.saturating_add(minor_step_x) {
+                if t >= seq_q_lo && t <= seq_q_hi {
+                    let sx =
+                        plot_area.left() + (t - q_off) as f32 / (zoom_us * ppp) - draw_offset.x;
+                    if sx >= plot_area.left() - 1.0 && sx <= plot_area.right() + 1.0 {
+                        painter.line_segment(
+                            [
+                                Pos2::new(sx, tick_baseline_y - 3.0),
+                                Pos2::new(sx, tick_baseline_y),
+                            ],
+                            egui::Stroke::new(1.0, tick_color),
+                        );
+                    }
+                }
+                t = t.saturating_add(minor_step_x);
+            }
+        }
         let mut t = (seq_q_lo / step_x as u64) * step_x as u64;
         while t < seq_q_hi.saturating_add(step_x as u64) {
             if t >= seq_q_lo && t <= seq_q_hi {
@@ -2782,6 +2805,26 @@ impl DottirApp {
         let label_x = tick_baseline_x - 8.0; // text right edge
         let span_y = seq_s_hi.saturating_sub(seq_s_lo) as f32;
         let step_y = nice_tick_step(span_y as f64, MIN_LABEL_SPACING_PX / pixels_per_residue_x);
+        let minor_step_y = (step_y / 5.0).floor() as u64;
+        if minor_step_y >= 1 {
+            let mut t = (seq_s_lo / minor_step_y) * minor_step_y;
+            while t < seq_s_hi.saturating_add(minor_step_y) {
+                if t >= seq_s_lo && t <= seq_s_hi {
+                    let sy =
+                        plot_area.top() + (t - s_off) as f32 / (zoom_us * ppp) - draw_offset.y;
+                    if sy >= plot_area.top() - 1.0 && sy <= plot_area.bottom() + 1.0 {
+                        painter.line_segment(
+                            [
+                                Pos2::new(tick_baseline_x - 3.0, sy),
+                                Pos2::new(tick_baseline_x, sy),
+                            ],
+                            egui::Stroke::new(1.0, tick_color),
+                        );
+                    }
+                }
+                t = t.saturating_add(minor_step_y);
+            }
+        }
         let mut t = (seq_s_lo / step_y as u64) * step_y as u64;
         while t < seq_s_hi.saturating_add(step_y as u64) {
             if t >= seq_s_lo && t <= seq_s_hi {
