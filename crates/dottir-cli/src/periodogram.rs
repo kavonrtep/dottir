@@ -12,7 +12,8 @@ use clap::{Parser, ValueEnum};
 
 use dottir_core::{
     analytical_null, analytical_z_scores, compute_periodogram, compute_periodogram_parallel,
-    empirical_null_stats, AnalyticalNull, Periodogram, PeriodogramConfig, ScoreMatrix, Sensitivity,
+    empirical_null_stats, spectrum_of_signal, AnalyticalNull, Periodogram, PeriodogramConfig,
+    ScoreMatrix, Sensitivity, Spectrum, SpectrumConfig,
 };
 use dottir_io::fasta;
 
@@ -96,6 +97,27 @@ pub struct PeriodogramArgs {
     /// rayon default (one per CPU). Set this before any rayon call.
     #[arg(long, default_value_t = 0, value_name = "INT")]
     pub threads: usize,
+
+    // ─── FFT periodicity detection ────────────────────────────────
+    /// Opt-in second output: TSV of the FFT magnitude spectrum of the
+    /// per-record periodogram. Each row is one frequency bin; top
+    /// local-maximum bins are annotated in the `peak_rank` column.
+    /// Skipped if not set.
+    #[arg(long, value_name = "PATH")]
+    pub fft: Option<PathBuf>,
+
+    /// Which periodogram column to feed into the FFT.
+    /// `z_score` is denoised (recommended). `signal_mean` keeps the
+    /// raw spectral shape, including any low-amplitude periodic
+    /// baseline. Ignored when `--fft` is not set.
+    #[arg(long, value_enum, default_value_t = FftInputArg::ZScore)]
+    pub fft_input: FftInputArg,
+
+    /// Number of local-maximum bins to mark with a rank in the FFT
+    /// output's `peak_rank` column. `0` disables peak annotation
+    /// (full spectrum still emitted).
+    #[arg(long, default_value_t = 10, value_name = "INT")]
+    pub fft_top_peaks: usize,
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -104,6 +126,17 @@ pub enum ZScoreModeArg {
     Analytical,
     Empirical,
     Off,
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum)]
+pub enum FftInputArg {
+    /// Per-bin z-score (default). Pre-denoised — peaks in the FFT
+    /// correspond to periodic structure above noise.
+    ZScore,
+    /// Per-bin signal mean = `signal_sum / n_pairs`. Raw spectral
+    /// shape; picks up periodic structure including low-amplitude
+    /// baselines.
+    SignalMean,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -149,6 +182,17 @@ pub fn run(args: PeriodogramArgs) -> Result<()> {
         anyhow::bail!("input FASTA contains no records");
     }
 
+    // `--fft z_score` requires a usable z-score column.
+    if args.fft.is_some()
+        && matches!(args.fft_input, FftInputArg::ZScore)
+        && resolved_z == ResolvedZMode::Off
+    {
+        anyhow::bail!(
+            "--fft z_score requires a computed z-score; got --z-score off. \
+             Pass --fft-input signal_mean or pick a non-off z-score mode."
+        );
+    }
+
     let mut out: Box<dyn Write> = match args.output.as_ref() {
         Some(p) => Box::new(BufWriter::new(
             File::create(p).with_context(|| format!("creating {}", p.display()))?,
@@ -156,16 +200,35 @@ pub fn run(args: PeriodogramArgs) -> Result<()> {
         None => Box::new(BufWriter::new(std::io::stdout().lock())),
     };
 
+    let mut fft_out: Option<Box<dyn Write>> = match args.fft.as_ref() {
+        Some(p) => Some(Box::new(BufWriter::new(
+            File::create(p).with_context(|| format!("creating {}", p.display()))?,
+        ))),
+        None => None,
+    };
+
     write_global_header(&mut out, &args.input, &args, sensitivity, resolved_z)?;
     writeln!(
         out,
         "record_id\tk\traw_sum\tsignal_sum\tsignal_mean\tz_score"
     )?;
+    if let Some(fft) = fft_out.as_mut() {
+        write_fft_global_header(fft, &args)?;
+        writeln!(
+            fft,
+            "record_id\tbin\tfrequency\tperiod_residues\tamplitude\tpeak_rank"
+        )?;
+    }
 
     let force_serial = args.threads == 1;
+    let spectrum_cfg = SpectrumConfig {
+        top_peaks: args.fft_top_peaks,
+        ..SpectrumConfig::default()
+    };
     for record in &loaded.records {
         process_record(
             &mut out,
+            &mut fft_out,
             &record.id,
             &record.sequence,
             &cfg,
@@ -173,12 +236,20 @@ pub fn run(args: PeriodogramArgs) -> Result<()> {
             args.z_shuffles,
             args.seed,
             force_serial,
+            args.fft_input,
+            &spectrum_cfg,
         )
         .with_context(|| format!("processing record {}", record.id))?;
     }
 
     out.flush().context("flushing periodogram output")?;
     if let Some(p) = args.output.as_ref() {
+        tracing::info!("wrote {}", p.display());
+    }
+    if let Some(fft) = fft_out.as_mut() {
+        fft.flush().context("flushing FFT output")?;
+    }
+    if let Some(p) = args.fft.as_ref() {
         tracing::info!("wrote {}", p.display());
     }
     Ok(())
@@ -247,8 +318,9 @@ fn write_global_header<W: Write>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn process_record<W: Write>(
-    out: &mut W,
+fn process_record(
+    out: &mut dyn Write,
+    fft_out: &mut Option<Box<dyn Write>>,
     record_id: &str,
     seq: &[u8],
     cfg: &PeriodogramConfig,
@@ -256,6 +328,8 @@ fn process_record<W: Write>(
     z_shuffles: u32,
     seed: u64,
     force_serial: bool,
+    fft_input: FftInputArg,
+    spectrum_cfg: &SpectrumConfig,
 ) -> Result<()> {
     let periodogram = if force_serial {
         compute_periodogram(seq, cfg)
@@ -289,6 +363,23 @@ fn process_record<W: Write>(
         }
     };
 
+    // Pre-compute signal_mean once — used by both the periodogram TSV
+    // row and (optionally) as the FFT input.
+    let signal_mean: Vec<f64> = periodogram
+        .signal_sum
+        .iter()
+        .zip(periodogram.n_pairs.iter())
+        .map(
+            |(&sig, &np)| {
+                if np == 0 {
+                    0.0
+                } else {
+                    sig as f64 / np as f64
+                }
+            },
+        )
+        .collect();
+
     // Per-record header line.
     let analytical = analytical_null(&cfg.matrix, &periodogram.residue_freqs);
     write_record_header(out, record_id, &periodogram, analytical, z_mode, z_shuffles)?;
@@ -298,23 +389,84 @@ fn process_record<W: Write>(
         .raw_sum
         .iter()
         .zip(periodogram.signal_sum.iter())
-        .zip(periodogram.n_pairs.iter())
+        .zip(signal_mean.iter())
         .zip(z.iter())
         .enumerate();
-    for (i, (((raw, sig), np), z_val)) in rows {
+    for (i, (((raw, sig), mean), z_val)) in rows {
         let k = periodogram.min_offset + i as u32;
-        let mean = if *np == 0 {
-            0.0
-        } else {
-            *sig as f64 / *np as f64
-        };
         writeln!(out, "{record_id}\t{k}\t{raw}\t{sig}\t{mean:.6}\t{z_val:.4}")?;
+    }
+
+    // Optional FFT block on the second writer.
+    if let Some(fft) = fft_out.as_mut() {
+        let fft_signal: &[f64] = match fft_input {
+            FftInputArg::ZScore => &z,
+            FftInputArg::SignalMean => &signal_mean,
+        };
+        let spectrum =
+            spectrum_of_signal(fft_signal, spectrum_cfg).context("spectrum_of_signal failed")?;
+        write_fft_block(fft.as_mut(), record_id, fft_input, &spectrum)?;
     }
     Ok(())
 }
 
-fn write_record_header<W: Write>(
-    out: &mut W,
+fn write_fft_global_header<W: Write>(out: &mut W, args: &PeriodogramArgs) -> std::io::Result<()> {
+    writeln!(
+        out,
+        "# dottir periodogram FFT v{}",
+        env!("CARGO_PKG_VERSION")
+    )?;
+    writeln!(out, "# input: {}", args.input.display())?;
+    let input_label = match args.fft_input {
+        FftInputArg::ZScore => "z_score",
+        FftInputArg::SignalMean => "signal_mean",
+    };
+    writeln!(out, "# fft_input: {input_label}")?;
+    writeln!(out, "# fft_window: hann")?;
+    writeln!(out, "# fft_detrend: subtract_mean")?;
+    writeln!(out, "# fft_pad_to_pow2: true")?;
+    writeln!(out, "# fft_top_peaks: {}", args.fft_top_peaks)?;
+    Ok(())
+}
+
+fn write_fft_block(
+    out: &mut dyn Write,
+    record_id: &str,
+    fft_input: FftInputArg,
+    spectrum: &Spectrum,
+) -> std::io::Result<()> {
+    let input_label = match fft_input {
+        FftInputArg::ZScore => "z_score",
+        FftInputArg::SignalMean => "signal_mean",
+    };
+    writeln!(
+        out,
+        "# record_id={record_id} input={input_label} input_len={} padded_len={}",
+        spectrum.input_len, spectrum.padded_len
+    )?;
+    for bin in 0..spectrum.amplitude.len() {
+        let freq = spectrum.frequency(bin);
+        let period = spectrum.period(bin);
+        let period_str = if period.is_finite() {
+            format!("{period:.4}")
+        } else {
+            "inf".to_string()
+        };
+        let amp = spectrum.amplitude[bin];
+        let rank_str = match spectrum.peak_ranks[bin] {
+            Some(r) => r.to_string(),
+            None => String::new(),
+        };
+        writeln!(
+            out,
+            "{record_id}\t{bin}\t{freq:.6}\t{period_str}\t{amp:.4}\t{rank_str}"
+        )?;
+    }
+    Ok(())
+}
+
+fn write_record_header(
+    out: &mut dyn Write,
     record_id: &str,
     p: &Periodogram,
     null: AnalyticalNull,

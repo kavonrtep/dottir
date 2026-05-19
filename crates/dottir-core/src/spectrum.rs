@@ -34,10 +34,12 @@
 //!     signal[k] = 1.0;
 //! }
 //! let s = spectrum_of_signal(&signal, &SpectrumConfig::default()).unwrap();
-//! // Brightest non-DC peak should correspond to period ≈ 7.
-//! let top = s.top_peak().unwrap();
-//! let period = s.period(top);
-//! assert!((period - 7.0).abs() < 0.5, "got period {period}");
+//! // For an ideal impulse train, the fundamental (period 7) and its
+//! // harmonics (3.5, 2.33, …) have equal amplitude — the top peak
+//! // may land on any of them. The fundamental will be in the ranked
+//! // peaks though.
+//! let periods: Vec<f64> = s.ranked_peaks().iter().map(|&b| s.period(b)).collect();
+//! assert!(periods.iter().any(|p| (p - 7.0).abs() < 0.5), "periods: {periods:?}");
 //! ```
 
 use realfft::num_complex::Complex;
