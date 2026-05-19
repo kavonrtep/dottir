@@ -1709,6 +1709,16 @@ impl DottirApp {
                 }
                 painter.rect_stroke(rect, 0.0, egui::Stroke::new(1.0, Color32::from_gray(120)));
 
+                // ── Vector overlays ──
+                ui.add_space(6.0);
+                ui.separator();
+                if ui
+                    .checkbox(&mut self.settings.show_ridge_overlay, "Show vector ridges")
+                    .changed()
+                {
+                    self.refresh_ridges();
+                }
+
                 // ── Keyboard shortcuts (reference) ──
                 ui.add_space(6.0);
                 ui.separator();
