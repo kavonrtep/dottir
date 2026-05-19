@@ -349,6 +349,15 @@ pub struct DottirApp {
     /// min length, gap) changes. Painted as anti-aliased line
     /// segments above the raster in the canvas draw.
     current_ridges: Vec<Ridge>,
+    /// Cached `ctx.pixels_per_point()`, refreshed at the start of
+    /// each `update()`. Used by `canonical_compute_zoom` (which is
+    /// `&self`, so it can't access ctx) and by every texel↔screen
+    /// conversion in the canvas, so the pixmap can be sized to and
+    /// drawn over physical-pixel boundaries (Option C in
+    /// `docs/reviews/dotter-sizing-model.md`). Default 1.0 so any
+    /// path that runs before the first `update()` (load_fasta in
+    /// the constructor) behaves as on a non-HiDPI display.
+    pixels_per_point: f32,
 }
 
 /// Maximum number of history entries kept around for Back. Older
@@ -489,6 +498,7 @@ impl DottirApp {
             locked_pixel_fac: None,
             last_dispatched_slice: None,
             current_ridges: Vec::new(),
+            pixels_per_point: 1.0,
         };
 
         // Pre-load any sequences supplied on the command line. Errors
@@ -580,16 +590,18 @@ impl DottirApp {
         let q = self.query.as_ref()?;
         let s = self.subject.as_ref()?;
         let (plot_w, plot_h) = self.measured_plot_area?;
-        // Target the *logical* canvas dimension (egui drawing unit),
-        // not physical pixels — the texture is drawn at `pw` logical
-        // points, so pixmap_dim ≈ logical_canvas keeps it 1:1 on
-        // screen. The previous version multiplied by
-        // `pixels_per_point`, which sized the pixmap to the physical
-        // canvas and made HiDPI initial views overflow by factor ppp.
-        let log_w = (plot_w as f64).max(1.0);
-        let log_h = (plot_h as f64).max(1.0);
-        let zoom_q = (q.len() as f64 / log_w).ceil() as u32;
-        let zoom_s = (s.len() as f64 / log_h).ceil() as u32;
+        // Option C: target the *physical* canvas dimension. The
+        // pixmap then ends up with one texel per physical pixel, and
+        // the draw rect uses `pw / ppp, ph / ppp` logical points
+        // (see `draw_canvas`). Earlier history: this used to
+        // multiply by `pixels_per_point` and overflow the canvas
+        // because the draw side still used logical points; the fix
+        // is to update both sides of the conversion together.
+        let ppp = self.pixels_per_point as f64;
+        let phys_w = (plot_w as f64).max(1.0) * ppp;
+        let phys_h = (plot_h as f64).max(1.0) * ppp;
+        let zoom_q = (q.len() as f64 / phys_w).ceil() as u32;
+        let zoom_s = (s.len() as f64 / phys_h).ceil() as u32;
         let base = zoom_q.max(zoom_s).max(1);
         Some(snap_zoom_to_period_divisor(
             base,
@@ -779,17 +791,19 @@ impl DottirApp {
         };
         let cur_zoom_u = plot.params.zoom.max(1);
         let cur_zoom = cur_zoom_u as f32;
+        let ppp = self.pixels_per_point;
 
-        // Screen → pixelmap-pixel. Use the *rounded* view_offset
-        // to match what was drawn on screen (the paint path uses
-        // `draw_offset = view_offset.round()`); otherwise a sub-pixel
-        // discrepancy would shift the selected rectangle by one
-        // pixmap cell relative to where the user dragged it.
-        let draw_off_x = self.view_offset.x.round();
-        let draw_off_y = self.view_offset.y.round();
+        // Screen → pixelmap-texel. Match the canvas's snap policy
+        // (round to a whole-texel multiple in logical coords) so
+        // the selection rect lands on the same texels the user
+        // saw under the cursor. Logical-pt offset → texel via
+        // `* ppp`.
+        let snap_texel = |v: f32| (v * ppp).round() / ppp;
+        let draw_off_x = snap_texel(self.view_offset.x);
+        let draw_off_y = snap_texel(self.view_offset.y);
         let to_pix = |p: Pos2| -> (f32, f32) {
             let l = p - plot_area.left_top();
-            (l.x + draw_off_x, l.y + draw_off_y)
+            ((l.x + draw_off_x) * ppp, (l.y + draw_off_y) * ppp)
         };
         let (sx, sy) = to_pix(rs.start_screen);
         let (ex, ey) = to_pix(rs.current_screen);
@@ -816,12 +830,12 @@ impl DottirApp {
         let sel_h = sel_hi_y.saturating_sub(sel_lo_y).max(1);
 
         // New compute zoom so the *selection* (not the slice) fills
-        // the logical canvas (matches the texture's drawing unit so
-        // it lands 1:1 — see canonical_compute_zoom).
-        let log_w = (plot_area.width() as f64).max(1.0);
-        let log_h = (plot_area.height() as f64).max(1.0);
-        let zoom_x = ((sel_w as f64) / log_w).ceil() as u32;
-        let zoom_y = ((sel_h as f64) / log_h).ceil() as u32;
+        // the *physical* canvas — matches `canonical_compute_zoom`'s
+        // Option C policy (one pixmap texel = one physical pixel).
+        let phys_w = (plot_area.width() as f64).max(1.0) * (ppp as f64);
+        let phys_h = (plot_area.height() as f64).max(1.0) * (ppp as f64);
+        let zoom_x = ((sel_w as f64) / phys_w).ceil() as u32;
+        let zoom_y = ((sel_h as f64) / phys_h).ceil() as u32;
         let new_zoom = zoom_x.max(zoom_y).max(1);
 
         // New slice = selection ± RECT_ZOOM_MARGIN of its size,
@@ -1185,6 +1199,11 @@ enum SeqRole {
 
 impl eframe::App for DottirApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+        // Refresh cached display scale first — every coord transform
+        // in the canvas closure and `canonical_compute_zoom` reads
+        // this rather than calling `ctx.pixels_per_point()` directly.
+        self.pixels_per_point = ctx.pixels_per_point().max(0.01);
+
         // Drain any completed background-compute results before any
         // panel reads `self.plot`. Stale results are discarded inside.
         self.poll_compute_results();
@@ -2341,41 +2360,45 @@ impl DottirApp {
                 return;
             };
 
+            let ppp = self.pixels_per_point;
             let pw = plot.width as f32;
             let ph = plot.height as f32;
+            // Image extent in *logical points* — texture is
+            // `pw × ph` texels, drawn at `pw/ppp × ph/ppp` logical
+            // points so one texel lands on exactly one physical
+            // pixel (Option C in
+            // `docs/reviews/dotter-sizing-model.md`).
+            let pw_lp = pw / ppp;
+            let ph_lp = ph / ppp;
             let plot_w = plot_area.width().max(1.0);
             let plot_h = plot_area.height().max(1.0);
 
-            // Clamp pan to keep the pixelmap on screen. With the
-            // dotter-faithful 1:1 model:
-            // - if pixelmap >= canvas in an axis, view_offset is
-            //   clamped to [0, pixelmap − canvas].
-            // - if pixelmap < canvas, the image is centred in the
-            //   canvas and view_offset is set to the negative half-
-            //   margin so the draw rect aligns with the centred
-            //   image.
-            if pw <= plot_w {
-                self.view_offset.x = -(plot_w - pw) / 2.0;
+            // Clamp pan to keep the pixelmap on screen. `view_offset`
+            // is in logical points; the image is `pw_lp × ph_lp`
+            // logical points. If the image is smaller than the
+            // canvas, centre it; otherwise clamp the offset to the
+            // overhang.
+            if pw_lp <= plot_w {
+                self.view_offset.x = -(plot_w - pw_lp) / 2.0;
             } else {
-                self.view_offset.x = self.view_offset.x.clamp(0.0, pw - plot_w);
+                self.view_offset.x = self.view_offset.x.clamp(0.0, pw_lp - plot_w);
             }
-            if ph <= plot_h {
-                self.view_offset.y = -(plot_h - ph) / 2.0;
+            if ph_lp <= plot_h {
+                self.view_offset.y = -(plot_h - ph_lp) / 2.0;
             } else {
-                self.view_offset.y = self.view_offset.y.clamp(0.0, ph - plot_h);
+                self.view_offset.y = self.view_offset.y.clamp(0.0, ph_lp - plot_h);
             }
 
-            // Integer-pixel pan offset for *drawing* — keeps texel-
-            // to-pixel alignment so NEAREST sampling stays clean
-            // (any fractional offset locks texels to a sub-pixel
-            // phase that can produce stable-amplitude waves on
-            // periodic content). `view_offset` itself stays
-            // fractional so pan accumulates smoothly across many
-            // sub-pixel drag deltas — only the visible draw uses
-            // integers. Crosshair / breaklines / axes all use
-            // `draw_offset` too, so overlays don't drift relative
-            // to the texture.
-            let draw_offset = Vec2::new(self.view_offset.x.round(), self.view_offset.y.round());
+            // Snap pan to whole-texel boundaries so the texture's
+            // source texels keep landing on physical-pixel grid
+            // boundaries (otherwise fractional offsets re-introduce
+            // sub-pixel sampling phase). 1 texel = 1/ppp logical
+            // points → snap to the nearest 1/ppp multiple.
+            let snap_texel = |v: f32| (v * ppp).round() / ppp;
+            let draw_offset = Vec2::new(
+                snap_texel(self.view_offset.x),
+                snap_texel(self.view_offset.y),
+            );
 
             // Single click (primary, no drag): set crosshair. Clicks
             // in the margin are ignored. Use `draw_offset` so the
@@ -2389,8 +2412,12 @@ impl DottirApp {
                 if let Some(p) = response.interact_pointer_pos() {
                     if plot_area.contains(p) {
                         let local = p - plot_area.left_top();
-                        let qp = (local.x + draw_offset.x).floor() as i64;
-                        let sp = (local.y + draw_offset.y).floor() as i64;
+                        // local is in logical points; convert to
+                        // texel index by multiplying by ppp (one
+                        // logical pt covers `ppp` texels in this
+                        // render).
+                        let qp = ((local.x + draw_offset.x) * ppp).floor() as i64;
+                        let sp = ((local.y + draw_offset.y) * ppp).floor() as i64;
                         if qp >= 0 && qp < plot.width as i64 && sp >= 0 && sp < plot.height as i64 {
                             let z = plot.params.zoom.max(1) as i64;
                             let (q_off, s_off) = self
@@ -2424,18 +2451,19 @@ impl DottirApp {
             // area gets the texture painted over it.
             ui.painter().rect_filled(rect, 0.0, Color32::from_gray(235));
 
-            // Render the pixelmap at native 1:1 size. Snap the
-            // *origin* to a physical pixel boundary; use the exact
-            // texture dimensions for the size (NOT a second snap of
-            // the far edge — that could change the drawn width by ±1
-            // physical pixel and re-introduce sampling phase).
+            // Render the pixelmap so one texture texel lands on one
+            // physical pixel. Texture is `pw × ph` texels; draw it
+            // at `pw/ppp × ph/ppp` logical points. Origin snapped
+            // to a physical pixel boundary; size left as the exact
+            // logical extent of the texture (snapping the far edge
+            // could shift it by ±1 physical pixel and re-introduce
+            // sampling phase).
             let plot_screen_x = plot_area.left() - draw_offset.x;
             let plot_screen_y = plot_area.top() - draw_offset.y;
-            let ppp_snap = ctx.pixels_per_point();
-            let snap = |v: f32| ((v * ppp_snap).round()) / ppp_snap;
+            let snap = |v: f32| ((v * ppp).round()) / ppp;
             let plot_rect = Rect::from_min_size(
                 Pos2::new(snap(plot_screen_x), snap(plot_screen_y)),
-                Vec2::new(pw, ph),
+                Vec2::new(pw_lp, ph_lp),
             );
             let clip_painter = ui.painter_at(plot_area);
             clip_painter.image(
@@ -2494,7 +2522,7 @@ impl DottirApp {
                     if pixel_x >= plot.width as usize {
                         continue;
                     }
-                    let sx = plot_area.left() + ((pixel_x as f32) - draw_offset.x);
+                    let sx = plot_area.left() + (pixel_x as f32) / ppp - draw_offset.x;
                     if sx < plot_area.left() || sx > plot_area.right() {
                         continue;
                     }
@@ -2516,7 +2544,7 @@ impl DottirApp {
                     if pixel_y >= plot.height as usize {
                         continue;
                     }
-                    let sy = plot_area.top() + ((pixel_y as f32) - draw_offset.y);
+                    let sy = plot_area.top() + (pixel_y as f32) / ppp - draw_offset.y;
                     if sy < plot_area.top() || sy > plot_area.bottom() {
                         continue;
                     }
@@ -2541,12 +2569,12 @@ impl DottirApp {
                 let stroke_rev = egui::Stroke::new(0.75, Color32::from_rgb(170, 0, 170));
                 for ridge in &self.current_ridges {
                     let p0 = Pos2::new(
-                        plot_area.left() + (ridge.start.0 as f32 + 0.5) - draw_offset.x,
-                        plot_area.top() + (ridge.start.1 as f32 + 0.5) - draw_offset.y,
+                        plot_area.left() + (ridge.start.0 as f32 + 0.5) / ppp - draw_offset.x,
+                        plot_area.top() + (ridge.start.1 as f32 + 0.5) / ppp - draw_offset.y,
                     );
                     let p1 = Pos2::new(
-                        plot_area.left() + (ridge.end.0 as f32 + 0.5) - draw_offset.x,
-                        plot_area.top() + (ridge.end.1 as f32 + 0.5) - draw_offset.y,
+                        plot_area.left() + (ridge.end.0 as f32 + 0.5) / ppp - draw_offset.x,
+                        plot_area.top() + (ridge.end.1 as f32 + 0.5) / ppp - draw_offset.y,
                     );
                     let stroke = match ridge.direction {
                         RidgeDirection::Forward => stroke_fwd,
@@ -2558,7 +2586,7 @@ impl DottirApp {
 
             // C4: tick labels in the top / left margin bands —
             // outside the plot area so they don't overlap the image.
-            self.draw_axis_labels(ui, rect, plot_area, plot, draw_offset);
+            self.draw_axis_labels(ui, rect, plot_area, plot, draw_offset, ppp);
 
             // Crosshair overlay + coord label — clipped to the plot
             // area so the lines never run into the axis margin. The
@@ -2584,8 +2612,8 @@ impl DottirApp {
                     && cs_pix >= 0.0
                     && cs_pix < plot.height as f32;
                 if in_slice {
-                    let cx = plot_area.left() + ((cq_pix + 0.5) - draw_offset.x);
-                    let cy = plot_area.top() + ((cs_pix + 0.5) - draw_offset.y);
+                    let cx = plot_area.left() + (cq_pix + 0.5) / ppp - draw_offset.x;
+                    let cy = plot_area.top() + (cs_pix + 0.5) / ppp - draw_offset.y;
                     let stroke = egui::Stroke::new(1.0, Color32::from_rgb(255, 80, 80));
                     clip_painter.line_segment(
                         [
@@ -2664,6 +2692,7 @@ impl DottirApp {
         plot_area: Rect,
         plot: &dottir_core::DotPlot,
         draw_offset: Vec2,
+        ppp: f32,
     ) {
         const MIN_LABEL_SPACING_PX: f32 = 80.0;
         let zoom_us = plot.params.zoom.max(1) as f32;
@@ -2674,13 +2703,14 @@ impl DottirApp {
             .as_ref()
             .map(|sl| (sl.q_range.start as u64, sl.s_range.start as u64))
             .unwrap_or((0, 0));
-        // World-pixel range visible inside the plot area. Use the
-        // integer-rounded draw_offset so axis tick positions align
-        // exactly with the texture origin (which is also rounded).
-        let world_x_lo = draw_offset.x;
-        let world_x_hi = world_x_lo + plot_area.width();
-        let world_y_lo = draw_offset.y;
-        let world_y_hi = world_y_lo + plot_area.height();
+        // World-pixel (texel) range visible inside the plot area.
+        // `draw_offset` is in logical points; one logical point
+        // covers `ppp` texels, so multiply the logical extent by
+        // `ppp` to get texel extent.
+        let world_x_lo = draw_offset.x * ppp;
+        let world_x_hi = world_x_lo + plot_area.width() * ppp;
+        let world_y_lo = draw_offset.y * ppp;
+        let world_y_hi = world_y_lo + plot_area.height() * ppp;
         // Convert to absolute sequence-residue range.
         let seq_q_lo = q_off + (world_x_lo * zoom_us).max(0.0) as u64;
         let seq_q_hi = q_off + (world_x_hi * zoom_us) as u64;
@@ -2698,12 +2728,15 @@ impl DottirApp {
         let tick_baseline_y = plot_area.top();
         let label_y = tick_baseline_y - 16.0; // text top
         let span_x = seq_q_hi.saturating_sub(seq_q_lo) as f32;
-        let pixels_per_residue_x = 1.0_f32 / zoom_us;
+        // Pixels-per-residue is now expressed against *logical*
+        // points: residue → texel via `/ zoom_us`, then texel →
+        // logical via `/ ppp`.
+        let pixels_per_residue_x = 1.0_f32 / (zoom_us * ppp);
         let step_x = nice_tick_step(span_x as f64, MIN_LABEL_SPACING_PX / pixels_per_residue_x);
         let mut t = (seq_q_lo / step_x as u64) * step_x as u64;
         while t < seq_q_hi.saturating_add(step_x as u64) {
             if t >= seq_q_lo && t <= seq_q_hi {
-                let sx = plot_area.left() + ((t - q_off) as f32 / zoom_us - draw_offset.x);
+                let sx = plot_area.left() + (t - q_off) as f32 / (zoom_us * ppp) - draw_offset.x;
                 if sx < plot_area.left() - 1.0 || sx > plot_area.right() + 1.0 {
                     t = t.saturating_add(step_x as u64);
                     if step_x == 0.0 {
@@ -2742,7 +2775,7 @@ impl DottirApp {
         let mut t = (seq_s_lo / step_y as u64) * step_y as u64;
         while t < seq_s_hi.saturating_add(step_y as u64) {
             if t >= seq_s_lo && t <= seq_s_hi {
-                let sy = plot_area.top() + ((t - s_off) as f32 / zoom_us - draw_offset.y);
+                let sy = plot_area.top() + (t - s_off) as f32 / (zoom_us * ppp) - draw_offset.y;
                 if sy < plot_area.top() - 1.0 || sy > plot_area.bottom() + 1.0 {
                     t = t.saturating_add(step_y as u64);
                     if step_y == 0.0 {
@@ -2791,8 +2824,8 @@ impl DottirApp {
                     if r_end <= r_start {
                         continue;
                     }
-                    let x0 = plot_area.left() + (r_start as f32 / zoom_us - draw_offset.x);
-                    let x1 = plot_area.left() + (r_end as f32 / zoom_us - draw_offset.x);
+                    let x0 = plot_area.left() + r_start as f32 / (zoom_us * ppp) - draw_offset.x;
+                    let x1 = plot_area.left() + r_end as f32 / (zoom_us * ppp) - draw_offset.x;
                     let span = (x1 - x0).max(0.0);
                     if span < 18.0 {
                         continue;
@@ -2820,8 +2853,8 @@ impl DottirApp {
                     if r_end <= r_start {
                         continue;
                     }
-                    let y0 = plot_area.top() + (r_start as f32 / zoom_us - draw_offset.y);
-                    let y1 = plot_area.top() + (r_end as f32 / zoom_us - draw_offset.y);
+                    let y0 = plot_area.top() + r_start as f32 / (zoom_us * ppp) - draw_offset.y;
+                    let y1 = plot_area.top() + r_end as f32 / (zoom_us * ppp) - draw_offset.y;
                     let span = (y1 - y0).max(0.0);
                     if span < 14.0 {
                         continue;
