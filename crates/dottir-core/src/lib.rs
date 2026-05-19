@@ -45,8 +45,8 @@ pub mod translation;
 
 pub use error::DottirError;
 pub use find_peaks::{
-    find_peaks_in_periodogram, find_peaks_in_spectrum, HarmonicDirection, Peak, PeakKind,
-    PeaksConfig, SubrepeatConfig,
+    auto_threshold_mad, find_peaks_in_periodogram, find_peaks_in_spectrum, HarmonicDirection, Peak,
+    PeakKind, PeaksConfig, SubrepeatConfig,
 };
 pub use karlin::{karlin_window_size, KarlinConfig, KarlinResult};
 pub use matrix::{BlastMode, ScoreMatrix};

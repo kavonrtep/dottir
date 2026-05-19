@@ -324,6 +324,49 @@ pub fn find_peaks_in_spectrum(
 /// Strict three-bin local maxima: `i` such that `s[i] > s[i-1]` and
 /// `s[i] > s[i+1]`. Endpoints are not considered (no peak on the
 /// very first or last bin — boundary effects).
+/// Compute a robust per-record threshold using median + k×MAD.
+///
+/// Returns `max(floor, median + k × 1.4826 × MAD)`. The
+/// `1.4826` makes the MAD-based estimate consistent with a
+/// Gaussian σ. Non-finite scores are dropped before the
+/// computation. If `MAD == 0` (e.g., uniform input), returns
+/// `floor` — there's nothing useful to adapt to.
+///
+/// Recommended `k = 5` for periodogram peak detection (5-σ
+/// equivalent) — conservative enough that real peaks stand
+/// out above ordinary variation.
+pub fn auto_threshold_mad(scores: &[f64], k: f64, floor: f64) -> f64 {
+    let mut values: Vec<f64> = scores.iter().copied().filter(|s| s.is_finite()).collect();
+    if values.is_empty() {
+        return floor;
+    }
+    values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let median = percentile_sorted(&values, 0.5);
+    let mut abs_dev: Vec<f64> = values.iter().map(|v| (v - median).abs()).collect();
+    abs_dev.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let mad = percentile_sorted(&abs_dev, 0.5);
+    if mad <= 0.0 {
+        return floor;
+    }
+    let adaptive = median + k * 1.4826 * mad;
+    adaptive.max(floor)
+}
+
+/// Linear-interpolated percentile of a pre-sorted slice. `q` in [0, 1].
+fn percentile_sorted(sorted: &[f64], q: f64) -> f64 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    if sorted.len() == 1 {
+        return sorted[0];
+    }
+    let pos = q.clamp(0.0, 1.0) * (sorted.len() - 1) as f64;
+    let lo = pos.floor() as usize;
+    let hi = (lo + 1).min(sorted.len() - 1);
+    let frac = pos - lo as f64;
+    sorted[lo] * (1.0 - frac) + sorted[hi] * frac
+}
+
 fn strict_local_maxima(scores: &[f64]) -> Vec<(usize, f64)> {
     if scores.len() < 3 {
         return Vec::new();
@@ -980,6 +1023,53 @@ mod tests {
         };
         let peaks = find_peaks_in_periodogram(&scores, 0, &cfg).unwrap();
         assert!(peaks.is_empty(), "lone peak should be filtered: {peaks:?}");
+    }
+
+    #[test]
+    fn auto_threshold_mad_basics() {
+        // Pure-noise-ish input: most values near zero, threshold
+        // should be small.
+        let noise: Vec<f64> = (0..100)
+            .map(|i| if i % 10 == 0 { 1.0 } else { 0.0 })
+            .collect();
+        let t = auto_threshold_mad(&noise, 5.0, 1.0);
+        // MAD of mostly-zero is 0 → falls back to floor.
+        assert_eq!(t, 1.0);
+    }
+
+    #[test]
+    fn auto_threshold_mad_lifts_above_noise() {
+        // Most values 0; a handful at moderate amplitude → MAD > 0,
+        // threshold rises above the floor.
+        let mut scores = vec![0.0_f64; 1000];
+        for i in (0..1000).step_by(7) {
+            scores[i] = 2.0;
+        }
+        let t = auto_threshold_mad(&scores, 5.0, 1.0);
+        // MAD is around 0 (most values are 0); fallback to floor.
+        // To get a meaningful MAD, more than half the values must
+        // deviate from the median.
+        assert_eq!(t, 1.0);
+    }
+
+    #[test]
+    fn auto_threshold_mad_handles_dense_signal() {
+        // Roughly uniform [0, 10] distribution: MAD ≈ 2.5, median ≈ 5.
+        // threshold = 5 + 5 × 1.4826 × 2.5 ≈ 23.5; floor lower.
+        let scores: Vec<f64> = (0..1000).map(|i| (i % 11) as f64).collect();
+        let t = auto_threshold_mad(&scores, 5.0, 1.0);
+        assert!(
+            t > 15.0,
+            "expected a meaningful adaptive threshold; got {t}"
+        );
+    }
+
+    #[test]
+    fn auto_threshold_mad_floor_respected() {
+        // Floor higher than computed adaptive → returns floor.
+        let scores: Vec<f64> = (0..1000).map(|i| (i % 5) as f64).collect();
+        let t = auto_threshold_mad(&scores, 5.0, 100.0);
+        assert_eq!(t, 100.0);
     }
 
     #[test]

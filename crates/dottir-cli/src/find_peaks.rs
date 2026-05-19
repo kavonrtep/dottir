@@ -13,8 +13,8 @@ use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
 
 use dottir_core::{
-    find_peaks_in_periodogram, find_peaks_in_spectrum, Peak, PeakKind, PeaksConfig, Spectrum,
-    SubrepeatConfig,
+    auto_threshold_mad, find_peaks_in_periodogram, find_peaks_in_spectrum, Peak, PeakKind,
+    PeaksConfig, Spectrum, SubrepeatConfig,
 };
 
 #[derive(Parser, Debug)]
@@ -40,9 +40,28 @@ pub struct FindPeaksArgs {
 
     /// Minimum score for a peak candidate. Defaults:
     /// 10 for `--rank-by signal_mean` (the default), 5 for
-    /// `--rank-by z_score`.
+    /// `--rank-by z_score`. With `--auto-threshold`, drops to 5 for
+    /// `signal_mean` unless explicitly set.
+    ///
+    /// With `--auto-threshold`, this value acts as a **floor** —
+    /// the adaptive threshold can rise above it, never below.
     #[arg(long, value_name = "FLOAT")]
     pub min_score: Option<f64>,
+
+    /// Periodogram only: enable adaptive per-record threshold via
+    /// `median + k × 1.4826 × MAD` of the rank-by column values.
+    /// `--min-score` becomes the floor the adaptive value can never
+    /// drop below. Reports the resolved threshold per record in a
+    /// `# diag` comment line. Useful for datasets with widely
+    /// varying per-record signal-to-noise.
+    #[arg(long)]
+    pub auto_threshold: bool,
+
+    /// `k` multiplier for the MAD-based adaptive threshold.
+    /// Default 5 (≈5σ equivalent). Higher = stricter; lower =
+    /// catches weaker signals at the risk of noise.
+    #[arg(long, default_value_t = 5.0, value_name = "FLOAT")]
+    pub auto_threshold_k: f64,
 
     /// Drop peaks at `period > boundary_fraction × max_period` —
     /// kernel edge artifacts saturate at `k ≈ N/2`. Default 0.9;
@@ -120,12 +139,25 @@ pub fn run(args: FindPeaksArgs) -> Result<()> {
     let (fmt, header, rows) =
         load_tsv(&args.input).with_context(|| format!("reading {}", args.input.display()))?;
 
-    let min_score = args.min_score.unwrap_or(match args.rank_by {
-        RankByArg::SignalMean => 10.0,
+    // Floor semantics: if --min-score is set, honour it exactly.
+    // Otherwise pick a default; under --auto-threshold a lower
+    // default applies (the floor is a safety net, not a target).
+    let user_set_min_score = args.min_score.is_some();
+    let base_floor = args.min_score.unwrap_or(match args.rank_by {
+        RankByArg::SignalMean => {
+            if args.auto_threshold {
+                5.0
+            } else {
+                10.0
+            }
+        }
         RankByArg::ZScore => 5.0,
     });
-    let cfg = PeaksConfig {
-        min_score,
+
+    // Base config — `min_score` gets overwritten per-record when
+    // --auto-threshold is set.
+    let base_cfg = PeaksConfig {
+        min_score: base_floor,
         harmonic_tolerance: args.harmonic_tolerance,
         max_harmonic_n: args.max_harmonic_n,
         min_harmonics: args.min_harmonics,
@@ -148,7 +180,14 @@ pub fn run(args: FindPeaksArgs) -> Result<()> {
         None => Box::new(BufWriter::new(std::io::stdout().lock())),
     };
 
-    write_header(&mut out, &args, fmt, &cfg)?;
+    write_header(
+        &mut out,
+        &args,
+        fmt,
+        &base_cfg,
+        base_floor,
+        user_set_min_score,
+    )?;
     writeln!(
         out,
         "record_id\tperiod_bp\tscore\tkind\tparent\tharmonic_n\tdivisor_n\tn_harmonics\tharmonics"
@@ -158,9 +197,35 @@ pub fn run(args: FindPeaksArgs) -> Result<()> {
     for (rid, record_rows) in records {
         let peaks = match fmt {
             InputFormat::Periodogram => {
-                process_periodogram_record(&record_rows, &header, args.rank_by, &cfg)?
+                let (scores, min_offset) = extract_periodogram_scores(&record_rows, args.rank_by)?;
+                let (threshold, mode) = if args.auto_threshold {
+                    let t = auto_threshold_mad(&scores, args.auto_threshold_k, base_floor);
+                    (t, "mad")
+                } else {
+                    (base_floor, "fixed")
+                };
+                // Per-record diagnostic so users can see the resolved
+                // threshold even when the output for this record is
+                // empty.
+                writeln!(
+                    out,
+                    "# diag record_id={rid} length={} threshold={threshold:.4} threshold_mode={mode} floor={base_floor}",
+                    scores.len() + min_offset as usize - 1
+                )?;
+                let mut cfg = base_cfg;
+                cfg.min_score = threshold;
+                find_peaks_in_periodogram(&scores, min_offset, &cfg)?
             }
-            InputFormat::Fft => process_fft_record(&record_rows, &header, &cfg)?,
+            InputFormat::Fft => {
+                // FFT records: no adaptive threshold (different scale,
+                // less benefit; revisit if real-data validation calls
+                // for it). Still emit a per-record diag for symmetry.
+                writeln!(
+                    out,
+                    "# diag record_id={rid} threshold={base_floor:.4} threshold_mode=fixed floor={base_floor}"
+                )?;
+                process_fft_record(&record_rows, &header, &base_cfg)?
+            }
         };
         // Default output: fundamentals + sub-repeats; harmonics
         // hidden unless --show-harmonics. Sub-repeats are emitted
@@ -307,21 +372,18 @@ fn group_by_record(rows: Vec<Row>, _header: &[String]) -> Result<Vec<(String, Ve
 // Per-record processing
 // ---------------------------------------------------------------------------
 
-fn process_periodogram_record(
-    rows: &[Row],
-    _header: &[String],
-    rank_by: RankByArg,
-    cfg: &PeaksConfig,
-) -> Result<Vec<Peak>> {
+/// Extract the per-offset score vector (and its `min_offset`) for a
+/// periodogram record. Returns the score column selected by
+/// `rank_by`. Used both by the per-record loop (which then computes
+/// adaptive threshold over these scores) and ultimately fed into
+/// `find_peaks_in_periodogram`.
+fn extract_periodogram_scores(rows: &[Row], rank_by: RankByArg) -> Result<(Vec<f64>, u32)> {
     let col = match rank_by {
         RankByArg::SignalMean => "signal_mean",
         RankByArg::ZScore => "z_score",
     };
-    // Build the per-offset score array. The TSV is already sorted
-    // by k within a record (it's how dottir periodogram writes it),
-    // and the offsets are dense — `k = min_offset + i`.
     if rows.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), 0));
     }
     let mut ks: Vec<u32> = Vec::with_capacity(rows.len());
     let mut scores: Vec<f64> = Vec::with_capacity(rows.len());
@@ -340,7 +402,6 @@ fn process_periodogram_record(
         scores.push(s);
     }
     let min_offset = ks[0];
-    // Sanity check that offsets are dense.
     for (i, &k) in ks.iter().enumerate() {
         if k != min_offset + i as u32 {
             anyhow::bail!(
@@ -350,7 +411,7 @@ fn process_periodogram_record(
             );
         }
     }
-    Ok(find_peaks_in_periodogram(&scores, min_offset, cfg)?)
+    Ok((scores, min_offset))
 }
 
 fn process_fft_record(rows: &[Row], _header: &[String], cfg: &PeaksConfig) -> Result<Vec<Peak>> {
@@ -416,6 +477,8 @@ fn write_header(
     args: &FindPeaksArgs,
     fmt: InputFormat,
     cfg: &PeaksConfig,
+    base_floor: f64,
+    user_set_min_score: bool,
 ) -> std::io::Result<()> {
     writeln!(out, "# dottir find-peaks v{}", env!("CARGO_PKG_VERSION"))?;
     writeln!(out, "# input: {}", args.input.display())?;
@@ -437,6 +500,20 @@ fn write_header(
             }
         )?;
         writeln!(out, "# boundary_fraction: {}", cfg.boundary_fraction)?;
+        if args.auto_threshold {
+            writeln!(
+                out,
+                "# auto_threshold: true k={} floor={base_floor}{}",
+                args.auto_threshold_k,
+                if user_set_min_score {
+                    " (user)"
+                } else {
+                    " (default)"
+                }
+            )?;
+        } else {
+            writeln!(out, "# auto_threshold: false")?;
+        }
     }
     writeln!(out, "# min_score: {}", cfg.min_score)?;
     writeln!(out, "# harmonic_tolerance: {}", cfg.harmonic_tolerance)?;
