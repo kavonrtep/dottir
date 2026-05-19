@@ -4,6 +4,7 @@
 //! greyscale PNG + a `.params.toml` sidecar. Mirrors C dotter CLI option
 //! names where reasonable.
 
+mod find_peaks;
 mod periodogram;
 
 use std::path::{Path, PathBuf};
@@ -43,6 +44,10 @@ enum Command {
     /// shaped pixels along each anti-diagonal — peaks correspond to
     /// the visible repeat periodicities in the dotplot view.
     Periodogram(periodogram::PeriodogramArgs),
+    /// Classify periodogram or FFT peaks into fundamentals,
+    /// harmonics, and (optionally) sub-repeats. Takes the TSV
+    /// produced by `dottir periodogram` (or its `--fft` companion).
+    FindPeaks(find_peaks::FindPeaksArgs),
 }
 
 #[derive(clap::Args, Debug)]
@@ -218,6 +223,7 @@ fn main() -> Result<()> {
     match cli.command {
         Command::Batch(args) => run_batch(args),
         Command::Periodogram(args) => periodogram::run(args),
+        Command::FindPeaks(args) => find_peaks::run(args),
     }
 }
 
