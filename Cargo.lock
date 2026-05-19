@@ -921,6 +921,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "dottir-render"
+version = "0.1.2"
+dependencies = [
+ "dottir-core",
+]
+
+[[package]]
 name = "downcast-rs"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

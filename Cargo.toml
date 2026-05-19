@@ -5,6 +5,7 @@ members = [
     "crates/dottir-io",
     "crates/dottir-cli",
     "crates/dottir-gui",
+    "crates/dottir-render",
 ]
 
 [workspace.package]
@@ -33,6 +34,7 @@ proptest = "1"
 # Internal
 dottir-core = { path = "crates/dottir-core" }
 dottir-io = { path = "crates/dottir-io" }
+dottir-render = { path = "crates/dottir-render" }
 
 [profile.release]
 lto = "thin"
