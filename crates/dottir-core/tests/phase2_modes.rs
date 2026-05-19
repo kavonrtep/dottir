@@ -322,7 +322,10 @@ fn auto_pixel_fac_from_karlin() {
     );
     // Karlin ran even though window_size was user-fixed, because
     // pixel_fac was auto.
-    let karlin = p.params.karlin.expect("Karlin should have run for auto pixel_fac");
+    let karlin = p
+        .params
+        .karlin
+        .expect("Karlin should have run for auto pixel_fac");
     let expected = ((0.2 * 256.0 / karlin.expected_residue_score).round() as u32).max(1);
     assert_eq!(
         p.params.pixel_fac, expected,
@@ -334,7 +337,10 @@ fn auto_pixel_fac_from_karlin() {
     cfg2.pixel_fac = 80;
     let p2 = compute_dotplot(&q, &s, &cfg2).unwrap();
     assert_eq!(p2.params.pixel_fac, 80);
-    assert!(p2.params.karlin.is_none(), "Karlin should be skipped when both W and pixel_fac are user-set");
+    assert!(
+        p2.params.karlin.is_none(),
+        "Karlin should be skipped when both W and pixel_fac are user-set"
+    );
 }
 
 /// Determinism across thread counts placeholder — for Phase 3 we'll

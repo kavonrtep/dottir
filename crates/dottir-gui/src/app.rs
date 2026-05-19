@@ -139,7 +139,7 @@ impl Default for Settings {
             align_window_size: 100,
             auto_fit_compute_zoom: true,
             auto_pixel_fac: true,
-            show_ridge_overlay: true,
+            show_ridge_overlay: false,
             ridge_min_length: 8,
             ridge_max_gap: 2,
         }
@@ -172,14 +172,15 @@ struct Greyramp {
 
 impl Default for Greyramp {
     fn default() -> Self {
-        // White and black colocated at 100 — a hard threshold rather
-        // than a ramp. Only pixels ≥ 100 paint black; everything else
-        // is white. Suppresses the noise floor on dense self-
-        // comparisons and matches the user's preferred starting view.
-        // (Spec §4.2.2 lists C dotter's 40/100 ramp; the slider below
-        // still lets users dial it in.)
+        // C dotter defaults per spec §4.2.2: white=40, black=100. The
+        // 60-value linear gradient between them is what gives dotter
+        // its smooth-looking diagonals — marginal cells along a
+        // diagonal fade through intermediate greys, which the eye
+        // reads as anti-aliasing. A colocated white/black point
+        // collapses to a hard threshold and produces a visibly
+        // "rasterized" look.
         Self {
-            white: 100,
+            white: 40,
             black: 100,
             swap: false,
         }
@@ -428,7 +429,11 @@ impl DottirApp {
         // the auto_pixel_fac checkbox and seed the slider at 50 so it
         // has a sensible value if the user later toggles auto off.
         let startup_auto_pf = startup.pixel_fac == 0;
-        let startup_slider_pf = if startup_auto_pf { 50 } else { startup.pixel_fac };
+        let startup_slider_pf = if startup_auto_pf {
+            50
+        } else {
+            startup.pixel_fac
+        };
         let settings = Settings {
             mode: startup.mode,
             matrix_name: startup.matrix_name.clone(),
@@ -445,7 +450,7 @@ impl DottirApp {
             align_window_size: 100,
             auto_fit_compute_zoom: true,
             auto_pixel_fac: startup_auto_pf,
-            show_ridge_overlay: true,
+            show_ridge_overlay: false,
             ridge_min_length: 8,
             ridge_max_gap: 2,
         };
@@ -801,16 +806,12 @@ impl DottirApp {
 
         // Pixelmap pixels → *absolute* residues (offset by the
         // current slice's start).
-        let sel_lo_x = cur_slice.q_range.start
-            + (px_lo_x * cur_zoom).floor().max(0.0) as usize;
-        let sel_lo_y = cur_slice.s_range.start
-            + (px_lo_y * cur_zoom).floor().max(0.0) as usize;
-        let sel_hi_x = (cur_slice.q_range.start
-            + (px_hi_x * cur_zoom).ceil() as usize)
-            .min(q.len());
-        let sel_hi_y = (cur_slice.s_range.start
-            + (px_hi_y * cur_zoom).ceil() as usize)
-            .min(s.len());
+        let sel_lo_x = cur_slice.q_range.start + (px_lo_x * cur_zoom).floor().max(0.0) as usize;
+        let sel_lo_y = cur_slice.s_range.start + (px_lo_y * cur_zoom).floor().max(0.0) as usize;
+        let sel_hi_x =
+            (cur_slice.q_range.start + (px_hi_x * cur_zoom).ceil() as usize).min(q.len());
+        let sel_hi_y =
+            (cur_slice.s_range.start + (px_hi_y * cur_zoom).ceil() as usize).min(s.len());
         let sel_w = sel_hi_x.saturating_sub(sel_lo_x).max(1);
         let sel_h = sel_hi_y.saturating_sub(sel_lo_y).max(1);
 
@@ -840,10 +841,8 @@ impl DottirApp {
         // The user's view should land on the selection inside the
         // new slice's pixelmap coords:
         //   pixel = (residue − slice.start) / new_zoom
-        let new_off_x =
-            ((sel_lo_x - new_slice.q_range.start) as f64 / new_zoom as f64) as f32;
-        let new_off_y =
-            ((sel_lo_y - new_slice.s_range.start) as f64 / new_zoom as f64) as f32;
+        let new_off_x = ((sel_lo_x - new_slice.q_range.start) as f64 / new_zoom as f64) as f32;
+        let new_off_y = ((sel_lo_y - new_slice.s_range.start) as f64 / new_zoom as f64) as f32;
 
         tracing::info!(
             "rect-zoom: zoom {} → {} (sel {}×{} residues, slice {}..{} × {}..{})",
@@ -908,7 +907,10 @@ impl DottirApp {
         // Resolve the target slice: explicit (`target_slice` set by
         // action_*) wins; otherwise reuse the current slice if any;
         // otherwise default to the full sequences.
-        let target_slice = self.target_slice.take().or_else(|| self.current_slice.clone());
+        let target_slice = self
+            .target_slice
+            .take()
+            .or_else(|| self.current_slice.clone());
         let qlen = self.query.as_ref().map(|q| q.len()).unwrap_or(0);
         let slen = self.subject.as_ref().map(|s| s.len()).unwrap_or(0);
         let target_slice = target_slice.unwrap_or_else(|| ViewSlice::full(qlen, slen));
@@ -968,8 +970,7 @@ impl DottirApp {
             // slice ranges are equal (i.e., the user is looking at the
             // same residue range on both axes, typically the full view
             // or a square selection along the main diagonal).
-            self_comparison: self.settings.self_comparison
-                && target_slice.is_self_comparison(),
+            self_comparison: self.settings.self_comparison && target_slice.is_self_comparison(),
             triangle: self.settings.triangle,
             disable_mirror: false,
             memory_limit_bytes: self.settings.memory_limit_bytes,
@@ -1858,8 +1859,7 @@ impl DottirApp {
                         // a surprise jump.
                         if prev_auto && !self.settings.auto_pixel_fac {
                             if let Some(plot) = self.plot.as_ref() {
-                                self.settings.pixel_fac =
-                                    plot.params.pixel_fac.clamp(1, 255);
+                                self.settings.pixel_fac = plot.params.pixel_fac.clamp(1, 255);
                             }
                         }
                     }
@@ -1996,10 +1996,7 @@ impl DottirApp {
                 ui.heading("Ridge overlay");
                 ui.horizontal(|ui| {
                     if ui
-                        .checkbox(
-                            &mut self.settings.show_ridge_overlay,
-                            "Show vector ridges",
-                        )
+                        .checkbox(&mut self.settings.show_ridge_overlay, "Show vector ridges")
                         .on_hover_text(
                             "Draw anti-aliased line segments over coherent diagonal runs \
                              detected in the raster. Hides per-window intensity oscillation \
@@ -2028,7 +2025,8 @@ impl DottirApp {
                         ui.label("Max gap (cells):");
                         if ui
                             .add(
-                                egui::DragValue::new(&mut self.settings.ridge_max_gap).range(0..=20),
+                                egui::DragValue::new(&mut self.settings.ridge_max_gap)
+                                    .range(0..=20),
                             )
                             .changed()
                         {
@@ -2277,10 +2275,8 @@ impl DottirApp {
             // every frame and never get below the threshold).
             if self.settings.auto_fit_compute_zoom {
                 if let Some((prev_w, prev_h)) = self.last_compute_canvas_size {
-                    let dw =
-                        (new_area.0 - prev_w).abs() / prev_w.max(1.0);
-                    let dh =
-                        (new_area.1 - prev_h).abs() / prev_h.max(1.0);
+                    let dw = (new_area.0 - prev_w).abs() / prev_w.max(1.0);
+                    let dh = (new_area.1 - prev_h).abs() / prev_h.max(1.0);
                     if dw > RESIZE_RETARGET_THRESHOLD || dh > RESIZE_RETARGET_THRESHOLD {
                         self.pending_resize_retarget = Some(std::time::Instant::now());
                     }
@@ -2395,9 +2391,7 @@ impl DottirApp {
                         let local = p - plot_area.left_top();
                         let qp = (local.x + draw_offset.x).floor() as i64;
                         let sp = (local.y + draw_offset.y).floor() as i64;
-                        if qp >= 0 && qp < plot.width as i64
-                            && sp >= 0 && sp < plot.height as i64
-                        {
+                        if qp >= 0 && qp < plot.width as i64 && sp >= 0 && sp < plot.height as i64 {
                             let z = plot.params.zoom.max(1) as i64;
                             let (q_off, s_off) = self
                                 .current_slice
@@ -2461,8 +2455,7 @@ impl DottirApp {
             // progress. Drawn over the pixelmap but under the
             // crosshair / labels.
             if let Some(rs) = self.rect_select {
-                let r = Rect::from_two_pos(rs.start_screen, rs.current_screen)
-                    .intersect(plot_area);
+                let r = Rect::from_two_pos(rs.start_screen, rs.current_screen).intersect(plot_area);
                 if r.width() > 0.5 && r.height() > 0.5 {
                     clip_painter.rect_filled(
                         r,
@@ -2501,8 +2494,7 @@ impl DottirApp {
                     if pixel_x >= plot.width as usize {
                         continue;
                     }
-                    let sx = plot_area.left()
-                        + ((pixel_x as f32) - draw_offset.x);
+                    let sx = plot_area.left() + ((pixel_x as f32) - draw_offset.x);
                     if sx < plot_area.left() || sx > plot_area.right() {
                         continue;
                     }
@@ -2524,8 +2516,7 @@ impl DottirApp {
                     if pixel_y >= plot.height as usize {
                         continue;
                     }
-                    let sy = plot_area.top()
-                        + ((pixel_y as f32) - draw_offset.y);
+                    let sy = plot_area.top() + ((pixel_y as f32) - draw_offset.y);
                     if sy < plot_area.top() || sy > plot_area.bottom() {
                         continue;
                     }
@@ -2546,25 +2537,16 @@ impl DottirApp {
             // ridges in dark grey, reverse ridges in magenta to
             // mirror the inverted-repeat colour convention.
             if self.settings.show_ridge_overlay && !self.current_ridges.is_empty() {
-                let stroke_fwd =
-                    egui::Stroke::new(0.75, Color32::from_rgb(20, 20, 20));
+                let stroke_fwd = egui::Stroke::new(0.75, Color32::from_rgb(20, 20, 20));
                 let stroke_rev = egui::Stroke::new(0.75, Color32::from_rgb(170, 0, 170));
                 for ridge in &self.current_ridges {
                     let p0 = Pos2::new(
-                        plot_area.left()
-                            + (ridge.start.0 as f32 + 0.5)
-                            - draw_offset.x,
-                        plot_area.top()
-                            + (ridge.start.1 as f32 + 0.5)
-                            - draw_offset.y,
+                        plot_area.left() + (ridge.start.0 as f32 + 0.5) - draw_offset.x,
+                        plot_area.top() + (ridge.start.1 as f32 + 0.5) - draw_offset.y,
                     );
                     let p1 = Pos2::new(
-                        plot_area.left()
-                            + (ridge.end.0 as f32 + 0.5)
-                            - draw_offset.x,
-                        plot_area.top()
-                            + (ridge.end.1 as f32 + 0.5)
-                            - draw_offset.y,
+                        plot_area.left() + (ridge.end.0 as f32 + 0.5) - draw_offset.x,
+                        plot_area.top() + (ridge.end.1 as f32 + 0.5) - draw_offset.y,
                     );
                     let stroke = match ridge.direction {
                         RidgeDirection::Forward => stroke_fwd,
@@ -2602,68 +2584,68 @@ impl DottirApp {
                     && cs_pix >= 0.0
                     && cs_pix < plot.height as f32;
                 if in_slice {
-                let cx = plot_area.left() + ((cq_pix + 0.5) - draw_offset.x);
-                let cy = plot_area.top() + ((cs_pix + 0.5) - draw_offset.y);
-                let stroke = egui::Stroke::new(1.0, Color32::from_rgb(255, 80, 80));
-                clip_painter.line_segment(
-                    [
-                        Pos2::new(plot_area.left(), cy),
-                        Pos2::new(plot_area.right(), cy),
-                    ],
-                    stroke,
-                );
-                clip_painter.line_segment(
-                    [
-                        Pos2::new(cx, plot_area.top()),
-                        Pos2::new(cx, plot_area.bottom()),
-                    ],
-                    stroke,
-                );
-
-                // Coord label next to the cross — crosshair is
-                // already in absolute residue coords.
-                let q_seq = cq_seq as usize;
-                let s_seq = cs_seq as usize;
-                let label = format!(
-                    "q = {}, s = {}",
-                    format_coord(self.query.as_ref(), q_seq),
-                    format_coord(self.subject.as_ref(), s_seq),
-                );
-                let font = egui::FontId::monospace(11.0);
-                let label_size = clip_painter
-                    .layout_no_wrap(label.clone(), font.clone(), Color32::BLACK)
-                    .size();
-                let pad = 4.0;
-                let mut lx = cx + 6.0;
-                let mut ly = cy + 6.0;
-                if lx + label_size.x + pad > plot_area.right() {
-                    lx = cx - 6.0 - label_size.x - 2.0 * pad;
-                }
-                if ly + label_size.y + pad > plot_area.bottom() {
-                    ly = cy - 6.0 - label_size.y - 2.0 * pad;
-                }
-                // 1-px white shadow in the four cardinal directions
-                // keeps the dark red label legible over a black
-                // diagonal without occluding dotplot pixels with a
-                // coloured patch.
-                let label_pos = Pos2::new(lx, ly);
-                let shadow = Color32::WHITE;
-                for &(dx, dy) in &[(-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0)] {
-                    clip_painter.text(
-                        Pos2::new(label_pos.x + dx, label_pos.y + dy),
-                        egui::Align2::LEFT_TOP,
-                        &label,
-                        font.clone(),
-                        shadow,
+                    let cx = plot_area.left() + ((cq_pix + 0.5) - draw_offset.x);
+                    let cy = plot_area.top() + ((cs_pix + 0.5) - draw_offset.y);
+                    let stroke = egui::Stroke::new(1.0, Color32::from_rgb(255, 80, 80));
+                    clip_painter.line_segment(
+                        [
+                            Pos2::new(plot_area.left(), cy),
+                            Pos2::new(plot_area.right(), cy),
+                        ],
+                        stroke,
                     );
-                }
-                clip_painter.text(
-                    label_pos,
-                    egui::Align2::LEFT_TOP,
-                    label,
-                    font,
-                    Color32::from_rgb(120, 0, 0),
-                );
+                    clip_painter.line_segment(
+                        [
+                            Pos2::new(cx, plot_area.top()),
+                            Pos2::new(cx, plot_area.bottom()),
+                        ],
+                        stroke,
+                    );
+
+                    // Coord label next to the cross — crosshair is
+                    // already in absolute residue coords.
+                    let q_seq = cq_seq as usize;
+                    let s_seq = cs_seq as usize;
+                    let label = format!(
+                        "q = {}, s = {}",
+                        format_coord(self.query.as_ref(), q_seq),
+                        format_coord(self.subject.as_ref(), s_seq),
+                    );
+                    let font = egui::FontId::monospace(11.0);
+                    let label_size = clip_painter
+                        .layout_no_wrap(label.clone(), font.clone(), Color32::BLACK)
+                        .size();
+                    let pad = 4.0;
+                    let mut lx = cx + 6.0;
+                    let mut ly = cy + 6.0;
+                    if lx + label_size.x + pad > plot_area.right() {
+                        lx = cx - 6.0 - label_size.x - 2.0 * pad;
+                    }
+                    if ly + label_size.y + pad > plot_area.bottom() {
+                        ly = cy - 6.0 - label_size.y - 2.0 * pad;
+                    }
+                    // 1-px white shadow in the four cardinal directions
+                    // keeps the dark red label legible over a black
+                    // diagonal without occluding dotplot pixels with a
+                    // coloured patch.
+                    let label_pos = Pos2::new(lx, ly);
+                    let shadow = Color32::WHITE;
+                    for &(dx, dy) in &[(-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0)] {
+                        clip_painter.text(
+                            Pos2::new(label_pos.x + dx, label_pos.y + dy),
+                            egui::Align2::LEFT_TOP,
+                            &label,
+                            font.clone(),
+                            shadow,
+                        );
+                    }
+                    clip_painter.text(
+                        label_pos,
+                        egui::Align2::LEFT_TOP,
+                        label,
+                        font,
+                        Color32::from_rgb(120, 0, 0),
+                    );
                 }
             }
         });
@@ -2721,8 +2703,7 @@ impl DottirApp {
         let mut t = (seq_q_lo / step_x as u64) * step_x as u64;
         while t < seq_q_hi.saturating_add(step_x as u64) {
             if t >= seq_q_lo && t <= seq_q_hi {
-                let sx = plot_area.left()
-                    + ((t - q_off) as f32 / zoom_us - draw_offset.x);
+                let sx = plot_area.left() + ((t - q_off) as f32 / zoom_us - draw_offset.x);
                 if sx < plot_area.left() - 1.0 || sx > plot_area.right() + 1.0 {
                     t = t.saturating_add(step_x as u64);
                     if step_x == 0.0 {
@@ -2761,8 +2742,7 @@ impl DottirApp {
         let mut t = (seq_s_lo / step_y as u64) * step_y as u64;
         while t < seq_s_hi.saturating_add(step_y as u64) {
             if t >= seq_s_lo && t <= seq_s_hi {
-                let sy =
-                    plot_area.top() + ((t - s_off) as f32 / zoom_us - draw_offset.y);
+                let sy = plot_area.top() + ((t - s_off) as f32 / zoom_us - draw_offset.y);
                 if sy < plot_area.top() - 1.0 || sy > plot_area.bottom() + 1.0 {
                     t = t.saturating_add(step_y as u64);
                     if step_y == 0.0 {
@@ -2811,10 +2791,8 @@ impl DottirApp {
                     if r_end <= r_start {
                         continue;
                     }
-                    let x0 = plot_area.left()
-                        + (r_start as f32 / zoom_us - draw_offset.x);
-                    let x1 = plot_area.left()
-                        + (r_end as f32 / zoom_us - draw_offset.x);
+                    let x0 = plot_area.left() + (r_start as f32 / zoom_us - draw_offset.x);
+                    let x1 = plot_area.left() + (r_end as f32 / zoom_us - draw_offset.x);
                     let span = (x1 - x0).max(0.0);
                     if span < 18.0 {
                         continue;
@@ -2842,10 +2820,8 @@ impl DottirApp {
                     if r_end <= r_start {
                         continue;
                     }
-                    let y0 = plot_area.top()
-                        + (r_start as f32 / zoom_us - draw_offset.y);
-                    let y1 = plot_area.top()
-                        + (r_end as f32 / zoom_us - draw_offset.y);
+                    let y0 = plot_area.top() + (r_start as f32 / zoom_us - draw_offset.y);
+                    let y1 = plot_area.top() + (r_end as f32 / zoom_us - draw_offset.y);
                     let span = (y1 - y0).max(0.0);
                     if span < 14.0 {
                         continue;
@@ -3806,4 +3782,3 @@ fn save_png(app: &mut DottirApp) {
         }
     }
 }
-
