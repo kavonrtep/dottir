@@ -872,6 +872,7 @@ dependencies = [
  "clap",
  "dottir-core",
  "dottir-io",
+ "rayon",
  "tracing",
  "tracing-subscriber",
 ]

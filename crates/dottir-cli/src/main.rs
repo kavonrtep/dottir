@@ -4,6 +4,8 @@
 //! greyscale PNG + a `.params.toml` sidecar. Mirrors C dotter CLI option
 //! names where reasonable.
 
+mod periodogram;
+
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -36,6 +38,11 @@ struct Cli {
 enum Command {
     /// Compute a dotplot and write a PNG + params sidecar.
     Batch(BatchArgs),
+    /// Compute a self-comparison periodogram per FASTA record and
+    /// write a single TSV. Sums the dotplot's windowed, greyramp-
+    /// shaped pixels along each anti-diagonal — peaks correspond to
+    /// the visible repeat periodicities in the dotplot view.
+    Periodogram(periodogram::PeriodogramArgs),
 }
 
 #[derive(clap::Args, Debug)]
@@ -210,6 +217,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Batch(args) => run_batch(args),
+        Command::Periodogram(args) => periodogram::run(args),
     }
 }
 
