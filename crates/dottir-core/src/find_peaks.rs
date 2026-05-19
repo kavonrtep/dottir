@@ -257,6 +257,7 @@ pub fn find_peaks_in_periodogram(
 
     // 3. Consolidation (catches "harmonic-claimed-as-fundamental").
     consolidate(&mut candidates, HarmonicDirection::LargerIsHarmonic, cfg);
+    reparent(&mut candidates, HarmonicDirection::LargerIsHarmonic, cfg);
 
     // 4. Sub-repeats (periodogram-only).
     let subrepeats = if let Some(sub_cfg) = cfg.subrepeats {
@@ -302,6 +303,7 @@ pub fn find_peaks_in_spectrum(
 
     classify(&mut candidates, HarmonicDirection::SmallerIsHarmonic, cfg);
     consolidate(&mut candidates, HarmonicDirection::SmallerIsHarmonic, cfg);
+    reparent(&mut candidates, HarmonicDirection::SmallerIsHarmonic, cfg);
 
     let mut out: Vec<Peak> = candidates
         .into_iter()
@@ -339,10 +341,16 @@ fn strict_local_maxima(scores: &[f64]) -> Vec<(usize, f64)> {
 // Internal: greedy classification
 // ---------------------------------------------------------------------------
 
-/// Greedy strongest-first classification. Each peak that's a
-/// near-integer multiple/divisor of an earlier-claimed fundamental
-/// gets marked as a harmonic of it; otherwise it becomes a new
-/// fundamental.
+/// Greedy strongest-first classification with **best-parent**
+/// selection. Each candidate is checked against every claimed
+/// fundamental; if any match within tolerance, it joins the
+/// best-matching ladder. Otherwise it becomes a new fundamental.
+///
+/// "Best" tie-breaks (in order):
+/// 1. smallest normalised error (distance / allowed_bp);
+/// 2. smallest absolute period distance;
+/// 3. smallest `n` (prefer direct integer ratios over deep harmonics);
+/// 4. strongest parent score (for determinism).
 fn classify(peaks: &mut [Peak], direction: HarmonicDirection, cfg: &PeaksConfig) {
     // Sort strongest-first. Ties broken by lower period (shorter
     // period first) for determinism.
@@ -361,34 +369,168 @@ fn classify(peaks: &mut [Peak], direction: HarmonicDirection, cfg: &PeaksConfig)
     // confirmed fundamentals by index.
     let mut fundamental_idx: Vec<usize> = Vec::new();
     for i in 0..peaks.len() {
-        let mut matched_to: Option<(usize, u32)> = None;
-        for &fi in &fundamental_idx {
-            if let Some(n) = harmonic_ratio(
-                peaks[i].period,
-                peaks[fi].period,
-                direction,
-                cfg.harmonic_tolerance,
-                cfg.max_harmonic_n,
-            ) {
-                matched_to = Some((fi, n));
-                break;
-            }
-        }
-        if let Some((fi, n)) = matched_to {
+        let parents: Vec<(f64, f64)> = fundamental_idx
+            .iter()
+            .map(|&fi| (peaks[fi].period, peaks[fi].score))
+            .collect();
+        let matched = best_parent_match(peaks[i].period, &parents, direction, cfg);
+        if let Some(m) = matched {
+            // Find the index of the matched parent.
+            let fi = fundamental_idx
+                .iter()
+                .copied()
+                .find(|&fi| (peaks[fi].period - m.parent_period).abs() < 1e-9)
+                .expect("parent index lookup should succeed");
             let parent_period = peaks[fi].period;
             let taken = std::mem::replace(&mut peaks[i], Peak::new_fundamental(0.0, 0.0));
-            peaks[i] = taken.into_harmonic(parent_period, n);
+            peaks[i] = taken.into_harmonic(parent_period, m.n);
             // Record the harmonic position in the parent's ladder.
             let prev = std::mem::take(&mut peaks[fi].harmonics);
             let mut new = prev;
-            if !new.contains(&n) {
-                new.push(n);
+            if !new.contains(&m.n) {
+                new.push(m.n);
                 new.sort_unstable();
             }
             peaks[fi].n_harmonics = new.len() as u32;
             peaks[fi].harmonics = new;
         } else {
             fundamental_idx.push(i);
+        }
+    }
+}
+
+/// Result of a parent-match search.
+#[derive(Clone, Copy, Debug)]
+struct ParentMatch {
+    parent_period: f64,
+    n: u32,
+    /// Normalised error: `distance_bp / allowed_bp`. Smaller is better.
+    norm_err: f64,
+    /// Absolute distance in bp to the expected period.
+    abs_distance: f64,
+}
+
+/// Pick the best matching parent for `peak_period` from the list of
+/// `(period, score)` parent candidates. Returns `None` if no parent
+/// matches within tolerance.
+fn best_parent_match(
+    peak_period: f64,
+    parents: &[(f64, f64)],
+    direction: HarmonicDirection,
+    cfg: &PeaksConfig,
+) -> Option<ParentMatch> {
+    let mut best: Option<(f64, ParentMatch)> = None; // (parent_score, match)
+    for &(parent_period, parent_score) in parents {
+        let Some(n) = harmonic_ratio(
+            peak_period,
+            parent_period,
+            direction,
+            cfg.harmonic_tolerance,
+            cfg.max_harmonic_n,
+        ) else {
+            continue;
+        };
+        // Expected period in bp.
+        let expected = match direction {
+            HarmonicDirection::LargerIsHarmonic => parent_period * n as f64,
+            HarmonicDirection::SmallerIsHarmonic => parent_period / n as f64,
+        };
+        let abs_distance = (peak_period - expected).abs();
+        // `allowed_bp` mirrors the harmonic_ratio acceptance:
+        // ratio_err <= tol  ↔  |period - expected|/expected <= tol.
+        let allowed = (expected * cfg.harmonic_tolerance).abs().max(f64::EPSILON);
+        let norm_err = abs_distance / allowed;
+        let m = ParentMatch {
+            parent_period,
+            n,
+            norm_err,
+            abs_distance,
+        };
+        let replace = match &best {
+            None => true,
+            Some((best_score, best_m)) => {
+                // 1. smaller normalised error wins
+                if m.norm_err < best_m.norm_err - 1e-12 {
+                    true
+                } else if m.norm_err > best_m.norm_err + 1e-12 {
+                    false
+                // 2. smaller absolute distance wins
+                } else if m.abs_distance < best_m.abs_distance - 1e-12 {
+                    true
+                } else if m.abs_distance > best_m.abs_distance + 1e-12 {
+                    false
+                // 3. smaller n wins
+                } else if m.n < best_m.n {
+                    true
+                } else if m.n > best_m.n {
+                    false
+                // 4. stronger parent for determinism
+                } else {
+                    parent_score > *best_score
+                }
+            }
+        };
+        if replace {
+            best = Some((parent_score, m));
+        }
+    }
+    best.map(|(_, m)| m)
+}
+
+/// Post-consolidation pass: for every classified harmonic, recompute
+/// its best parent among the **final** fundamentals (after
+/// `consolidate` may have demoted some). This makes the final
+/// assignment independent of the order in which candidates were
+/// first classified.
+///
+/// Then rebuild every fundamental's `harmonics` ladder from the
+/// final harmonic-to-parent assignments.
+fn reparent(peaks: &mut [Peak], direction: HarmonicDirection, cfg: &PeaksConfig) {
+    // Snapshot final fundamentals as (period, score).
+    let parents: Vec<(f64, f64)> = peaks
+        .iter()
+        .filter(|p| p.kind == PeakKind::Fundamental)
+        .map(|p| (p.period, p.score))
+        .collect();
+    if parents.is_empty() {
+        return;
+    }
+
+    // Clear every fundamental's harmonics list — we'll rebuild it.
+    for p in peaks.iter_mut() {
+        if p.kind == PeakKind::Fundamental {
+            p.harmonics.clear();
+            p.n_harmonics = 0;
+        }
+    }
+
+    // For each harmonic, find the best parent in the final set.
+    // Track (harmonic_index, parent_period, n) for the ladder rebuild.
+    let mut reassignments: Vec<(usize, f64, u32)> = Vec::new();
+    for (i, p) in peaks.iter().enumerate() {
+        if p.kind != PeakKind::Harmonic {
+            continue;
+        }
+        if let Some(m) = best_parent_match(p.period, &parents, direction, cfg) {
+            reassignments.push((i, m.parent_period, m.n));
+        }
+        // If a harmonic no longer matches any parent (rare), leave it
+        // attached to its current parent — the consolidation pass will
+        // never produce an orphan harmonic in practice.
+    }
+
+    for (i, parent_period, n) in reassignments {
+        peaks[i].parent_period = Some(parent_period);
+        peaks[i].harmonic_n = Some(n);
+        // Update parent's ladder.
+        if let Some(parent_idx) = peaks.iter().position(|p| {
+            p.kind == PeakKind::Fundamental && (p.period - parent_period).abs() < 1e-9
+        }) {
+            if !peaks[parent_idx].harmonics.contains(&n) {
+                peaks[parent_idx].harmonics.push(n);
+                peaks[parent_idx].harmonics.sort_unstable();
+                peaks[parent_idx].n_harmonics = peaks[parent_idx].harmonics.len() as u32;
+            }
         }
     }
 }
@@ -844,6 +986,92 @@ mod tests {
     fn empty_input_returns_empty() {
         let peaks = find_peaks_in_periodogram(&[], 3, &PeaksConfig::default()).unwrap();
         assert!(peaks.is_empty());
+    }
+
+    #[test]
+    fn overlapping_high_harmonic_families_classified_correctly() {
+        // The classic bug case: periods 7 and 13 with peaks extending
+        // to where coincidental near-integer ratios appear. Period
+        // 78 = 6 * 13 is also within 2% of 11 * 7 = 77, so a
+        // first-match algorithm misclassifies 78 as a deep harmonic
+        // of 7. Best-parent matching must pick 13.
+        //
+        // Place specific peaks manually (no Gaussian spread or full
+        // arithmetic sequences) so 7 and 13 both register as strict
+        // local maxima without colliding with each other's harmonics.
+        let mut scores = vec![0.0_f64; 300];
+        // Family A (period 7): ladder — skip 14 (collides with 13)
+        // and 77 (collides with 78). Keep enough to register as a
+        // fundamental with harmonics.
+        for k in [7, 21, 28, 35, 42, 49, 56, 63, 70, 84, 98, 112, 126] {
+            scores[k] = 100.0;
+        }
+        // Family B (period 13): ladder — skip 91 (= 7×13, shared with
+        // family A and would be a shared-multiple confound).
+        for k in [13, 26, 39, 52, 65, 78, 104, 117, 130] {
+            scores[k] = 100.0;
+        }
+        let peaks = find_peaks_in_periodogram(&scores, 0, &PeaksConfig::default()).unwrap();
+
+        // Both families should be fundamentals.
+        let fund_periods: Vec<u32> = peaks
+            .iter()
+            .filter(|p| p.kind == PeakKind::Fundamental)
+            .map(|p| p.period as u32)
+            .collect();
+        assert!(fund_periods.contains(&7), "missing 7: {fund_periods:?}");
+        assert!(fund_periods.contains(&13), "missing 13: {fund_periods:?}");
+
+        // Period 78 should be classified as h_6 of 13 (distance 0),
+        // NOT h_11 of 7 (distance 1). Best-parent picks 13.
+        let p78 = peaks
+            .iter()
+            .find(|p| (p.period - 78.0).abs() < 0.5)
+            .expect("expected a peak near 78");
+        assert_eq!(
+            p78.parent_period.map(|v| v as u32),
+            Some(13),
+            "78 should be harmonic of 13, not {:?}",
+            p78.parent_period
+        );
+        assert_eq!(p78.harmonic_n, Some(6));
+    }
+
+    #[test]
+    fn reparent_after_consolidation_finds_better_parent() {
+        // Construct a case where peak X is initially matched to
+        // fundamental F1, but later F2 (the biological fundamental)
+        // is also detected and X should be reattached to F2 because
+        // F2 has a cleaner integer ratio.
+        //
+        // Setup: peak at 60. F1 = 7 (60/7=8.57, n=9, err 2% — borderline);
+        // F2 = 12 (60/12=5, exact). If F2 is detected after the greedy
+        // pass attaches 60 to F1 with marginal match, reparenting must
+        // move 60 to F2.
+        let mut scores = vec![0.0_f64; 200];
+        // Make 7 the strongest fundamental so it's claimed first.
+        for k in (7..200).step_by(7) {
+            scores[k] = 100.0;
+        }
+        // Make 12 weaker but still a fundamental.
+        for k in (12..200).step_by(12) {
+            scores[k] = 50.0;
+        }
+        // Boost peak at 60 (which is also 5×12).
+        scores[60] = 200.0;
+        let peaks = find_peaks_in_periodogram(&scores, 0, &PeaksConfig::default()).unwrap();
+        let p60 = peaks
+            .iter()
+            .find(|p| (p.period - 60.0).abs() < 0.5)
+            .expect("expected a peak near 60");
+        // 60 = 5 * 12 exactly (clean), vs 60 = 8.57 * 7 (marginal).
+        // Best-match should attach to 12.
+        assert_eq!(
+            p60.parent_period.map(|v| v as u32),
+            Some(12),
+            "60 should attach to 12 (exact 5x) not 7: got {:?}",
+            p60.parent_period
+        );
     }
 
     #[test]
