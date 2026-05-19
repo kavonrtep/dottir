@@ -123,6 +123,46 @@ render is 1:1 and therefore avoids GPU resampling. That is only true in
 egui logical coordinates. It is false in physical framebuffer
 coordinates whenever `pixels_per_point != 1.0`.
 
+## Severity: misleading, not merely cosmetic
+
+Subsequent comparison at higher GUI zoom on a tandem-repeat region
+(see `tmp/enlarged_zoomed_in_screenshot.png`,
+`tmp/enlarge_zoomed_in_screenshot_ridge_overlay.png`,
+`tmp/zommed_at_alignment.png`) shows the resampler-induced jogs are
+not just visually noisy — they look like real local deviations from
+the diagonal:
+
+- The jogs line up vertically across many parallel diagonals at the
+  same x position. That is the signature of a global resampler
+  rollover (`floor(x / 1.5)` boundary), not of any per-pair sequence
+  event.
+- In `zommed_at_alignment.png`, the crosshair sits on a one-step jog
+  where the user confirms there are no local indels in the underlying
+  sequences. The visual offset is purely a rendering artifact.
+
+This is a correctness problem for the tool's primary visual task. The
+diagnostic purpose of a dotplot is to let the user spot small
+deviations from the diagonal — indels, low-complexity offsets,
+micro-rearrangements. A renderer that introduces false jogs where none
+exist in the underlying raster generates false positives for exactly
+the patterns users are scanning for. This is materially worse than
+"looks jagged at HiDPI".
+
+The ridge-overlay comparison is also informative. With the overlay on
+(`enlarge_zoomed_in_screenshot_ridge_overlay.png`), the same region
+looks cleaner because the ridge is drawn as a *vector* line in egui
+physical-pixel space and does not pass through the texture sampler.
+That confirms the artifact lives in the raster-to-physical-pixel step,
+not in the pixmap. The overlay is therefore a useful diagnostic aid in
+the interim, but it does not fix the problem — it hides the artifact
+where a ridge is predicted and does nothing elsewhere.
+
+This severity argument strengthens the case for Option C (or any
+strictly pixel-perfect 1:1 path) and weakens Option B as an endpoint.
+Option B (compute pixmap at physical canvas size) only addresses the
+upscale regime; on downscale, nearest sampling still produces the same
+class of false-deviation artifacts.
+
 ## Relationship To The Previous Finding
 
 There are now two distinct effects:
