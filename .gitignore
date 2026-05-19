@@ -19,8 +19,8 @@ tests/golden_gen/karlin_ref
 .DS_Store
 Thumbs.db
 
-# Local override settings
-.claude/settings.local.json
+# Local override settings + Claude Code harness state
+.claude/
 
 # Generated documentation outputs
 docs/book/book/
