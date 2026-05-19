@@ -2755,7 +2755,7 @@ impl DottirApp {
                 painter.text(
                     Pos2::new(sx, label_y.max(top_margin_y + 2.0)),
                     egui::Align2::CENTER_TOP,
-                    format_kb(t),
+                    dottir_io::text_overlay::format_kb(t),
                     font.clone(),
                     label_color,
                 );
@@ -2793,7 +2793,7 @@ impl DottirApp {
                 painter.text(
                     Pos2::new(label_x, sy),
                     egui::Align2::RIGHT_CENTER,
-                    format_kb(t),
+                    dottir_io::text_overlay::format_kb(t),
                     font.clone(),
                     label_color,
                 );
@@ -3462,17 +3462,6 @@ fn nice_tick_step(span: f64, min_step: f32) -> f64 {
         }
     }
     10.0 * base
-}
-
-/// Format a residue coord with a `kb`/`Mb` suffix when large.
-fn format_kb(n: u64) -> String {
-    if n >= 1_000_000 {
-        format!("{:.1}M", n as f64 / 1_000_000.0)
-    } else if n >= 1_000 {
-        format!("{}k", n / 1_000)
-    } else {
-        format!("{n}")
-    }
 }
 
 /// Per-sequence summary row for the right-side panel: name, total
