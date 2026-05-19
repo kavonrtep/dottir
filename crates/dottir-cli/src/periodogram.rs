@@ -12,8 +12,9 @@ use clap::{Parser, ValueEnum};
 
 use dottir_core::{
     analytical_null, analytical_z_scores, compute_periodogram, compute_periodogram_parallel,
-    empirical_null_stats, spectrum_of_signal, AnalyticalNull, Periodogram, PeriodogramConfig,
-    ScoreMatrix, Sensitivity, Spectrum, SpectrumConfig,
+    empirical_null_stats, find_peaks_in_periodogram, spectrum_of_signal, AnalyticalNull, Peak,
+    PeakKind, PeaksConfig, Periodogram, PeriodogramConfig, ScoreMatrix, Sensitivity, Spectrum,
+    SpectrumConfig,
 };
 use dottir_io::fasta;
 
@@ -123,6 +124,16 @@ pub struct PeriodogramArgs {
     /// (full spectrum still emitted).
     #[arg(long, default_value_t = 10, value_name = "INT")]
     pub fft_top_peaks: usize,
+
+    // ─── Inline peak classification ────────────────────────────────
+    /// Opt-in: classify per-record periodogram peaks inline (on the
+    /// in-memory signal, no TSV round-trip) and write a `find-peaks`
+    /// TSV to this path. Uses the standalone `dottir find-peaks`
+    /// subcommand's defaults: `signal_mean` ranking, `min_score=10`,
+    /// `min_harmonics=1`, no subrepeats. For tuning, save the
+    /// periodogram with `-o` and run `dottir find-peaks` on it.
+    #[arg(long, value_name = "PATH")]
+    pub find_peaks: Option<PathBuf>,
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -213,6 +224,18 @@ pub fn run(args: PeriodogramArgs) -> Result<()> {
         None => None,
     };
 
+    // Inline peak classification: minimal mode — uses standalone
+    // `dottir find-peaks` defaults (signal_mean rank, min_score=10,
+    // min_harmonics=1, no subrepeats). For tuning, save the
+    // periodogram with -o and run `dottir find-peaks` on it.
+    let mut peaks_out: Option<Box<dyn Write>> = match args.find_peaks.as_ref() {
+        Some(p) => Some(Box::new(BufWriter::new(
+            File::create(p).with_context(|| format!("creating {}", p.display()))?,
+        ))),
+        None => None,
+    };
+    let peaks_cfg = PeaksConfig::default();
+
     write_global_header(&mut out, &args.input, &args, sensitivity, resolved_z)?;
     writeln!(
         out,
@@ -225,6 +248,13 @@ pub fn run(args: PeriodogramArgs) -> Result<()> {
             "record_id\tbin\tfrequency\tperiod_residues\tamplitude\tpeak_rank"
         )?;
     }
+    if let Some(pk) = peaks_out.as_mut() {
+        write_peaks_global_header(pk, &args.input, &peaks_cfg)?;
+        writeln!(
+            pk,
+            "record_id\tperiod_bp\tscore\tkind\tparent\tharmonic_n\tdivisor_n\tn_harmonics\tharmonics"
+        )?;
+    }
 
     let force_serial = args.threads == 1;
     let spectrum_cfg = SpectrumConfig {
@@ -235,6 +265,7 @@ pub fn run(args: PeriodogramArgs) -> Result<()> {
         process_record(
             &mut out,
             &mut fft_out,
+            &mut peaks_out,
             &record.id,
             &record.sequence,
             &cfg,
@@ -244,6 +275,7 @@ pub fn run(args: PeriodogramArgs) -> Result<()> {
             force_serial,
             args.fft_input,
             &spectrum_cfg,
+            &peaks_cfg,
         )
         .with_context(|| format!("processing record {}", record.id))?;
     }
@@ -256,6 +288,12 @@ pub fn run(args: PeriodogramArgs) -> Result<()> {
         fft.flush().context("flushing FFT output")?;
     }
     if let Some(p) = args.fft.as_ref() {
+        tracing::info!("wrote {}", p.display());
+    }
+    if let Some(pk) = peaks_out.as_mut() {
+        pk.flush().context("flushing find-peaks output")?;
+    }
+    if let Some(p) = args.find_peaks.as_ref() {
         tracing::info!("wrote {}", p.display());
     }
     Ok(())
@@ -327,6 +365,7 @@ fn write_global_header<W: Write>(
 fn process_record(
     out: &mut dyn Write,
     fft_out: &mut Option<Box<dyn Write>>,
+    peaks_out: &mut Option<Box<dyn Write>>,
     record_id: &str,
     seq: &[u8],
     cfg: &PeriodogramConfig,
@@ -336,6 +375,7 @@ fn process_record(
     force_serial: bool,
     fft_input: FftInputArg,
     spectrum_cfg: &SpectrumConfig,
+    peaks_cfg: &PeaksConfig,
 ) -> Result<()> {
     let periodogram = if force_serial {
         compute_periodogram(seq, cfg)
@@ -413,6 +453,93 @@ fn process_record(
             spectrum_of_signal(fft_signal, spectrum_cfg).context("spectrum_of_signal failed")?;
         write_fft_block(fft.as_mut(), record_id, fft_input, &spectrum)?;
     }
+
+    // Optional inline peak classification — operates on the in-memory
+    // signal_mean signal so no TSV round-trip is needed. Default
+    // config matches `dottir find-peaks` defaults.
+    if let Some(pk) = peaks_out.as_mut() {
+        let peaks = find_peaks_in_periodogram(&signal_mean, periodogram.min_offset, peaks_cfg)
+            .context("find_peaks_in_periodogram failed")?;
+        // Per-record diag for symmetry with `dottir find-peaks` output.
+        writeln!(
+            pk,
+            "# diag record_id={record_id} length={} threshold={:.4} threshold_mode=fixed floor={:.4}",
+            periodogram.seq_len, peaks_cfg.min_score, peaks_cfg.min_score
+        )?;
+        for p in &peaks {
+            if p.kind == PeakKind::Harmonic {
+                continue; // fundamentals + subrepeats only, matching standalone default
+            }
+            emit_peak(pk.as_mut(), record_id, p)?;
+        }
+    }
+    Ok(())
+}
+
+fn emit_peak(out: &mut dyn Write, rid: &str, p: &Peak) -> std::io::Result<()> {
+    let period_s = if p.period.fract().abs() < 1e-9 {
+        format!("{}", p.period as i64)
+    } else {
+        format!("{:.2}", p.period)
+    };
+    let kind_s = match p.kind {
+        PeakKind::Fundamental => "fundamental",
+        PeakKind::Harmonic => "harmonic",
+        PeakKind::Subrepeat => "subrepeat",
+    };
+    let parent_s = p
+        .parent_period
+        .map(|v| {
+            if v.fract().abs() < 1e-9 {
+                format!("{}", v as i64)
+            } else {
+                format!("{:.2}", v)
+            }
+        })
+        .unwrap_or_default();
+    let harm_n_s = p.harmonic_n.map(|n| n.to_string()).unwrap_or_default();
+    let div_n_s = p.divisor_n.map(|n| n.to_string()).unwrap_or_default();
+    let n_harm_s = if p.kind == PeakKind::Fundamental {
+        p.n_harmonics.to_string()
+    } else {
+        String::new()
+    };
+    let harm_list_s = if p.kind == PeakKind::Fundamental {
+        p.harmonics
+            .iter()
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    } else {
+        String::new()
+    };
+    writeln!(
+        out,
+        "{rid}\t{period_s}\t{:.4}\t{kind_s}\t{parent_s}\t{harm_n_s}\t{div_n_s}\t{n_harm_s}\t{harm_list_s}",
+        p.score
+    )
+}
+
+fn write_peaks_global_header(
+    out: &mut dyn Write,
+    input: &std::path::Path,
+    cfg: &PeaksConfig,
+) -> std::io::Result<()> {
+    writeln!(
+        out,
+        "# dottir periodogram --find-peaks v{}",
+        env!("CARGO_PKG_VERSION")
+    )?;
+    writeln!(out, "# input: {}", input.display())?;
+    writeln!(out, "# input_format: periodogram (in-memory)")?;
+    writeln!(out, "# rank_by: signal_mean")?;
+    writeln!(out, "# boundary_fraction: {}", cfg.boundary_fraction)?;
+    writeln!(out, "# min_score: {}", cfg.min_score)?;
+    writeln!(out, "# harmonic_tolerance: {}", cfg.harmonic_tolerance)?;
+    writeln!(out, "# max_harmonic_n: {}", cfg.max_harmonic_n)?;
+    writeln!(out, "# min_harmonics: {}", cfg.min_harmonics)?;
+    writeln!(out, "# subrepeats: false")?;
+    writeln!(out, "# show_harmonics: false")?;
     Ok(())
 }
 
