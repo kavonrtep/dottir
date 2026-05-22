@@ -37,6 +37,24 @@ cross-platform binary with no GTK dependency.
 
 ## Install
 
+### Conda (recommended)
+
+Pre-built Linux x86_64 packages live on the
+[`petrnovak`](https://anaconda.org/petrnovak/dottir) channel:
+
+```sh
+mamba install -c petrnovak -c conda-forge dottir
+# or:
+conda install -c petrnovak -c conda-forge dottir
+```
+
+This installs both the `dottir` CLI and the `dottir-gui` binary into
+the active environment. The conda package bundles the X11/GL
+runtime libraries the GUI needs, so no extra system packages are
+required.
+
+### From source
+
 dottir builds with stable Rust. MSRV is **1.85** (the dev
 environment uses Rust 1.95 from conda-forge).
 
