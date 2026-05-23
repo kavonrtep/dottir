@@ -5,6 +5,25 @@ All notable changes to dottir are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-05-23
+
+### Fixed
+
+* **Conda package on the petrnovak channel** — the 0.2.0 Linux build
+  was miscompiled by conda-forge's rustc + thin LTO: `x11-dl`'s
+  static lookup table got reordered so `dlopen()` was called with
+  garbage substrings of the symbol-name buffer ("WMHintsXAll",
+  "owEventsX") instead of "libX11.so.6". `dottir-gui` failed at
+  startup with `Failed to load one of xlib's shared libraries`
+  even on systems with X11 installed. The conda recipe now
+  disables LTO via `CARGO_PROFILE_RELEASE_LTO=off`; the workspace
+  `[profile.release]` is unchanged so source builds keep LTO.
+
+### Added
+
+* README install section: conda install instructions for the
+  `petrnovak` channel.
+
 ## [0.2.0] - 2026-05-19
 
 ### Added

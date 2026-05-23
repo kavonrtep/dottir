@@ -13,7 +13,7 @@ source:
   path: ..
 
 build:
-  number: 1
+  number: 0
   # build.sh / bld.bat are auto-discovered next to meta.yaml.
   # The Rust toolchain is provided by the `rust` host package; we
   # delete `rust-toolchain.toml` in the build script so cargo does
