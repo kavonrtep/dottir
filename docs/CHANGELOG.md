@@ -5,19 +5,39 @@ All notable changes to dottir are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.2] - 2026-05-24
+
+### Fixed
+
+* **Conda package on the petrnovak channel** — the 0.2.0 and 0.2.1
+  Linux builds were corrupted by conda-build's install-time binary
+  prefix replacement. Conda-build pads the build prefix string in
+  the binary out to a 255-char placeholder; at install time conda
+  does a *variable-length* (not null-padded) byte replacement of
+  the placeholder with the actual install prefix. Because
+  `x11-dl`'s symbol-name lookup table happens to live in
+  `.rodata` immediately after a build-prefix string in our
+  binary, every offset in the table ends up ~230 bytes off, and
+  at runtime `dlopen()` is called with garbage substrings of the
+  symbol buffer ("WMHintsXAll", "tsXAllowEve") instead of
+  "libX11.so.6". `dottir-gui` failed at startup with
+  `Failed to load one of xlib's shared libraries` even on
+  systems with X11 installed. The conda recipe now sets
+  `build/detect_binary_files_with_prefix: false` to skip the
+  destructive prefix replacement, and bakes RPATH=`$ORIGIN/../lib`
+  at link time via RUSTFLAGS so install-time path adjustment
+  isn't needed.
+
+  The 0.2.1 release shipped a wrong fix (disabling LTO) that did
+  not address the real root cause; superseded by this release.
+
 ## [0.2.1] - 2026-05-23
 
 ### Fixed
 
-* **Conda package on the petrnovak channel** — the 0.2.0 Linux build
-  was miscompiled by conda-forge's rustc + thin LTO: `x11-dl`'s
-  static lookup table got reordered so `dlopen()` was called with
-  garbage substrings of the symbol-name buffer ("WMHintsXAll",
-  "owEventsX") instead of "libX11.so.6". `dottir-gui` failed at
-  startup with `Failed to load one of xlib's shared libraries`
-  even on systems with X11 installed. The conda recipe now
-  disables LTO via `CARGO_PROFILE_RELEASE_LTO=off`; the workspace
-  `[profile.release]` is unchanged so source builds keep LTO.
+* Attempted conda recipe fix (disable LTO) for the
+  `dottir-gui` X11 startup failure on Linux. This was a
+  misdiagnosis — see 0.2.2 for the actual fix.
 
 ### Added
 

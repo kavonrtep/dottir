@@ -18,7 +18,22 @@ build:
   # The Rust toolchain is provided by the `rust` host package; we
   # delete `rust-toolchain.toml` in the build script so cargo does
   # not try to invoke rustup (not installed in the conda build env).
-  binary_relocation: true
+  #
+  # detect_binary_files_with_prefix MUST be false on Linux. Without
+  # it, conda-build pads the build prefix string in the binary out
+  # to a 255-char placeholder; at install time conda does a
+  # *variable-length* (not null-padded!) byte replacement of the
+  # placeholder with the actual install prefix. That shifts every
+  # byte after the placeholder, and one of the things immediately
+  # after it in our .rodata is x11-dl's symbol-name lookup table.
+  # The static offsets in that table are now off by ~230 bytes, so
+  # at runtime dlopen() is called with garbage substrings
+  # ("WMHintsXAll", "tsXAllowEve") instead of "libX11.so.6" and
+  # dottir-gui dies with "Failed to load one of xlib's shared
+  # libraries". We don't need the install-time path adjustment
+  # since our binary uses RPATH=$ORIGIN/../lib set at link time
+  # via RUSTFLAGS in build.sh.
+  detect_binary_files_with_prefix: false
   missing_dso_whitelist:
     # eframe links against the X11/wayland libs we declare in `host`,
     # but dlopens libGL at runtime — that's resolved via the user's
