@@ -33,6 +33,7 @@ png = "0.17"
 realfft = "3"
 base64 = "0.22"
 proptest = "1"
+noodles-gff = { version = "0.54", default-features = false }
 
 # Internal
 dottir-core = { path = "crates/dottir-core" }

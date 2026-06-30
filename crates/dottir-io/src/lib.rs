@@ -18,6 +18,7 @@
 #![forbid(unsafe_code)]
 
 pub mod alignment;
+pub mod annotation;
 pub mod dot_format;
 pub mod fasta;
 pub mod params;
@@ -26,4 +27,5 @@ pub mod sequence;
 pub mod svg_export;
 pub mod text_overlay;
 
+pub use annotation::{AnnotError, AnnotSet, AnnotSource, Feature, Strand};
 pub use sequence::{detect_alphabet, DetectedAlphabet, RecordSpan, Sequence};
