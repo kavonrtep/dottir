@@ -2560,6 +2560,84 @@ impl DottirApp {
                 }
             }
 
+            // Annotation bands (ADR 0005). Query features paint as
+            // vertical bands spanning the plot height; subject features
+            // as horizontal bands spanning the width. Drawn over the
+            // pixelmap with a single global alpha so dots show through
+            // and overlapping bands self-darken via compositing. Placed
+            // under the breaklines / ridges / crosshair so those thin
+            // marks stay legible on top.
+            if self.annot_show {
+                let azoom = plot.params.zoom.max(1) as usize;
+                let (aq_off, as_off) = self
+                    .current_slice
+                    .as_ref()
+                    .map(|sl| (sl.q_range.start, sl.s_range.start))
+                    .unwrap_or((0, 0));
+                let aa = (self.annot_alpha.clamp(0.0, 1.0) * 255.0).round() as u8;
+                let with_alpha = |base: Color32| {
+                    Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), aa)
+                };
+                // Query → vertical bands.
+                if let Some(ax) = &self.query_annot {
+                    for bf in &ax.bound {
+                        let value = ax.value_of(bf);
+                        if ax.hidden.contains(&value) {
+                            continue;
+                        }
+                        if let Some((x0, x1)) = crate::annotation_overlay::band_screen_span(
+                            bf.range.start,
+                            bf.range.end,
+                            aq_off,
+                            azoom,
+                            plot_area.left(),
+                            draw_offset.x,
+                            ppp,
+                            plot_area.left(),
+                            plot_area.right(),
+                        ) {
+                            clip_painter.rect_filled(
+                                Rect::from_min_max(
+                                    Pos2::new(x0, plot_area.top()),
+                                    Pos2::new(x1, plot_area.bottom()),
+                                ),
+                                0.0,
+                                with_alpha(ax.color_for(&value)),
+                            );
+                        }
+                    }
+                }
+                // Subject → horizontal bands.
+                if let Some(ax) = &self.subject_annot {
+                    for bf in &ax.bound {
+                        let value = ax.value_of(bf);
+                        if ax.hidden.contains(&value) {
+                            continue;
+                        }
+                        if let Some((y0, y1)) = crate::annotation_overlay::band_screen_span(
+                            bf.range.start,
+                            bf.range.end,
+                            as_off,
+                            azoom,
+                            plot_area.top(),
+                            draw_offset.y,
+                            ppp,
+                            plot_area.top(),
+                            plot_area.bottom(),
+                        ) {
+                            clip_painter.rect_filled(
+                                Rect::from_min_max(
+                                    Pos2::new(plot_area.left(), y0),
+                                    Pos2::new(plot_area.right(), y1),
+                                ),
+                                0.0,
+                                with_alpha(ax.color_for(&value)),
+                            );
+                        }
+                    }
+                }
+            }
+
             // C3: breaklines for multi-record FASTA inputs. Vertical
             // lines at the query record boundaries; horizontal lines
             // at the subject record boundaries. Drawn underneath the
