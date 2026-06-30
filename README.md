@@ -8,6 +8,10 @@ Same scientific feel — Karlin/Altschul window sizing, score-matrix
 scoring, anti-diagonal suppression, live greyramp — in a single
 cross-platform binary with no GTK dependency.
 
+![dottir-gui: a self-comparison dotplot with GFF3 annotation bands, the
+side-panel color legend, and the alignment view listing the features under
+the crosshair](./docs/dottir_screenshot.png)
+
 ## Features
 
 - **CLI and interactive GUI** in one workspace. Same compute engine
@@ -21,6 +25,13 @@ cross-platform binary with no GTK dependency.
   magenta against forward-strand greyscale, so palindromes pop.
 - **Multi-record FASTA** with **breakline rendering** and
   `record:position` coordinates in the GUI status bar.
+- **GFF3 / BED annotation overlays** — paint interval annotations as
+  colored bands (query → vertical, subject → horizontal; overlaps
+  self-darken). Color by any attribute (default `Name`, falling back to
+  the feature type), with a side-panel legend (per-value color + show /
+  hide), an opacity slider, and an alignment view that lists every
+  feature overlapping the crosshair on each axis. Load from the File
+  menu or via `--gff` / `--gff-query` / `--gff-subject`.
 - **Live greyramp** — drag the black/white sliders, the image
   updates without re-running compute.
 - **Zoom-aware** GUI: smooth pan/zoom, then a debounced recompute
@@ -101,6 +112,14 @@ both (pairwise):
 ```sh
 dottir-gui chr4.fa -W 25
 dottir-gui query.fa subject.fa
+```
+
+With a GFF3 (or BED) annotation overlay — the bundled fixture is a good
+first look (it produced the screenshot above):
+
+```sh
+dottir-gui tests/corpora/annotation_overlay/ltr_angela.fasta \
+    --gff tests/corpora/annotation_overlay/ltr_angela.gff3
 ```
 
 Full flag reference: `dottir batch --help`, `dottir-gui --help`, or

@@ -23,6 +23,12 @@ one FASTA for a self-comparison.
 | `--matrix NAME` | DNA+5/-4 or BLOSUM62 | Built-in score matrix. |
 | `--strand {forward,reverse,both}` | `both` | BLASTN strand selection. |
 | `-m, --memory-mib N` | `512` | Pixelmap memory cap, MiB. |
+| `--gff PATH` | — | Annotation overlay (GFF3/BED) applied to **both** axes. `--bed` alias. |
+| `--gff-query PATH` | — | Annotation overlay for the query (horizontal) axis. `--bed-query` alias. |
+| `--gff-subject PATH` | — | Annotation overlay for the subject (vertical) axis. `--bed-subject` alias. |
+
+Per-axis flags override `--gff`. Format is auto-detected; both plain and
+gzipped files are accepted.
 
 ## Panels
 
@@ -32,6 +38,12 @@ one FASTA for a self-comparison.
 * **Right panel — Greyramp**: white/black sliders + Swap/Reset + a
   live LUT strip preview. The LUT is applied on every redraw; the
   underlying pixelmap is not recomputed (spec §4.2.1).
+* **Right panel — Annotations** (when an overlay is loaded): a
+  show-bands toggle, an opacity slider, and the color legend. See
+  [Annotations](#annotations-gff3--bed) below.
+* **Bottom alignment view**: the residue-level alignment around the
+  crosshair (forward and, for BLASTN, reverse strand), plus the list of
+  annotations overlapping the crosshair on each axis.
 * **Bottom status bar**: pixelmap dimensions + window size +
   crosshair coordinates + pixel value. For multi-record FASTAs, the
   coordinates are rendered as `record_id:position` rather than
@@ -74,14 +86,48 @@ Behind **View → Settings…**. Changes recompute the dotplot.
 * Strand: Forward / Reverse / Both (BLASTN only).
 * Self-comparison: triangle Both / Upper / Lower.
 
+## Annotations (GFF3 / BED)
+
+Load interval annotations and overlay them on the dotplot (ADR 0005).
+A **query** feature paints as a vertical band spanning the plot height;
+a **subject** feature as a horizontal band spanning the width; their
+intersection (a region-pair of interest) self-darkens. Dots stay visible
+through the bands.
+
+![dottir-gui with an Angela LTR element overlaid: colored annotation
+bands, the side-panel legend, and the alignment view listing every
+feature under the crosshair](../../dottir_screenshot.png)
+
+**Loading.** Use **File → Load GFF3/BED for query / subject…** (a single
+entry in self-comparison), or the `--gff*` flags above. GFF3 is parsed
+via `noodles-gff`, BED as plain intervals; both plain and gzipped.
+
+**Coloring.** GFF3 features are colored by a chosen attribute, selected
+under **View → Settings… → Annotations → Color by** (default `Name`,
+plus a synthetic `(type)` key for column 3). A feature missing the
+chosen attribute **falls back to its GFF3 type** rather than a single
+"none" bucket, so e.g. unnamed `long_terminal_repeat` / `primer_binding_site`
+children still get distinct colors. BED files use one color per file.
+
+**Right-panel controls.**
+
+* **Show bands** — master on/off.
+* **Opacity** — dims every band so the underlying dots show through
+  (`0` = invisible).
+* **Legend** — one row per value: a show/hide checkbox, a color swatch,
+  and the feature count. In self-comparison the single legend drives
+  both axes. Per-value **color editing** lives in **Settings →
+  Annotations**.
+
+**Alignment view.** When the crosshair is set, the bottom dock lists the
+annotations overlapping the crosshair residue for the query (`q:`) and
+subject (`s:`) — all of them when features nest — and frames the
+crosshair cell in each alignment row in the feature's color.
+
 ## Out of scope (this release)
 
 These were called out in the spec but aren't shipped yet — see the
 [ADR index](./adr.md) and `docs/IMPROVEMENTS_PLAN.md`:
 
-* GFF3 / PAF annotation track overlays.
-* Recompute-on-zoom-settle for sub-pixel detail.
+* PAF / HSP alignment overlays.
 * Sub-dotter spawn from a rubber-band selection.
-* Alignment-view dock.
-* Session save/load.
-* SVG / PDF export.

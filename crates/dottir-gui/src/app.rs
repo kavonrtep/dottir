@@ -1830,6 +1830,64 @@ impl DottirApp {
                     self.refresh_ridges();
                 }
 
+                // ── Annotations (display only; bands drawn live over the
+                // pixelmap, so no recompute / texture invalidation needed) ──
+                if self.query_annot.is_some() || self.subject_annot.is_some() {
+                    ui.add_space(6.0);
+                    ui.separator();
+                    ui.label(
+                        egui::RichText::new("Annotations")
+                            .strong()
+                            .size(13.0)
+                            .color(Color32::from_gray(50)),
+                    );
+                    ui.checkbox(&mut self.annot_show, "Show bands");
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("Opacity").size(11.0));
+                        ui.add(Slider::new(&mut self.annot_alpha, 0.0..=1.0));
+                    })
+                    .response
+                    .on_hover_text(
+                        "Dim annotation bands so the dots show through (0 = invisible).",
+                    );
+
+                    // One legend when both axes share the same set
+                    // (self-comparison), per-axis otherwise.
+                    let dedupe = self.settings.self_comparison
+                        && self.query_annot.is_some()
+                        && self.subject_annot.is_some();
+                    egui::ScrollArea::vertical()
+                        .max_height(220.0)
+                        .auto_shrink([false, true])
+                        .show(ui, |ui| {
+                            if dedupe {
+                                if let Some(ax) = self.query_annot.as_mut() {
+                                    annotation_legend_axis(ui, ax, None);
+                                }
+                            } else {
+                                if let Some(ax) = self.query_annot.as_mut() {
+                                    annotation_legend_axis(ui, ax, Some("Query"));
+                                }
+                                if let Some(ax) = self.subject_annot.as_mut() {
+                                    annotation_legend_axis(ui, ax, Some("Subject"));
+                                }
+                            }
+                        });
+
+                    // In self-comparison the single legend drives both axes:
+                    // mirror the query's visibility set onto the subject so a
+                    // toggle hides both the vertical (query) and horizontal
+                    // (subject) bands, not just the query's.
+                    if dedupe {
+                        if let Some(hidden) = self.query_annot.as_ref().map(|ax| ax.hidden.clone())
+                        {
+                            if let Some(s) = self.subject_annot.as_mut() {
+                                s.hidden = hidden;
+                            }
+                        }
+                    }
+                }
+
                 // ── Keyboard shortcuts (reference) ──
                 ui.add_space(6.0);
                 ui.separator();
@@ -2292,11 +2350,13 @@ impl DottirApp {
                 // pixelmap).
                 ui.separator();
                 ui.heading("Annotations");
-                ui.horizontal(|ui| {
-                    ui.checkbox(&mut self.annot_show, "Show bands");
-                    ui.label("Alpha:");
-                    ui.add(egui::Slider::new(&mut self.annot_alpha, 0.0..=1.0));
-                });
+                ui.label(
+                    egui::RichText::new(
+                        "Show-bands toggle, opacity, and the color legend are in the side panel.",
+                    )
+                    .size(11.0)
+                    .color(Color32::from_gray(120)),
+                );
                 self.annotation_axis_ui(ui, SeqRole::Query);
                 self.annotation_axis_ui(ui, SeqRole::Subject);
 
@@ -2438,6 +2498,49 @@ impl DottirApp {
                     );
                 });
 
+                // Annotation overlaps at the crosshair point (F3): every
+                // visible feature covering the crosshair residue on each axis,
+                // so nested/overlapping annotations are all listed.
+                let q_hits = self
+                    .query_annot
+                    .as_ref()
+                    .map(|ax| ax.features_at(q_centre))
+                    .unwrap_or_default();
+                let s_hits = self
+                    .subject_annot
+                    .as_ref()
+                    .map(|ax| ax.features_at(s_centre))
+                    .unwrap_or_default();
+                // Cell marker color: the feature color for a single hit, a
+                // neutral grey when several overlap, none when there are none.
+                let mark_color = |ax: Option<&crate::annotation_overlay::AxisAnnot>,
+                                  hits: &[&crate::annotation_overlay::BoundFeature]|
+                 -> Option<Color32> {
+                    match (ax, hits.len()) {
+                        (_, 0) => None,
+                        (Some(ax), 1) => Some(ax.color_for(&ax.value_of(hits[0]))),
+                        _ => Some(Color32::from_gray(60)),
+                    }
+                };
+                let q_mark = mark_color(self.query_annot.as_ref(), &q_hits);
+                let s_mark = mark_color(self.subject_annot.as_ref(), &s_hits);
+                if self.query_annot.is_some() || self.subject_annot.is_some() {
+                    draw_overlap_line(
+                        ui,
+                        "q",
+                        self.query_annot.as_ref(),
+                        &q_hits,
+                        self.query.as_ref(),
+                    );
+                    draw_overlap_line(
+                        ui,
+                        "s",
+                        self.subject_annot.as_ref(),
+                        &s_hits,
+                        self.subject.as_ref(),
+                    );
+                }
+
                 let window = self.settings.align_window_size.clamp(20, 400) as usize;
                 let half = window / 2;
                 let q_bytes = q_seq.bytes();
@@ -2497,10 +2600,10 @@ impl DottirApp {
                     }
                 });
 
-                draw_align_block(ui, ctx, &forward_block);
+                draw_align_block(ui, ctx, &forward_block, q_mark, s_mark);
                 if let Some(rev) = &reverse_block {
                     ui.add_space(4.0);
-                    draw_align_block(ui, ctx, rev);
+                    draw_align_block(ui, ctx, rev, q_mark, s_mark);
                 }
             });
     }
@@ -3358,7 +3461,16 @@ fn build_align_columns(
 /// `+/-`) and the row's 5'/3' residue numbers in the side margins,
 /// and draws a caret over the crosshair column so the user can see
 /// which residue the click landed on.
-fn draw_align_block(ui: &mut egui::Ui, ctx: &Context, block: &AlignBlock) {
+/// `q_mark`/`s_mark`: when set, frame the crosshair-column cell on that row in
+/// the given color — the per-axis "this residue is annotated" cue (F3). The
+/// detail (which / how many features) is in the dock's overlap list.
+fn draw_align_block(
+    ui: &mut egui::Ui,
+    ctx: &Context,
+    block: &AlignBlock,
+    q_mark: Option<Color32>,
+    s_mark: Option<Color32>,
+) {
     let font = egui::FontId::monospace(12.0);
     let small_font = egui::FontId::monospace(10.0);
     let glyph_w = ctx
@@ -3521,6 +3633,26 @@ fn draw_align_block(ui: &mut egui::Ui, ctx: &Context, block: &AlignBlock) {
         0.0,
         egui::Stroke::new(1.0, caret_color),
     );
+
+    // Per-axis annotation markers: frame the query / subject cell at the
+    // crosshair column when that residue lies inside a visible feature.
+    if let Some(c) = q_mark {
+        painter.rect_stroke(
+            Rect::from_min_size(Pos2::new(xh, alignment_top), Vec2::new(glyph_w, row_h)),
+            0.0,
+            egui::Stroke::new(2.0, c),
+        );
+    }
+    if let Some(c) = s_mark {
+        painter.rect_stroke(
+            Rect::from_min_size(
+                Pos2::new(xh, alignment_top + 2.0 * row_h),
+                Vec2::new(glyph_w, row_h),
+            ),
+            0.0,
+            egui::Stroke::new(2.0, c),
+        );
+    }
 }
 
 /// Pick a background colour for one alignment column. Identity is
@@ -3828,6 +3960,107 @@ fn nice_tick_step(span: f64, min_step: f32) -> f64 {
 
 /// Per-sequence summary row for the right-side panel: name, total
 /// residue count (with thousand separators), and record count.
+/// Compact side-panel color legend for one axis: small-font visibility
+/// checkbox + read-only swatch + `value (count)`, sorted by descending count.
+/// Color editing lives in the Settings window; this stays dense on purpose.
+fn annotation_legend_axis(
+    ui: &mut egui::Ui,
+    ax: &mut crate::annotation_overlay::AxisAnnot,
+    header: Option<&str>,
+) {
+    if let Some(h) = header {
+        ui.label(
+            egui::RichText::new(h)
+                .size(11.0)
+                .strong()
+                .color(Color32::from_gray(80)),
+        );
+    }
+    let counts = ax.value_counts();
+    if counts.is_empty() {
+        ui.label(
+            egui::RichText::new("(no features)")
+                .size(11.0)
+                .color(Color32::from_gray(140)),
+        );
+        return;
+    }
+    for (value, count) in &counts {
+        ui.horizontal(|ui| {
+            let mut visible = !ax.hidden.contains(value);
+            if ui
+                .checkbox(&mut visible, "")
+                .on_hover_text("Show/hide this value's bands")
+                .changed()
+            {
+                if visible {
+                    ax.hidden.remove(value);
+                } else {
+                    ax.hidden.insert(value.clone());
+                }
+            }
+            let col = ax.color_for(value);
+            let (rect, _) = ui.allocate_exact_size(Vec2::new(11.0, 11.0), Sense::hover());
+            ui.painter().rect_filled(rect, 2.0, col);
+            ui.painter()
+                .rect_stroke(rect, 2.0, egui::Stroke::new(1.0, Color32::from_gray(120)));
+            ui.label(egui::RichText::new(format!("{value}  ({count})")).size(11.0));
+        });
+    }
+}
+
+/// One axis's crosshair-overlap line in the alignment dock: `tag:` followed by
+/// a swatch + label per covering feature (several when annotations nest), or
+/// `—` when nothing covers the crosshair. Label is `<color-by value> · <Name
+/// or ID>`; the hover shows feature type and local coordinate span.
+fn draw_overlap_line(
+    ui: &mut egui::Ui,
+    tag: &str,
+    ax: Option<&crate::annotation_overlay::AxisAnnot>,
+    hits: &[&crate::annotation_overlay::BoundFeature],
+    seq: Option<&Sequence>,
+) {
+    let dim = Color32::from_gray(140);
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        ui.label(
+            egui::RichText::new(format!("{tag}:"))
+                .size(11.0)
+                .strong()
+                .color(Color32::from_gray(80)),
+        );
+        let Some(ax) = ax else {
+            ui.label(egui::RichText::new("—").size(11.0).color(dim));
+            return;
+        };
+        if hits.is_empty() {
+            ui.label(egui::RichText::new("—").size(11.0).color(dim));
+            return;
+        }
+        for bf in hits {
+            let value = ax.value_of(bf);
+            let col = ax.color_for(&value);
+            let (rect, _) = ui.allocate_exact_size(Vec2::new(10.0, 10.0), Sense::hover());
+            ui.painter().rect_filled(rect, 2.0, col);
+            ui.painter()
+                .rect_stroke(rect, 2.0, egui::Stroke::new(1.0, Color32::from_gray(120)));
+            let f = &ax.set.features[bf.src];
+            let ident = f.attrs.get("Name").or_else(|| f.attrs.get("ID"));
+            let text = match ident {
+                Some(id) if *id != value => format!("{value} · {id}"),
+                _ => value.clone(),
+            };
+            ui.label(egui::RichText::new(text).size(11.0))
+                .on_hover_text(format!(
+                    "{}  {}–{}",
+                    f.feature_type,
+                    format_coord(seq, bf.range.start),
+                    format_coord(seq, bf.range.end.saturating_sub(1)),
+                ));
+        }
+    });
+}
+
 fn draw_seq_summary(ui: &mut egui::Ui, label: &str, seq: Option<&Sequence>) {
     let body = match seq {
         None => egui::RichText::new(format!("{label}: —"))

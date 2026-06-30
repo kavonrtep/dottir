@@ -1,0 +1,4 @@
+##gff-version 3
+CAMPEX010000001.1_6326735-6338738	DANTE_TIR	transposable_element	5001	7004	.	-	.	ID=UA_L1_00001124;Name=Class_II/Subclass_1/TIR/hAT;classification=Class_II/Subclass_1/TIR/hAT;source_tier=1;source_tool=DANTE_TIR;
+OX327683.1_12140700-12154452	DANTE_TIR	transposable_element	5001	8753	.	-	.	ID=UA_L1_00026111;Name=Class_II/Subclass_1/TIR/hAT;classification=Class_II/Subclass_1/TIR/hAT;source_tier=1;source_tool=DANTE_TIR;
+CAMPEX010000001.1_638765-651191	DANTE_TIR	transposable_element	5001	7427	.	+	.	ID=UA_L1_00000025;Name=Class_II/Subclass_1/TIR/MuDR_Mutator;classification=Class_II/Subclass_1/TIR/MuDR_Mutator;source_tier=1;source_tool=DANTE_TIR;

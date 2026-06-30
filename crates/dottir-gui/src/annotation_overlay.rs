@@ -120,12 +120,16 @@ impl AxisAnnot {
         self.set.source == AnnotSource::Bed
     }
 
-    /// The color-by value of a bound feature (`(none)` when the attribute is
-    /// absent). BED features all share one bucket ([`NONE_VALUE`] is unused;
-    /// BED uses [`Self::bed_color`] directly).
+    /// The color-by value of a bound feature. When the active color-by
+    /// attribute (e.g. `Name`) is absent for a feature, fall back to its GFF3
+    /// type (column 3) so it still gets a meaningful bucket/color rather than
+    /// lumping every nameless feature into `(none)`. `(none)` remains only for
+    /// features with neither the attribute nor a type. BED features all share
+    /// one bucket (BED uses [`Self::bed_color`] directly).
     pub fn value_of(&self, bf: &BoundFeature) -> String {
-        self.set.features[bf.src]
-            .color_value(&self.color_by)
+        let f = &self.set.features[bf.src];
+        f.color_value(&self.color_by)
+            .or_else(|| f.color_value(TYPE_KEY))
             .unwrap_or(NONE_VALUE)
             .to_string()
     }
@@ -136,6 +140,17 @@ impl AxisAnnot {
             return self.bed_color;
         }
         *self.palette.get(value).unwrap_or(&NONE_COLOR)
+    }
+
+    /// Visible bound features whose buffer range covers `pos`, in file order.
+    /// Features whose color-by value is toggled off in the legend are skipped,
+    /// matching what the band renderer draws. Nested/overlapping features all
+    /// appear, so callers can surface more than one.
+    pub fn features_at(&self, pos: usize) -> Vec<&BoundFeature> {
+        self.bound
+            .iter()
+            .filter(|bf| bf.range.contains(&pos) && !self.hidden.contains(&self.value_of(bf)))
+            .collect()
     }
 
     /// Distinct color-by values with feature counts, sorted by descending
@@ -327,6 +342,73 @@ mod tests {
         assert!(ax.is_bed());
         assert_eq!(ax.color_by, "");
         assert_eq!(ax.color_for("anything"), ax.bed_color);
+    }
+
+    #[test]
+    fn value_of_falls_back_to_type_when_color_by_attr_absent() {
+        // chr1 with a named and an unnamed feature; color-by defaults to Name.
+        let seq = seq_with_records(&[("chr1", 100)]);
+        let named = feat("chr1", 0, 10, "ALR"); // feature_type "region", Name=ALR
+        let mut unnamed = feat("chr1", 20, 30, ""); // no Name
+        unnamed.feature_type = "transposable_element".to_string();
+        let set = AnnotSet {
+            source_path: None,
+            source: AnnotSource::Gff3,
+            features: vec![named, unnamed],
+        };
+        let ax = AxisAnnot::new(set, &seq);
+        assert_eq!(ax.color_by, "Name");
+        // Named feature uses its Name; unnamed falls back to its GFF3 type,
+        // not "(none)", and gets its own palette color.
+        assert_eq!(ax.value_of(&ax.bound[0]), "ALR");
+        assert_eq!(ax.value_of(&ax.bound[1]), "transposable_element");
+        assert_ne!(
+            ax.color_for("transposable_element"),
+            ax.color_for(NONE_VALUE)
+        );
+    }
+
+    #[test]
+    fn features_at_returns_all_overlapping_and_respects_hidden() {
+        // One record chr1 [0,100). Three features, two of them nested around
+        // position 50.
+        let seq = seq_with_records(&[("chr1", 100)]);
+        let set = AnnotSet {
+            source_path: None,
+            source: AnnotSource::Gff3,
+            features: vec![
+                feat("chr1", 0, 80, "outer"),  // covers 50
+                feat("chr1", 40, 60, "inner"), // covers 50
+                feat("chr1", 70, 90, "other"), // does not cover 50
+            ],
+        };
+        let mut ax = AxisAnnot::new(set, &seq);
+
+        // Position inside both nested features → both returned, in file order.
+        let hits: Vec<String> = ax
+            .features_at(50)
+            .iter()
+            .map(|bf| ax.value_of(bf))
+            .collect();
+        assert_eq!(hits, vec!["outer".to_string(), "inner".to_string()]);
+
+        // A gap with no coverage.
+        assert!(ax.features_at(95).is_empty());
+
+        // End is exclusive: feature [70,90) does not cover 90.
+        assert!(ax
+            .features_at(90)
+            .iter()
+            .all(|bf| ax.value_of(bf) != "other"));
+
+        // Hiding a value drops it from the lookup.
+        ax.hidden.insert("inner".to_string());
+        let hits: Vec<String> = ax
+            .features_at(50)
+            .iter()
+            .map(|bf| ax.value_of(bf))
+            .collect();
+        assert_eq!(hits, vec!["outer".to_string()]);
     }
 
     #[test]

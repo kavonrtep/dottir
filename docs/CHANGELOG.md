@@ -17,15 +17,24 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   self-comparison (one file applied to both axes) and pairwise
   comparison (one file per axis).
   - **GFF3** (via `noodles-gff`) is colored by a chosen attribute value
-    (default `Name`, plus a synthetic `(type)` key for column 3), with a
-    side-panel legend offering a per-value color picker and visibility
-    toggle. **BED** uses a single color per file. Plain or gzipped.
-  - A single global **alpha** slider controls band darkness; dots remain
-    visible through the bands.
+    (default `Name`, plus a synthetic `(type)` key for column 3); a
+    feature missing the chosen attribute falls back to its GFF3 type
+    rather than a single "none" bucket. **BED** uses a single color per
+    file. Plain or gzipped.
+  - The right panel carries the **Annotations** controls: a show-bands
+    toggle, an **opacity** slider (dims bands so dots show through), and
+    a compact **legend** with per-value show/hide. In self-comparison the
+    single legend drives both axes. Per-value **color editing** is in
+    **Settings → Annotations**.
+  - The **alignment view** lists every annotation overlapping the
+    crosshair residue on each axis (query and subject) and frames the
+    crosshair cell in the feature's color.
   - Load via **File → Load GFF3/BED for query/subject…** (collapsing to
     one entry in self-comparison) or the CLI flags `--gff-query` /
     `--gff-subject` / `--gff` (with `--bed*` aliases; format
     auto-detected by extension).
+  - Bundled fixtures under `tests/corpora/annotation_overlay/`
+    (`ltr_angela`, `tir_elements`, `tir_simple`) for trying the overlay.
 
 ## [0.2.2] - 2026-05-24
 
