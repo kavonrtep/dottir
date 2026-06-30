@@ -47,7 +47,13 @@ deny = []
 
 [advisories]
 yanked = "warn"
-ignore = []
+ignore = [
+    # RUSTSEC-2026-0192: `ttf-parser` is unmaintained. Pulled in transitively
+    # via egui 0.29 → epaint → ab_glyph → owned_ttf_parser; there is no safe
+    # upgrade without a major egui bump. This is an "unmaintained" notice, not
+    # a security vulnerability. Revisit when egui updates its font stack.
+    "RUSTSEC-2026-0192",
+]
 
 [sources]
 unknown-registry = "deny"

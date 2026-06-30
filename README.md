@@ -1,6 +1,6 @@
 # dottir
 
-A modern Rust reimplementation of **[Dotter](https://www.sanger.ac.uk/tool/dotter/)** — the
+A modern Rust reimplementation of **[Dotter](https://pubmed.ncbi.nlm.nih.gov/8566757/)** — the
 classic sliding-window dot-matrix plotter by Sonnhammer & Durbin
 ([Gene 167(2), 1995](https://doi.org/10.1016/0378-1119(95)00714-8)) shipped
 in [seqtools-4.28](https://github.com/douglasgscofield/seqtools-4.28).

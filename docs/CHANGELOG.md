@@ -7,6 +7,8 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-06-30
+
 ### Added
 
 * **Annotation overlay (GFF3 / BED)** — load annotation intervals and
