@@ -172,7 +172,8 @@ impl AxisAnnot {
                 continue;
             }
             if !self.palette.contains_key(v) {
-                self.palette.insert(v.clone(), PALETTE[next % PALETTE.len()]);
+                self.palette
+                    .insert(v.clone(), PALETTE[next % PALETTE.len()]);
                 next += 1;
             }
         }
@@ -281,10 +282,10 @@ mod tests {
             source_path: None,
             source: AnnotSource::Gff3,
             features: vec![
-                feat("chr1", 10, 20, "ALR"),   // -> buffer [10,20)
-                feat("chr2", 5, 15, "HSAT"),   // -> buffer [105,115)
-                feat("chrX", 0, 10, "ghost"),  // unknown record -> skipped
-                feat("chr2", 60, 70, "oob"),   // past record end -> skipped
+                feat("chr1", 10, 20, "ALR"),  // -> buffer [10,20)
+                feat("chr2", 5, 15, "HSAT"),  // -> buffer [105,115)
+                feat("chrX", 0, 10, "ghost"), // unknown record -> skipped
+                feat("chr2", 60, 70, "oob"),  // past record end -> skipped
             ],
         };
         let ax = AxisAnnot::new(set, &seq);

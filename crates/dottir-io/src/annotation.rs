@@ -90,7 +90,9 @@ pub enum AnnotError {
     Gff(String),
     #[error("BED parse error on line {line}: {msg}")]
     Bed { line: usize, msg: String },
-    #[error("unrecognized annotation extension for {0} (expected .gff/.gff3/.bed, optionally .gz)")]
+    #[error(
+        "unrecognized annotation extension for {0} (expected .gff/.gff3/.bed, optionally .gz)"
+    )]
     UnknownFormat(PathBuf),
 }
 
@@ -101,8 +103,8 @@ impl AnnotSet {
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, AnnotError> {
         let path = path.as_ref();
         let bytes = std::fs::read(path)?;
-        let is_gzipped = (bytes.len() >= 2 && bytes[0] == 0x1f && bytes[1] == 0x8b)
-            || ext_is(path, "gz");
+        let is_gzipped =
+            (bytes.len() >= 2 && bytes[0] == 0x1f && bytes[1] == 0x8b) || ext_is(path, "gz");
         // Choose the format from the extension *after* stripping `.gz`.
         let format_path = if ext_is(path, "gz") {
             path.with_extension("")
@@ -330,7 +332,7 @@ chr3\t0\t4
         assert_eq!(feats[0].strand, Strand::Forward);
         assert_eq!(feats[0].attrs.get("Name").map(String::as_str), Some("ALR"));
         assert_eq!(feats[0].feature_type, ""); // BED has no type.
-        // "." name is dropped.
+                                               // "." name is dropped.
         assert!(feats[1].attrs.is_empty());
         assert_eq!(feats[1].strand, Strand::Reverse);
         // Minimal 3-column line.
@@ -347,7 +349,47 @@ chr3\t0\t4
         };
         let keys = set.attribute_keys();
         assert!(!keys.contains(TYPE_KEY));
-        assert_eq!(keys.into_iter().collect::<Vec<_>>(), vec!["Name".to_string()]);
+        assert_eq!(
+            keys.into_iter().collect::<Vec<_>>(),
+            vec!["Name".to_string()]
+        );
+    }
+
+    #[test]
+    fn load_dispatches_by_extension_including_gz() {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("dottir_annot_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let gff = dir.join("a.gff3");
+        std::fs::write(&gff, "chr1\tsrc\tgene\t1\t10\t.\t+\t.\tName=X\n").unwrap();
+        let set = AnnotSet::load(&gff).unwrap();
+        assert_eq!(set.source, AnnotSource::Gff3);
+        assert_eq!(set.features[0].range, 0..10);
+
+        let bed = dir.join("b.bed");
+        std::fs::write(&bed, "chr1\t0\t5\tY\n").unwrap();
+        assert_eq!(AnnotSet::load(&bed).unwrap().source, AnnotSource::Bed);
+
+        // Gzipped GFF3 — format chosen from the extension under `.gz`,
+        // gzip detected from the magic bytes.
+        let gz = dir.join("c.gff3.gz");
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(b"chr1\tsrc\texon\t5\t8\t.\t-\t.\tName=Z\n")
+            .unwrap();
+        std::fs::write(&gz, enc.finish().unwrap()).unwrap();
+        let set = AnnotSet::load(&gz).unwrap();
+        assert_eq!(set.source, AnnotSource::Gff3);
+        assert_eq!(set.features[0].range, 4..8);
+
+        let bad = dir.join("d.txt");
+        std::fs::write(&bad, "x").unwrap();
+        assert!(matches!(
+            AnnotSet::load(&bad),
+            Err(AnnotError::UnknownFormat(_))
+        ));
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

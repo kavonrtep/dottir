@@ -25,6 +25,10 @@ pub struct StartupConfig {
     pub strand: Strand,
     pub self_comparison: bool,
     pub memory_limit_bytes: u64,
+    /// Annotation file (GFF3/BED) to bind to the query axis on startup.
+    pub annot_query: Option<PathBuf>,
+    /// Annotation file (GFF3/BED) to bind to the subject axis on startup.
+    pub annot_subject: Option<PathBuf>,
 }
 
 impl Default for StartupConfig {
@@ -40,6 +44,8 @@ impl Default for StartupConfig {
             strand: Strand::Both,
             self_comparison: false,
             memory_limit_bytes: 512 * 1024 * 1024,
+            annot_query: None,
+            annot_subject: None,
         }
     }
 }
@@ -525,6 +531,14 @@ impl DottirApp {
         if let Some(p) = startup.subject {
             app.load_fasta(SeqRole::Subject, p);
         }
+        // Bind any startup annotation files now that the sequences are
+        // loaded (set_annotation needs the target sequence present).
+        if let Some(p) = startup.annot_query {
+            app.load_annotation(SeqRole::Query, p);
+        }
+        if let Some(p) = startup.annot_subject {
+            app.load_annotation(SeqRole::Subject, p);
+        }
         // Release the suspend. The first compute can't fire yet
         // because the canvas hasn't been measured — `pending_initial_
         // compute` is `true` and `update()` will fire it after the
@@ -583,6 +597,17 @@ impl DottirApp {
         }
     }
 
+    /// Load an annotation file from disk and bind it to an axis. Errors
+    /// surface in the status bar (like `load_fasta`).
+    fn load_annotation(&mut self, role: SeqRole, path: PathBuf) {
+        match dottir_io::AnnotSet::load(&path) {
+            Ok(set) => self.set_annotation(role, set),
+            Err(e) => {
+                self.last_error = Some(format!("failed to load {}: {e}", path.display()));
+            }
+        }
+    }
+
     /// Bind a parsed annotation set to an axis and store it for the
     /// overlay. In self-comparison mode the same set is bound to both
     /// axes (each against its own — identical — sequence). The caller
@@ -602,7 +627,10 @@ impl DottirApp {
                 SeqRole::Subject => self.subject_annot = bind(&self.subject, set),
             }
         }
-        for (axis, ann) in [("query", &self.query_annot), ("subject", &self.subject_annot)] {
+        for (axis, ann) in [
+            ("query", &self.query_annot),
+            ("subject", &self.subject_annot),
+        ] {
             if let Some(ax) = ann {
                 tracing::info!(
                     "annotation bound to {axis}: {} features, {} skipped",
@@ -1539,6 +1567,37 @@ impl DottirApp {
                     if ui.button("Open subject FASTA…").clicked() {
                         ui.close_menu();
                         pick_and_load(self, SeqRole::Subject);
+                    }
+                    ui.separator();
+                    if self.settings.self_comparison {
+                        if ui
+                            .add_enabled(self.query.is_some(), egui::Button::new("Load GFF3/BED…"))
+                            .clicked()
+                        {
+                            ui.close_menu();
+                            pick_and_load_annotation(self, SeqRole::Query);
+                        }
+                    } else {
+                        if ui
+                            .add_enabled(
+                                self.query.is_some(),
+                                egui::Button::new("Load GFF3/BED for query…"),
+                            )
+                            .clicked()
+                        {
+                            ui.close_menu();
+                            pick_and_load_annotation(self, SeqRole::Query);
+                        }
+                        if ui
+                            .add_enabled(
+                                self.subject.is_some(),
+                                egui::Button::new("Load GFF3/BED for subject…"),
+                            )
+                            .clicked()
+                        {
+                            ui.close_menu();
+                            pick_and_load_annotation(self, SeqRole::Subject);
+                        }
                     }
                     ui.separator();
                     if ui.button("Save PNG…").clicked() {
@@ -3882,12 +3941,7 @@ fn pick_and_load_annotation(app: &mut DottirApp, role: SeqRole) {
         .add_filter("Annotations (GFF3/BED)", &["gff", "gff3", "bed", "gz"])
         .pick_file();
     if let Some(path) = pick {
-        match dottir_io::AnnotSet::load(&path) {
-            Ok(set) => app.set_annotation(role, set),
-            Err(e) => {
-                app.last_error = Some(format!("failed to load {}: {e}", path.display()));
-            }
-        }
+        app.load_annotation(role, path);
     }
 }
 

@@ -93,6 +93,26 @@ struct Cli {
     /// Original Dotter equivalent: `-m <float>`.
     #[arg(short = 'm', long, value_name = "MiB", default_value_t = 512)]
     memory_mib: u32,
+
+    /// Annotation file (GFF3 or BED; format auto-detected) for the
+    /// query (horizontal) axis. `--bed-query` is an accepted alias.
+    #[arg(long = "gff-query", visible_alias = "bed-query", value_name = "PATH")]
+    annot_query: Option<PathBuf>,
+
+    /// Annotation file (GFF3 or BED) for the subject (vertical) axis.
+    /// `--bed-subject` is an accepted alias.
+    #[arg(
+        long = "gff-subject",
+        visible_alias = "bed-subject",
+        value_name = "PATH"
+    )]
+    annot_subject: Option<PathBuf>,
+
+    /// Annotation file (GFF3 or BED) applied to both axes — the natural
+    /// choice for a self-comparison. `--bed` is an accepted alias.
+    /// Per-axis flags override this.
+    #[arg(long = "gff", visible_alias = "bed", value_name = "PATH")]
+    annot_self: Option<PathBuf>,
 }
 
 #[derive(Copy, Clone, Debug, clap::ValueEnum)]
@@ -152,6 +172,9 @@ impl Cli {
             strand: self.strand.to_core(),
             self_comparison,
             memory_limit_bytes: (self.memory_mib as u64) * 1024 * 1024,
+            // `--gff`/`--bed` applies to both axes; per-axis flags win.
+            annot_query: self.annot_query.or_else(|| self.annot_self.clone()),
+            annot_subject: self.annot_subject.or(self.annot_self),
         }
     }
 }
