@@ -1803,6 +1803,114 @@ impl DottirApp {
             });
     }
 
+    fn axis_annot(&self, role: SeqRole) -> Option<&crate::annotation_overlay::AxisAnnot> {
+        match role {
+            SeqRole::Query => self.query_annot.as_ref(),
+            SeqRole::Subject => self.subject_annot.as_ref(),
+        }
+    }
+
+    fn axis_annot_mut(
+        &mut self,
+        role: SeqRole,
+    ) -> Option<&mut crate::annotation_overlay::AxisAnnot> {
+        match role {
+            SeqRole::Query => self.query_annot.as_mut(),
+            SeqRole::Subject => self.subject_annot.as_mut(),
+        }
+    }
+
+    fn clear_annot(&mut self, role: SeqRole) {
+        match role {
+            SeqRole::Query => self.query_annot = None,
+            SeqRole::Subject => self.subject_annot = None,
+        }
+    }
+
+    /// One axis's annotation controls in the Settings panel: load/clear,
+    /// a color-by dropdown (GFF3) or single swatch (BED), the value
+    /// legend with per-value color + visibility, and a skipped-feature
+    /// warning.
+    fn annotation_axis_ui(&mut self, ui: &mut egui::Ui, role: SeqRole) {
+        let (label, has_seq) = match role {
+            SeqRole::Query => ("Query", self.query.is_some()),
+            SeqRole::Subject => ("Subject", self.subject.is_some()),
+        };
+        let name = self
+            .axis_annot(role)
+            .and_then(|ax| ax.set.source_path.as_ref())
+            .and_then(|p| p.file_name())
+            .map(|f| f.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "—".to_string());
+
+        ui.horizontal(|ui| {
+            ui.label(format!("{label}: {name}"));
+            if ui
+                .add_enabled(has_seq, egui::Button::new("Load…"))
+                .on_hover_text("Load a GFF3 or BED file for this axis")
+                .clicked()
+            {
+                pick_and_load_annotation(self, role);
+            }
+            if self.axis_annot(role).is_some() && ui.button("Clear").clicked() {
+                self.clear_annot(role);
+            }
+        });
+
+        let Some(ax) = self.axis_annot_mut(role) else {
+            return;
+        };
+
+        // Color-by dropdown (GFF3 only — BED has a single color).
+        if !ax.is_bed() {
+            let keys: Vec<String> = ax.set.attribute_keys().into_iter().collect();
+            if !keys.is_empty() {
+                let current = ax.color_by.clone();
+                ui.horizontal(|ui| {
+                    ui.label("Color by:");
+                    egui::ComboBox::from_id_salt((label, "annot-colorby"))
+                        .selected_text(&current)
+                        .show_ui(ui, |ui| {
+                            for k in &keys {
+                                if ui.selectable_label(current == *k, k).clicked() {
+                                    ax.set_color_by(k.clone());
+                                }
+                            }
+                        });
+                });
+            }
+        }
+
+        // Legend: per-value visibility toggle + color swatch + count,
+        // sorted by descending feature count.
+        let counts = ax.value_counts();
+        for (value, count) in &counts {
+            ui.horizontal(|ui| {
+                let mut visible = !ax.hidden.contains(value);
+                if ui.checkbox(&mut visible, "").changed() {
+                    if visible {
+                        ax.hidden.remove(value);
+                    } else {
+                        ax.hidden.insert(value.clone());
+                    }
+                }
+                if ax.is_bed() {
+                    ui.color_edit_button_srgba(&mut ax.bed_color);
+                } else if let Some(col) = ax.palette.get_mut(value) {
+                    ui.color_edit_button_srgba(col);
+                }
+                ui.label(format!("{value}  ({count})"));
+            });
+        }
+
+        if ax.skipped > 0 {
+            ui.colored_label(
+                Color32::from_rgb(200, 140, 40),
+                format!("⚠ {} feature(s) skipped (record id not found)", ax.skipped),
+            );
+        }
+    }
+
     fn draw_settings_window(&mut self, ctx: &Context) {
         let mut open = self.show_settings;
         let mut changed = false;
@@ -2119,6 +2227,19 @@ impl DottirApp {
                          from both the raster AND the overlay in tandem.",
                     );
                 }
+
+                // Annotation overlay (ADR 0005) — display-only, no
+                // recompute (bands are drawn straight over the existing
+                // pixelmap).
+                ui.separator();
+                ui.heading("Annotations");
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut self.annot_show, "Show bands");
+                    ui.label("Alpha:");
+                    ui.add(egui::Slider::new(&mut self.annot_alpha, 0.0..=1.0));
+                });
+                self.annotation_axis_ui(ui, SeqRole::Query);
+                self.annotation_axis_ui(ui, SeqRole::Subject);
 
                 ui.separator();
                 if ui.button("Apply").clicked() {
@@ -3748,6 +3869,25 @@ fn pick_and_load(app: &mut DottirApp, role: SeqRole) {
         .pick_file();
     if let Some(path) = pick {
         app.load_fasta(role, path);
+    }
+}
+
+fn pick_and_load_annotation(app: &mut DottirApp, role: SeqRole) {
+    let label = match role {
+        SeqRole::Query => "Load annotation for query",
+        SeqRole::Subject => "Load annotation for subject",
+    };
+    let pick = rfd::FileDialog::new()
+        .set_title(label)
+        .add_filter("Annotations (GFF3/BED)", &["gff", "gff3", "bed", "gz"])
+        .pick_file();
+    if let Some(path) = pick {
+        match dottir_io::AnnotSet::load(&path) {
+            Ok(set) => app.set_annotation(role, set),
+            Err(e) => {
+                app.last_error = Some(format!("failed to load {}: {e}", path.display()));
+            }
+        }
     }
 }
 

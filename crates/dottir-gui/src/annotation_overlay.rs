@@ -203,6 +203,9 @@ fn default_color_by(set: &AnnotSet) -> String {
 /// `screen = axis_origin + pixel / ppp - draw_offset`, where `off` is the
 /// slice origin on this axis. Returns `None` when the band lies entirely
 /// outside the visible axis range.
+// Nine scalar args, but they're the irreducible inputs to one coordinate
+// transform; bundling them into a struct would add ceremony without clarity.
+#[allow(clippy::too_many_arguments)]
 pub fn band_screen_span(
     lo: usize,
     hi: usize,
@@ -241,7 +244,7 @@ mod tests {
         let mut records = Vec::new();
         let mut off = 0;
         for (id, len) in recs {
-            seq.extend(std::iter::repeat(b'A').take(*len));
+            seq.extend(std::iter::repeat_n(b'A', *len));
             records.push(RecordSpan {
                 id: id.to_string(),
                 description: None,
