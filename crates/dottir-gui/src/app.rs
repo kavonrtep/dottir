@@ -358,6 +358,16 @@ pub struct DottirApp {
     /// path that runs before the first `update()` (load_fasta in
     /// the constructor) behaves as on a non-HiDPI display.
     pixels_per_point: f32,
+    /// Annotation overlay (ADR 0005): per-axis loaded GFF3/BED bound to
+    /// the query (X) / subject (Y) sequence. Drawn as full-span bands.
+    query_annot: Option<crate::annotation_overlay::AxisAnnot>,
+    subject_annot: Option<crate::annotation_overlay::AxisAnnot>,
+    /// Master toggle for drawing annotation bands.
+    annot_show: bool,
+    /// Global alpha applied to every annotation band, `[0.0, 1.0]`. The
+    /// single "darkness" control; overlapping bands self-darken via
+    /// compositing.
+    annot_alpha: f32,
 }
 
 /// Maximum number of history entries kept around for Back. Older
@@ -499,6 +509,10 @@ impl DottirApp {
             last_dispatched_slice: None,
             current_ridges: Vec::new(),
             pixels_per_point: 1.0,
+            query_annot: None,
+            subject_annot: None,
+            annot_show: true,
+            annot_alpha: 0.35,
         };
 
         // Pre-load any sequences supplied on the command line. Errors
@@ -534,8 +548,15 @@ impl DottirApp {
                     detected,
                 );
                 match role {
-                    SeqRole::Query => self.query = Some(seq),
-                    SeqRole::Subject => self.subject = Some(seq),
+                    SeqRole::Query => {
+                        self.query = Some(seq);
+                        // Buffer coords changed → any bound annotation is stale.
+                        self.query_annot = None;
+                    }
+                    SeqRole::Subject => {
+                        self.subject = Some(seq);
+                        self.subject_annot = None;
+                    }
                 }
                 self.last_error = None;
                 // Fresh sequence data → reset view state and caches.
@@ -560,6 +581,37 @@ impl DottirApp {
                 self.last_error = Some(format!("failed to load {}: {e}", path.display()));
             }
         }
+    }
+
+    /// Bind a parsed annotation set to an axis and store it for the
+    /// overlay. In self-comparison mode the same set is bound to both
+    /// axes (each against its own — identical — sequence). The caller
+    /// (File menu / CLI, Phase 5) is responsible for having loaded the
+    /// target sequence first; if it isn't present the set is dropped.
+    fn set_annotation(&mut self, role: SeqRole, set: dottir_io::AnnotSet) {
+        use crate::annotation_overlay::AxisAnnot;
+        let bind = |seq: &Option<Sequence>, set: dottir_io::AnnotSet| -> Option<AxisAnnot> {
+            seq.as_ref().map(|s| AxisAnnot::new(set, s))
+        };
+        if self.settings.self_comparison {
+            self.query_annot = bind(&self.query, set.clone());
+            self.subject_annot = bind(&self.subject, set);
+        } else {
+            match role {
+                SeqRole::Query => self.query_annot = bind(&self.query, set),
+                SeqRole::Subject => self.subject_annot = bind(&self.subject, set),
+            }
+        }
+        for (axis, ann) in [("query", &self.query_annot), ("subject", &self.subject_annot)] {
+            if let Some(ax) = ann {
+                tracing::info!(
+                    "annotation bound to {axis}: {} features, {} skipped",
+                    ax.bound.len(),
+                    ax.skipped,
+                );
+            }
+        }
+        self.last_error = None;
     }
 
     /// Pick a *display-matched* `PlotConfig::zoom` for the current

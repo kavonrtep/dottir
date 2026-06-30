@@ -21,6 +21,7 @@
 
 #![forbid(unsafe_code)]
 
+mod annotation_overlay;
 mod app;
 mod compute_worker;
 mod session;

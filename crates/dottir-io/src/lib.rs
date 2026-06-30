@@ -27,5 +27,5 @@ pub mod sequence;
 pub mod svg_export;
 pub mod text_overlay;
 
-pub use annotation::{AnnotError, AnnotSet, AnnotSource, Feature, Strand};
+pub use annotation::{AnnotError, AnnotSet, AnnotSource, Feature, Strand, TYPE_KEY};
 pub use sequence::{detect_alphabet, DetectedAlphabet, RecordSpan, Sequence};
