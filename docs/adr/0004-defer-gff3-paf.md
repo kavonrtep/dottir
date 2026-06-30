@@ -1,9 +1,11 @@
 # ADR 0004 — Defer GFF3 and PAF loaders to a future MSRV bump
 
-* Status: Accepted
+* Status: Accepted (GFF3 half superseded by ADR 0005)
 * Date: 2026-05-16
 * Deciders: petr
 * Supersedes: nothing; complements ADR 0003.
+* Superseded by: ADR 0005 (GFF3 loader; the MSRV blocker is resolved).
+  PAF remains deferred.
 
 ## Context
 

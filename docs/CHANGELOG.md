@@ -5,6 +5,28 @@ All notable changes to dottir are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+* **Annotation overlay (GFF3 / BED)** — load annotation intervals and
+  display them on the dotplot as full-span colored bands (ADR 0005). A
+  query feature paints as a vertical band across the plot height; a
+  subject feature as a horizontal band across the width; overlaps
+  self-darken so annotated region-pairs stand out. Works for both
+  self-comparison (one file applied to both axes) and pairwise
+  comparison (one file per axis).
+  - **GFF3** (via `noodles-gff`) is colored by a chosen attribute value
+    (default `Name`, plus a synthetic `(type)` key for column 3), with a
+    side-panel legend offering a per-value color picker and visibility
+    toggle. **BED** uses a single color per file. Plain or gzipped.
+  - A single global **alpha** slider controls band darkness; dots remain
+    visible through the bands.
+  - Load via **File → Load GFF3/BED for query/subject…** (collapsing to
+    one entry in self-comparison) or the CLI flags `--gff-query` /
+    `--gff-subject` / `--gff` (with `--bed*` aliases; format
+    auto-detected by extension).
+
 ## [0.2.2] - 2026-05-24
 
 ### Fixed

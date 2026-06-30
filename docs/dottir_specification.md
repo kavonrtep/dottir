@@ -183,6 +183,14 @@ These do not exist in the original and are the practical reason for redoing the 
      subsetting the dotter window subsets the rendered features.
    - Hover on a feature shows its GFF attributes (a tooltip).
    - Click on a feature jumps the crosshair to the feature's start (or center).
+   - **Status (implemented, see ADR 0005)**: shipped as full-span bands
+     (query feature → vertical band, subject feature → horizontal band) drawn
+     over the pixelmap with a global alpha, rather than gutter tracks; this
+     answers "do matches fall inside annotated regions?" directly and lets
+     crossings form region-pair rectangles. **BED** is also accepted. GFF3 is
+     colored by a chosen attribute value (default `Name`, with a synthetic
+     `(type)` key); BED uses a single color. v1 binds one file per axis and
+     does not yet implement per-feature tooltip / click-to-jump.
 2. **PAF-based HSP overlay**. Load HSPs from a PAF file (e.g. minimap2 output) in
    addition to the original BLAST-style. Render in the existing HSP overlay modes.
 3. **Inverted-repeat highlighting**. In self-comparison mode, reverse-strand dots
