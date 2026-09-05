@@ -1,3 +1,7 @@
+
+
+https://github.com/user-attachments/assets/846029f8-dc92-4fe6-8d0f-4f61725f5b26
+
 # dottir
 
 A modern Rust reimplementation of **[Dotter](https://pubmed.ncbi.nlm.nih.gov/8566757/)** — the
