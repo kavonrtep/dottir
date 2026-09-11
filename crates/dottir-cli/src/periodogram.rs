@@ -16,7 +16,7 @@ use dottir_core::{
     PeakKind, PeaksConfig, Periodogram, PeriodogramConfig, ScoreMatrix, Sensitivity, Spectrum,
     SpectrumConfig,
 };
-use dottir_io::fasta;
+use dottir_io::load_sequence_input;
 
 #[derive(Parser, Debug)]
 #[command(version)]
@@ -193,10 +193,16 @@ pub fn run(args: PeriodogramArgs) -> Result<()> {
     };
 
     tracing::info!("reading {}", args.input.display());
-    let loaded = fasta::load_fasta_file(&args.input)
+    // Accepts FASTA, or a GFF3 carrying its own sequences after
+    // `##FASTA`. Any features in the latter are irrelevant here — the
+    // periodogram is computed per sequence record.
+    let loaded = load_sequence_input(&args.input)
         .with_context(|| format!("reading {}", args.input.display()))?;
-    if loaded.records.is_empty() {
-        anyhow::bail!("input FASTA contains no records");
+    if loaded.sequence.records.is_empty() {
+        anyhow::bail!(
+            "input {} contains no sequence records",
+            args.input.display()
+        );
     }
 
     // `--fft z_score` requires a usable z-score column.
@@ -261,13 +267,13 @@ pub fn run(args: PeriodogramArgs) -> Result<()> {
         top_peaks: args.fft_top_peaks,
         ..SpectrumConfig::default()
     };
-    for record in &loaded.records {
+    for record in &loaded.sequence.records {
         process_record(
             &mut out,
             &mut fft_out,
             &mut peaks_out,
             &record.id,
-            &record.sequence,
+            &loaded.sequence.seq[record.range.clone()],
             &cfg,
             resolved_z,
             args.z_shuffles,

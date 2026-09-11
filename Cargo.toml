@@ -11,7 +11,7 @@ members = [
 exclude = ["kitehor"]
 
 [workspace.package]
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 rust-version = "1.85"
 license = "GPL-3.0-or-later"
@@ -38,9 +38,9 @@ noodles-gff = { version = "0.54", default-features = false }
 # Internal. A `version` is required alongside `path` so workspace-aware
 # tooling (cargo-deny) resolves them to a concrete requirement instead of a
 # wildcard. Keep in lockstep with `[workspace.package] version`.
-dottir-core = { path = "crates/dottir-core", version = "0.3.0" }
-dottir-io = { path = "crates/dottir-io", version = "0.3.0" }
-dottir-render = { path = "crates/dottir-render", version = "0.3.0" }
+dottir-core = { path = "crates/dottir-core", version = "0.4.0" }
+dottir-io = { path = "crates/dottir-io", version = "0.4.0" }
+dottir-render = { path = "crates/dottir-render", version = "0.4.0" }
 
 [profile.release]
 lto = "thin"

@@ -39,6 +39,7 @@ future `pyo3` bindings without dragging in PNG / FASTA / GUI deps.
 | Module | Role |
 |--------|------|
 | `fasta` | Minimal FASTA reader (plain + gzip). |
+| `input` | Positional sequence input: FASTA, or GFF3 with an embedded `##FASTA` section. |
 | `png_export` | 8-bit greyscale PNG with `tEXt` provenance. |
 | `params` | TOML sidecar struct + SHA-256 helper. |
 | `alignment` | ±N residue slice around a crosshair coord. |

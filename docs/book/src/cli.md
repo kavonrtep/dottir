@@ -1,19 +1,58 @@
 # The `dottir batch` CLI
 
 ```text
-dottir batch <QUERY.fa> [SUBJECT.fa] -o <OUT.png> [FLAGS]
+dottir batch <QUERY> [SUBJECT] -o <OUT.png> [FLAGS]
 ```
 
 ## Required arguments
 
 | Argument | Description |
 |----------|-------------|
-| `QUERY` | FASTA path; horizontal axis of the dotplot. |
-| `SUBJECT` | FASTA path; vertical axis. **Omit for a self-comparison** — subject is set to query and the mirror post-process is enabled. |
+| `QUERY` | Sequence path; horizontal axis of the dotplot. |
+| `SUBJECT` | Sequence path; vertical axis. **Omit for a self-comparison** — subject is set to query and the mirror post-process is enabled. |
 | `-o, --output` | Output PNG path. A `<output>.params.toml` sidecar is written next to it. |
 
-Both FASTA files may be gzipped (`.gz`); the reader auto-detects from
-the file's magic bytes.
+Both inputs may be gzipped (`.gz`); the reader auto-detects from the
+file's magic bytes.
+
+### Input formats
+
+A positional input is either:
+
+* a **FASTA** file (`.fa`, `.fasta`, `.fna`, `.faa`, …), or
+* a **GFF3** file (`.gff`, `.gff3`) that carries its own sequences after
+  a `##FASTA` directive.
+
+The second form needs no separate FASTA — one file supplies both the
+sequence and its annotation. Multi-record inputs are concatenated in
+file order, as always.
+
+```sh
+# Self-comparison straight from an annotated GFF3.
+dottir batch elements.gff3 -o elements.png
+
+# Pairwise, two annotated GFF3 files, no FASTA anywhere.
+dottir batch family_a.gff3 family_b.gff3 -o ab.png
+```
+
+Batch mode draws no annotation overlay, so features found in a GFF3
+input are counted in the log and otherwise ignored; the pixelmap is
+identical to the one you would get from the equivalent FASTA. The
+overlay lives in the [GUI](./gui.md).
+
+A GFF3 with no `##FASTA` section cannot serve as a sequence input and is
+rejected:
+
+```text
+Error: reading query features.gff3
+
+Caused by:
+    features.gff3 is a GFF3 file with no embedded sequences: either
+    append a `##FASTA` section to it, or pass the FASTA separately and
+    give this file with --gff-query/--gff-subject
+```
+
+`dottir periodogram` accepts the same two input forms.
 
 ## Flags
 

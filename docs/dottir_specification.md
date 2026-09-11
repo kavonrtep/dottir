@@ -361,7 +361,11 @@ Pin specific versions in `Cargo.toml` once selected; treat new releases as opt-i
 
 - **FASTA** (`.fa`, `.fasta`, `.fna`, `.faa`), plain or gzipped (`.gz`).
   Multi-record accepted; concatenated with breaklines at record boundaries.
-- **GFF3** (`.gff3`, `.gff`), plain or gzipped.
+- **GFF3** (`.gff3`, `.gff`), plain or gzipped. A GFF3 carrying its sequences
+  after a `##FASTA` directive MAY be used as a positional sequence input in
+  place of a FASTA, in which case its features are also bound as that axis's
+  annotation overlay (ADR 0006). A GFF3 without that section is an annotation
+  input only.
 - **PAF** (`.paf`), plain or gzipped — for HSP overlays.
 - **BLAST score matrix** files (BLOSUM/PAM format). Built-in: BLOSUM62, BLOSUM50,
   BLOSUM45, BLOSUM80, BLOSUM90, PAM30, PAM70, PAM250. Identity matrix for DNA.

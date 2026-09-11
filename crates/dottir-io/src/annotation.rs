@@ -4,8 +4,10 @@
 //!
 //! * **GFF3** — parsed with `noodles-gff`, which handles the real-world
 //!   warts (percent-encoded attribute values, multi-value attributes,
-//!   `##` directives, embedded `##FASTA` sections). Colored by an
-//!   attribute value in the GUI.
+//!   `##` directives). The embedded `##FASTA` section is split off
+//!   before parsing (see [`split_fasta_section`]) — it is either
+//!   ignored here or used as the sequence input, see [`crate::input`].
+//!   Colored by an attribute value in the GUI.
 //! * **BED** — a fixed-column TSV; hand-rolled here (BED carries no rich
 //!   attributes, so there is nothing for noodles to buy us). Single color
 //!   per file in the GUI.
@@ -119,13 +121,16 @@ impl AnnotSet {
             return Err(AnnotError::UnknownFormat(path.to_path_buf()));
         };
 
-        let features = if is_gzipped {
-            let r = BufReader::new(MultiGzDecoder::new(&bytes[..]));
-            parse(source, r)?
-        } else {
-            let r = BufReader::new(&bytes[..]);
-            parse(source, r)?
+        let plain = decompress(&bytes, is_gzipped)?;
+        // A GFF3 may embed its sequences after a `##FASTA` directive;
+        // that section is not feature data, so it never reaches the
+        // feature parser. `crate::input` uses the same split to read
+        // the sequence out of such a file.
+        let (feature_bytes, _) = match source {
+            AnnotSource::Gff3 => split_fasta_section(&plain),
+            AnnotSource::Bed => (&plain[..], None),
         };
+        let features = parse(source, BufReader::new(feature_bytes))?;
 
         Ok(AnnotSet {
             source_path: Some(path.to_path_buf()),
@@ -157,11 +162,69 @@ fn ext_is(path: &Path, ext: &str) -> bool {
         .is_some_and(|e| e.eq_ignore_ascii_case(ext))
 }
 
+/// Gunzip `bytes` when `is_gzipped`, otherwise hand them back
+/// unchanged. Returns an owned buffer either way so callers can split
+/// it without caring which branch ran.
+pub(crate) fn decompress(bytes: &[u8], is_gzipped: bool) -> Result<Vec<u8>, AnnotError> {
+    if is_gzipped {
+        let mut out = Vec::new();
+        std::io::Read::read_to_end(&mut MultiGzDecoder::new(bytes), &mut out)?;
+        Ok(out)
+    } else {
+        Ok(bytes.to_vec())
+    }
+}
+
+/// Split GFF3 bytes at the `##FASTA` directive (GFF3 spec §"Sequences").
+///
+/// Returns `(features, Some(fasta))` when the directive is present, and
+/// `(all, None)` when it is not. The directive line itself belongs to
+/// neither half. The match is on a line that is exactly `##FASTA`
+/// (trailing whitespace and a `\r` allowed) — a `##FASTA`-prefixed
+/// *word* inside an attribute value cannot trigger it.
+pub fn split_fasta_section(bytes: &[u8]) -> (&[u8], Option<&[u8]>) {
+    let mut offset = 0usize;
+    while offset < bytes.len() {
+        let rest = &bytes[offset..];
+        let line_len = rest.iter().position(|&b| b == b'\n').unwrap_or(rest.len());
+        let line = &rest[..line_len];
+        if is_fasta_directive(line) {
+            let after = offset + line_len + usize::from(line_len < rest.len());
+            return (&bytes[..offset], Some(&bytes[after..]));
+        }
+        offset += line_len + 1;
+    }
+    (bytes, None)
+}
+
+fn is_fasta_directive(line: &[u8]) -> bool {
+    let line = trim_ascii_end(line);
+    line.eq_ignore_ascii_case(b"##FASTA")
+}
+
+fn trim_ascii_end(mut s: &[u8]) -> &[u8] {
+    while let Some((last, head)) = s.split_last() {
+        if last.is_ascii_whitespace() {
+            s = head;
+        } else {
+            break;
+        }
+    }
+    s
+}
+
 fn parse<R: BufRead>(source: AnnotSource, reader: R) -> Result<Vec<Feature>, AnnotError> {
     match source {
         AnnotSource::Gff3 => parse_gff3(reader),
         AnnotSource::Bed => parse_bed(reader),
     }
+}
+
+/// Parse GFF3 feature lines from raw bytes. Any `##FASTA` section is
+/// split off first, so callers may hand over a whole GFF3 file.
+pub fn parse_gff3_bytes(bytes: &[u8]) -> Result<Vec<Feature>, AnnotError> {
+    let (features, _) = split_fasta_section(bytes);
+    parse_gff3(BufReader::new(features))
 }
 
 fn parse_gff3<R: BufRead>(reader: R) -> Result<Vec<Feature>, AnnotError> {

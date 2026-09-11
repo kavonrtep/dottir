@@ -35,7 +35,9 @@ the crosshair](./docs/dottir_screenshot.png)
   the feature type), with a side-panel legend (per-value color + show /
   hide), an opacity slider, and an alignment view that lists every
   feature overlapping the crosshair on each axis. Load from the File
-  menu or via `--gff` / `--gff-query` / `--gff-subject`.
+  menu or via `--gff` / `--gff-query` / `--gff-subject` — or skip the
+  separate file entirely and pass a **GFF3 with an embedded `##FASTA`
+  section** as the sequence input.
 - **Live greyramp** — drag the black/white sliders, the image
   updates without re-running compute.
 - **Zoom-aware** GUI: smooth pan/zoom, then a debounced recompute
@@ -100,8 +102,9 @@ plot:
 dottir batch chr4.fa -o chr4.png --auto-zoom 4000
 ```
 
-(Pass a single FASTA for a self-comparison; pass two for a
-pairwise plot.)
+(Pass a single input for a self-comparison; pass two for a pairwise
+plot. Each input is a FASTA, or a GFF3 carrying its own sequences after
+a `##FASTA` directive.)
 
 A query vs. subject BLASTP at a fixed window:
 
@@ -124,6 +127,13 @@ first look (it produced the screenshot above):
 ```sh
 dottir-gui tests/corpora/annotation_overlay/ltr_angela.fasta \
     --gff tests/corpora/annotation_overlay/ltr_angela.gff3
+```
+
+The same thing from one self-contained file, where the GFF3 carries its
+sequences after a `##FASTA` directive:
+
+```sh
+dottir-gui tests/corpora/gff3_with_sequence/ltr_angela.with_seq.gff3.gz
 ```
 
 Full flag reference: `dottir batch --help`, `dottir-gui --help`, or

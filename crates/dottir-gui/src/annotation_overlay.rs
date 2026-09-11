@@ -315,6 +315,28 @@ mod tests {
         assert_ne!(ax.color_for("ALR"), ax.color_for("HSAT"));
     }
 
+    /// A GFF3 that carries its own sequences is internally consistent
+    /// by construction: every feature names a record in the same
+    /// file's `##FASTA` section. Binding it must therefore skip
+    /// nothing — this is what makes auto-binding on load safe.
+    #[test]
+    fn embedded_gff3_binds_every_feature() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/corpora/gff3_with_sequence/tir_simple.with_seq.gff3");
+        let input = dottir_io::load_sequence_input(path).unwrap();
+        let set = input.annotations.expect("embedded features");
+        let n_features = set.features.len();
+        assert!(n_features > 0);
+
+        let ax = AxisAnnot::new(set, &input.sequence);
+        assert_eq!(ax.skipped, 0, "embedded features should all bind");
+        assert_eq!(ax.bound.len(), n_features);
+        // Record-local ranges were lifted into the concatenated buffer.
+        for b in &ax.bound {
+            assert!(b.range.end <= input.sequence.len());
+        }
+    }
+
     #[test]
     fn binding_clamps_feature_overrunning_record_end() {
         let seq = seq_with_records(&[("chr1", 100)]);

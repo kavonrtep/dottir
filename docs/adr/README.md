@@ -9,6 +9,8 @@ over Y because…" live here. Format: [MADR](https://adr.github.io/madr/).
 | 0002 | License = GPLv3-or-later    | Accepted |
 | 0003 | Defer GUI to MSRV bump      | Superseded |
 | 0004 | Defer GFF3 / PAF to MSRV bump | Accepted |
+| 0005 | Annotation overlay as full-span bands | Accepted |
+| 0006 | GFF3 with embedded sequences as input | Accepted |
 
 Add a new ADR whenever the change is one of:
 

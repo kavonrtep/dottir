@@ -1,8 +1,13 @@
 //! `dottir` CLI binary — batch mode (spec §4.4.8).
 //!
-//! Computes a dotplot from a (query, subject) FASTA pair and writes a
-//! greyscale PNG + a `.params.toml` sidecar. Mirrors C dotter CLI option
-//! names where reasonable.
+//! Computes a dotplot from a (query, subject) sequence pair and writes
+//! a greyscale PNG + a `.params.toml` sidecar. Mirrors C dotter CLI
+//! option names where reasonable.
+//!
+//! Each positional input is either a FASTA file or a GFF3 file that
+//! carries its own sequences after a `##FASTA` directive (see
+//! `dottir_io::input`), so an annotated sequence can be supplied as a
+//! single self-contained file.
 
 mod find_peaks;
 mod periodogram;
@@ -17,7 +22,6 @@ use dottir_core::{
     ScoreMatrix, Strand, Triangle, PIXELMAP_FORMAT_VERSION,
 };
 use dottir_io::{
-    fasta,
     params::{
         sha256_bytes, DottirInfo, HostInfo, InputInfo, KarlinInfo, ParamsSidecar, PlotParamsInfo,
     },
@@ -53,11 +57,12 @@ enum Command {
 #[derive(clap::Args, Debug)]
 #[command(version)]
 struct BatchArgs {
-    /// Query FASTA (horizontal axis).
+    /// Query sequence, horizontal axis. FASTA, or a GFF3 with an
+    /// embedded `##FASTA` section.
     #[arg(value_name = "QUERY")]
     query: PathBuf,
-    /// Subject FASTA (vertical axis). Omit for a self-comparison
-    /// (subject = query, mirror enabled).
+    /// Subject sequence, vertical axis. FASTA or GFF3-with-FASTA.
+    /// Omit for a self-comparison (subject = query, mirror enabled).
     #[arg(value_name = "SUBJECT")]
     subject: Option<PathBuf>,
     /// Output PNG path. The params sidecar is written to
@@ -238,23 +243,22 @@ fn run_batch(args: BatchArgs) -> Result<()> {
     };
 
     tracing::info!("reading query  {}", args.query.display());
-    let query_loaded = fasta::load_fasta_file(&args.query)
+    let query_input = dottir_io::load_sequence_input(&args.query)
         .with_context(|| format!("reading query {}", args.query.display()))?;
-    let query =
-        dottir_io::Sequence::from_records(query_loaded.records.clone(), Some(args.query.clone()));
+    report_input("query", &query_input);
 
-    let subject_loaded = if is_self_comparison {
+    let subject_input = if is_self_comparison {
         tracing::info!("self-comparison (subject = query)");
-        query_loaded.clone()
+        query_input.clone()
     } else {
         tracing::info!("reading subject {}", subject_path.display());
-        fasta::load_fasta_file(&subject_path)
-            .with_context(|| format!("reading subject {}", subject_path.display()))?
+        let s = dottir_io::load_sequence_input(&subject_path)
+            .with_context(|| format!("reading subject {}", subject_path.display()))?;
+        report_input("subject", &s);
+        s
     };
-    let subject = dottir_io::Sequence::from_records(
-        subject_loaded.records.clone(),
-        Some(subject_path.clone()),
-    );
+    let query = query_input.sequence.clone();
+    let subject = subject_input.sequence.clone();
 
     // auto-zoom: pick zoom so max(qlen, slen) / zoom <= auto_zoom.
     // For repeat arrays, snap to a nearby record-period divisor so
@@ -523,13 +527,13 @@ fn run_batch(args: BatchArgs) -> Result<()> {
             },
             query: input_info(
                 &args.query,
-                &query_loaded.bytes,
+                &query_input.bytes,
                 &query.records,
                 query.bytes(),
             )?,
             subject: input_info(
                 &subject_path,
-                &subject_loaded.bytes,
+                &subject_input.bytes,
                 &subject.records,
                 subject.bytes(),
             )?,
@@ -578,6 +582,29 @@ fn pick_matrix(name: Option<&str>, mode: BlastMode) -> Result<ScoreMatrix> {
         }
         (Some(n), _) => {
             ScoreMatrix::by_name(n).ok_or_else(|| anyhow::anyhow!("unknown matrix {n:?}"))
+        }
+    }
+}
+
+/// Log what a positional input turned out to be. Batch mode has no
+/// annotation overlay, so features found in a GFF3 input are counted
+/// and dropped — saying so beats silence when a user passes an
+/// annotated GFF3 and sees a plain dotplot.
+fn report_input(role: &str, input: &dottir_io::SeqInput) {
+    match input.kind {
+        dottir_io::InputKind::Fasta => tracing::info!(
+            "{role}: FASTA, {} records, {} residues",
+            input.sequence.records.len(),
+            input.sequence.len(),
+        ),
+        dottir_io::InputKind::Gff3WithFasta => {
+            let n_features = input.annotations.as_ref().map_or(0, |a| a.features.len());
+            tracing::info!(
+                "{role}: GFF3 with embedded FASTA, {} records, {} residues, \
+                 {n_features} features (not rendered in batch mode)",
+                input.sequence.records.len(),
+                input.sequence.len(),
+            );
         }
     }
 }

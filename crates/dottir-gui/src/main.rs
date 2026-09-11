@@ -36,10 +36,12 @@ use dottir_core::{BlastMode, Strand};
 /// Mirror the original `dotter [options] <horizontal_sequence>
 /// [<vertical_sequence>]` CLI where it makes sense for the GUI.
 ///
-/// One positional FASTA path triggers a self-comparison; two paths
-/// load a query (horizontal) / subject (vertical) pair. All flags are
-/// optional; anything not given falls back to the GUI's defaults and
-/// can be changed from the Settings window.
+/// One positional path triggers a self-comparison; two paths load a
+/// query (horizontal) / subject (vertical) pair. Each path is a FASTA
+/// file, or a GFF3 file carrying its own sequences after a `##FASTA`
+/// directive — the latter needs no separate `--gff-*` flag. All flags
+/// are optional; anything not given falls back to the GUI's defaults
+/// and can be changed from the Settings window.
 #[derive(Parser, Debug)]
 #[command(
     name = "dottir-gui",
@@ -48,16 +50,22 @@ use dottir_core::{BlastMode, Strand};
     long_about = "Interactive dotplot viewer.\n\
                   \n\
                   Run with no arguments to open an empty window and use \
-                  File → Open to load FASTA files, or pass two FASTA paths \
-                  to pre-load them and compute the dotplot on startup."
+                  File → Open to load sequences, or pass one or two paths \
+                  to pre-load them and compute the dotplot on startup.\n\
+                  \n\
+                  A path may be a FASTA file, or a GFF3 file with an \
+                  embedded ##FASTA section — the latter supplies both the \
+                  sequence and its annotation overlay from one file."
 )]
 struct Cli {
-    /// Query FASTA path — horizontal axis. Optional.
+    /// Query sequence — horizontal axis. FASTA, or a GFF3 with an
+    /// embedded `##FASTA` section (its features are overlaid on this
+    /// axis). Optional.
     #[arg(value_name = "QUERY")]
     query: Option<PathBuf>,
 
-    /// Subject FASTA path — vertical axis. Omit (with QUERY given)
-    /// for a self-comparison.
+    /// Subject sequence — vertical axis. FASTA or GFF3-with-FASTA.
+    /// Omit (with QUERY given) for a self-comparison.
     #[arg(value_name = "SUBJECT")]
     subject: Option<PathBuf>,
 
@@ -96,11 +104,13 @@ struct Cli {
 
     /// Annotation file (GFF3 or BED; format auto-detected) for the
     /// query (horizontal) axis. `--bed-query` is an accepted alias.
+    /// Overrides features embedded in a GFF3 query input.
     #[arg(long = "gff-query", visible_alias = "bed-query", value_name = "PATH")]
     annot_query: Option<PathBuf>,
 
     /// Annotation file (GFF3 or BED) for the subject (vertical) axis.
-    /// `--bed-subject` is an accepted alias.
+    /// `--bed-subject` is an accepted alias. Overrides features
+    /// embedded in a GFF3 subject input.
     #[arg(
         long = "gff-subject",
         visible_alias = "bed-subject",

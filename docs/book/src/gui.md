@@ -11,8 +11,11 @@ dottir-gui [OPTIONS] [QUERY] [SUBJECT]
 
 Mirrors the original `dotter [options] <horizontal> [<vertical>]`
 invocation. Both positional arguments are optional — run with none to
-open an empty window and load FASTAs via **File → Open**. Pass only
-one FASTA for a self-comparison.
+open an empty window and load sequences via **File → Open**. Pass only
+one for a self-comparison.
+
+Each positional is a FASTA file, or a GFF3 file with an embedded
+`##FASTA` section (see [Sequences from GFF3](#sequences-from-gff3)).
 
 | Flag | Default | Description |
 |------|---------|-------------|
@@ -27,8 +30,28 @@ one FASTA for a self-comparison.
 | `--gff-query PATH` | — | Annotation overlay for the query (horizontal) axis. `--bed-query` alias. |
 | `--gff-subject PATH` | — | Annotation overlay for the subject (vertical) axis. `--bed-subject` alias. |
 
-Per-axis flags override `--gff`. Format is auto-detected; both plain and
-gzipped files are accepted.
+Per-axis flags override `--gff`, which in turn overrides features
+embedded in a GFF3 positional input. Format is auto-detected; both plain
+and gzipped files are accepted.
+
+### Sequences from GFF3
+
+A GFF3 file may carry the sequences it annotates after a `##FASTA`
+directive. Such a file is self-contained and can be given directly as a
+positional argument — no FASTA, no `--gff*` flag:
+
+```sh
+# Self-comparison: sequence and overlay from one file.
+dottir-gui elements.gff3
+
+# Pairwise: one annotated file per axis.
+dottir-gui family_a.gff3 family_b.gff3
+```
+
+The features from the same file are bound as that axis's overlay
+automatically. **File → Open query/subject sequence…** accepts the same
+form. A GFF3 with no `##FASTA` section is not a sequence input — load it
+through the `--gff*` flags or **File → Load GFF3/BED…** instead.
 
 ## Panels
 
@@ -99,7 +122,9 @@ bands, the side-panel legend, and the alignment view listing every
 feature under the crosshair](../../dottir_screenshot.png)
 
 **Loading.** Use **File → Load GFF3/BED for query / subject…** (a single
-entry in self-comparison), or the `--gff*` flags above. GFF3 is parsed
+entry in self-comparison), or the `--gff*` flags above — or skip both
+and open a GFF3 that carries its own sequences, which binds its features
+on load. GFF3 is parsed
 via `noodles-gff`, BED as plain intervals; both plain and gzipped.
 
 **Coloring.** GFF3 features are colored by a chosen attribute, selected

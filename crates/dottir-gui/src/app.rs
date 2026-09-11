@@ -269,7 +269,7 @@ pub struct DottirApp {
     /// True while a worker has an in-flight request. Drives the
     /// status-bar progress indicator.
     compute_in_flight: bool,
-    /// Suppress recompute during constructor — load_fasta() runs
+    /// Suppress recompute during constructor — load_sequence() runs
     /// during DottirApp::new and would otherwise dispatch multiple
     /// jobs before the second sequence is loaded.
     suspend_recompute: bool,
@@ -333,7 +333,7 @@ pub struct DottirApp {
     current_slice: Option<ViewSlice>,
     /// Slice to use for the *next* dispatched compute. Set by
     /// `action_rect_zoom` / `action_fit` / `action_back` /
-    /// `load_fasta`; consumed in `recompute`. `None` means "use the
+    /// `load_sequence`; consumed in `recompute`. `None` means "use the
     /// full sequence".
     target_slice: Option<ViewSlice>,
     /// Karlin-derived auto pixel_fac locked to the first compute of
@@ -361,7 +361,7 @@ pub struct DottirApp {
     /// conversion in the canvas, so the pixmap can be sized to and
     /// drawn over physical-pixel boundaries (Option C in
     /// `docs/reviews/dotter-sizing-model.md`). Default 1.0 so any
-    /// path that runs before the first `update()` (load_fasta in
+    /// path that runs before the first `update()` (load_sequence in
     /// the constructor) behaves as on a non-HiDPI display.
     pixels_per_point: f32,
     /// Annotation overlay (ADR 0005): per-axis loaded GFF3/BED bound to
@@ -526,10 +526,10 @@ impl DottirApp {
         // instead of aborting the GUI — the user can still recover via
         // File → Open.
         if let Some(p) = startup.query {
-            app.load_fasta(SeqRole::Query, p);
+            app.load_sequence(SeqRole::Query, p);
         }
         if let Some(p) = startup.subject {
-            app.load_fasta(SeqRole::Subject, p);
+            app.load_sequence(SeqRole::Subject, p);
         }
         // Bind any startup annotation files now that the sequences are
         // loaded (set_annotation needs the target sequence present).
@@ -550,15 +550,25 @@ impl DottirApp {
         app
     }
 
-    fn load_fasta(&mut self, role: SeqRole, path: PathBuf) {
-        match Sequence::load(&path) {
-            Ok(seq) => {
+    /// Load a sequence input and bind it to an axis. The path may be a
+    /// FASTA, or a GFF3 carrying its own sequences after `##FASTA` — in
+    /// the latter case the features from the same file are bound as
+    /// that axis's annotation overlay (an explicit
+    /// `--gff-query`/`--gff-subject` or a later File-menu load
+    /// replaces them).
+    fn load_sequence(&mut self, role: SeqRole, path: PathBuf) {
+        match dottir_io::load_sequence_input(&path) {
+            Ok(input) => {
+                let seq = input.sequence;
+                let embedded = input.annotations.filter(|a| !a.features.is_empty());
                 let detected = seq.detect_alphabet();
                 tracing::info!(
-                    "loaded {} ({} residues, {} records, detected {:?})",
+                    "loaded {} ({:?}, {} residues, {} records, {} embedded features, detected {:?})",
                     path.display(),
+                    input.kind,
                     seq.len(),
                     seq.records.len(),
+                    embedded.as_ref().map_or(0, |a| a.features.len()),
                     detected,
                 );
                 match role {
@@ -573,6 +583,9 @@ impl DottirApp {
                     }
                 }
                 self.last_error = None;
+                if let Some(set) = embedded {
+                    self.set_annotation(role, set);
+                }
                 // Fresh sequence data → reset view state and caches.
                 self.view_offset = Vec2::ZERO;
                 self.crosshair = None;
@@ -598,7 +611,7 @@ impl DottirApp {
     }
 
     /// Load an annotation file from disk and bind it to an axis. Errors
-    /// surface in the status bar (like `load_fasta`).
+    /// surface in the status bar (like `load_sequence`).
     fn load_annotation(&mut self, role: SeqRole, path: PathBuf) {
         match dottir_io::AnnotSet::load(&path) {
             Ok(set) => self.set_annotation(role, set),
@@ -1314,7 +1327,7 @@ impl eframe::App for DottirApp {
         }
 
         // Deferred initial compute: pre-loaded sequences (CLI or
-        // load_fasta before the first paint) couldn't pick a
+        // load_sequence before the first paint) couldn't pick a
         // display-matched zoom because no canvas size was known yet.
         // After the first paint records `measured_plot_area`, fire it.
         if self.pending_initial_compute && self.maybe_apply_auto_zoom() {
@@ -1560,11 +1573,11 @@ impl DottirApp {
             ui.style_mut().spacing.button_padding = Vec2::new(4.0, 2.0);
             egui::menu::bar(ui, |ui| {
                 ui.menu_button("File", |ui| {
-                    if ui.button("Open query FASTA…").clicked() {
+                    if ui.button("Open query sequence (FASTA/GFF3)…").clicked() {
                         ui.close_menu();
                         pick_and_load(self, SeqRole::Query);
                     }
-                    if ui.button("Open subject FASTA…").clicked() {
+                    if ui.button("Open subject sequence (FASTA/GFF3)…").clicked() {
                         ui.close_menu();
                         pick_and_load(self, SeqRole::Subject);
                     }
@@ -4152,15 +4165,20 @@ fn format_coord(seq: Option<&Sequence>, coord: usize) -> String {
 
 fn pick_and_load(app: &mut DottirApp, role: SeqRole) {
     let label = match role {
-        SeqRole::Query => "Open query FASTA",
-        SeqRole::Subject => "Open subject FASTA",
+        SeqRole::Query => "Open query sequence",
+        SeqRole::Subject => "Open subject sequence",
     };
     let pick = rfd::FileDialog::new()
         .set_title(label)
+        .add_filter(
+            "Sequences (FASTA / GFF3+FASTA)",
+            &["fa", "fasta", "fna", "faa", "gff", "gff3", "gz"],
+        )
         .add_filter("FASTA", &["fa", "fasta", "fna", "faa", "gz"])
+        .add_filter("GFF3 with sequences", &["gff", "gff3", "gz"])
         .pick_file();
     if let Some(path) = pick {
-        app.load_fasta(role, path);
+        app.load_sequence(role, path);
     }
 }
 
@@ -4347,18 +4365,18 @@ fn open_session(app: &mut DottirApp) {
     // the load; they just leave the relevant slot empty + an error
     // in the status bar.
     if let Some(p) = s.query {
-        app.load_fasta(SeqRole::Query, p);
+        app.load_sequence(SeqRole::Query, p);
     } else {
         app.query = None;
         app.plot = None;
     }
     if let Some(p) = s.subject {
-        app.load_fasta(SeqRole::Subject, p);
+        app.load_sequence(SeqRole::Subject, p);
     } else {
         app.subject = None;
         app.plot = None;
     }
-    // Apply view state AFTER the loads (load_fasta calls recompute
+    // Apply view state AFTER the loads (load_sequence calls recompute
     // which doesn't touch view state, so applying here is safe).
     app.view_offset = Vec2::new(s.view.offset_x, s.view.offset_y);
     // `s.view.display_zoom` is ignored under the new always-1:1
