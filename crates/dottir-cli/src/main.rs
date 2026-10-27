@@ -10,6 +10,7 @@
 //! single self-contained file.
 
 mod find_peaks;
+mod large_batch;
 mod periodogram;
 
 use std::path::{Path, PathBuf};
@@ -42,7 +43,7 @@ struct Cli {
 #[derive(Subcommand, Debug)]
 enum Command {
     /// Compute a dotplot and write a PNG + params sidecar.
-    Batch(BatchArgs),
+    Batch(Box<BatchArgs>),
     /// Compute a self-comparison periodogram per FASTA record and
     /// write a single TSV. Sums the dotplot's windowed, greyramp-
     /// shaped pixels along each anti-diagonal — peaks correspond to
@@ -167,6 +168,9 @@ struct BatchArgs {
     /// Format 3 (matches the current C-dotter savePlot output).
     #[arg(long, value_name = "PATH")]
     dot: Option<PathBuf>,
+
+    #[command(flatten)]
+    large: large_batch::LargeArgs,
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -226,7 +230,7 @@ fn main() -> Result<()> {
         .init();
     let cli = Cli::parse();
     match cli.command {
-        Command::Batch(args) => run_batch(args),
+        Command::Batch(args) => run_batch(*args),
         Command::Periodogram(args) => periodogram::run(args),
         Command::FindPeaks(args) => find_peaks::run(args),
     }
@@ -263,8 +267,21 @@ fn run_batch(args: BatchArgs) -> Result<()> {
     // auto-zoom: pick zoom so max(qlen, slen) / zoom <= auto_zoom.
     // For repeat arrays, snap to a nearby record-period divisor so
     // identical records land on the same pixel phase.
+    let use_large = args.large.use_large(mode, query.len(), subject.len())?;
+    if use_large && args.repeat_uniform_rendering {
+        anyhow::bail!("--repeat-uniform-rendering is not supported by the large engine");
+    }
+    // The large engine targets inputs whose zoom-1 pixelmap could never be
+    // allocated; without an explicit zoom, fit the plot to 4000 px.
+    let auto_zoom = match args.auto_zoom {
+        None if use_large && args.zoom == 1 && query.len().max(subject.len()) > 4000 => {
+            tracing::info!("large engine: no --zoom/--auto-zoom given, using --auto-zoom 4000");
+            Some(4000)
+        }
+        a => a,
+    };
     let period_hints = zoom_period_hints(&query, &subject, is_self_comparison);
-    let zoom = match args.auto_zoom {
+    let zoom = match auto_zoom {
         Some(target) => {
             let base = pick_auto_zoom(query.len(), subject.len(), target);
             let snapped = snap_zoom_to_period_divisor(base, &period_hints, 2.0);
@@ -319,8 +336,20 @@ fn run_batch(args: BatchArgs) -> Result<()> {
         args.window,
         zoom
     );
-    let plot =
-        compute_dotplot(query.bytes(), subject.bytes(), &cfg).context("compute_dotplot failed")?;
+    let (plot, large_info) = if use_large {
+        let out = large_batch::run(
+            &args.large,
+            &cfg,
+            &query_input,
+            &subject_input,
+            is_self_comparison,
+        )?;
+        (out.plot, Some(out.info))
+    } else {
+        let plot = compute_dotplot(query.bytes(), subject.bytes(), &cfg)
+            .context("compute_dotplot failed")?;
+        (plot, None)
+    };
     tracing::info!(
         "wrote pixelmap {}x{} ({} bytes)",
         plot.width,
@@ -348,6 +377,23 @@ fn run_batch(args: BatchArgs) -> Result<()> {
         ),
         ("dottir-parameters".to_string(), resolved),
     ];
+    if let Some(info) = &large_info {
+        text_chunks.push(("dottir-engine".to_string(), "large".to_string()));
+        text_chunks.push((
+            "dottir-large-parameters".to_string(),
+            format!(
+                "format_version={};seed={};two_hit_dist={};max_occ={};extend={};depth={};classes={:?};shown={}",
+                info.format_version,
+                info.seed,
+                info.two_hit_dist,
+                info.max_occ,
+                info.extend,
+                info.depth,
+                info.class_thresholds,
+                info.shown_classes.join(",")
+            ),
+        ));
+    }
 
     let (render_pixels, render_w, render_h) = if args.repeat_uniform_rendering {
         let mut render_cfg = cfg.clone();
@@ -489,6 +535,11 @@ fn run_batch(args: BatchArgs) -> Result<()> {
         tracing::info!("wrote {}", svg_path.display());
     }
 
+    if let (Some(_), Some(_)) = (&args.dot, &large_info) {
+        tracing::warn!(
+            ".dot stores the shown classes merged; repeat-class channels are not preserved"
+        );
+    }
     if let Some(dot_path) = &args.dot {
         // Construct a format-3 .dot. Matrix is only 24×24 for proteins;
         // for DNA we pad the 4×4 matrix into the top-left of a 24×24
@@ -561,6 +612,7 @@ fn run_batch(args: BatchArgs) -> Result<()> {
                 os: std::env::consts::OS.to_string(),
                 timestamp_utc: now_iso_utc(),
             },
+            large: large_info.clone(),
         };
         std::fs::write(&sidecar_path, sidecar.to_toml()?)?;
         tracing::info!("wrote sidecar {}", sidecar_path.display());

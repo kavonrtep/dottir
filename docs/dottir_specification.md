@@ -251,6 +251,52 @@ These do not exist in the original and are the practical reason for redoing the 
      equal pixelmap.
    - GUI smoke tests via `egui_kittest` where practical.
 
+### 4.6 Large-sequence mode (ADR 0007)
+
+A second engine, `dottir-core::large`, for DNA inputs too large to score
+every cell (target: 100 Mb × 100 Mb, multi-record). It does not modify the
+exact engine; §4.1 continues to govern that engine and its C-dotter goldens.
+
+1. **Scope**: BLASTN only. Inputs MUST be rejected if query + subject exceed
+   4 Gb (positions are `u32`).
+2. **Seeding**: a spaced seed (default 12-of-19, `1110100110010101111`;
+   weight 6–13) over a direct-address index of the subject. Seeds spanning a
+   record boundary or a non-ACGT base MUST be skipped. Seeds occurring more
+   than `max_occ` times (default 1000) are skipped and their positions
+   reported per pixel column/row.
+3. **Two-hit filter**: a seed hit survives only if another hit lies on the
+   same (anti-)diagonal within `two_hit_dist` (default 100 bp). Surviving
+   anchors within that distance are merged into runs.
+4. **Seeded exact scoring**: each run is scored with the exact window sum,
+   matrix, window size (Karlin unless `-W`), pixel factor, validity bounds,
+   anti-diagonal rule and max-merge of §4.1. Hence, for identical inputs and
+   parameters, every large-mode pixel MUST be `<=` the exact engine's pixel
+   (property-tested), and equal wherever the run covers the cells that set
+   the exact maximum.
+5. **Repeat classes**: each dot is assigned `unique` / `low` / `mid` / `high`
+   from a per-base copy-number track (thresholds default 2 / 5 / 51), as the
+   max of its query and subject base. Depth methods: `seed` (default: one
+   plus the number of off-diagonal two-hit runs covering the base in a
+   self-comparison; sensitive to diverged repeats), `kmer` (exact canonical
+   k-mer counts, default k = 21), `none`. Soft-masked bases and GFF3/BED
+   repeat features MAY raise the depth floor. Pixels are kept in one channel
+   per (strand × class) so showing/hiding classes needs no recompute.
+6. **Chaining**: runs of at most a configurable class (default `low`) MAY be
+   chained per (record pair, strand) with a bounded-look-back co-linear DP.
+   Chains are coordinates and a score only — never base-level alignments —
+   and are exported as PAF without CIGAR.
+7. **Viewports**: a session (index + depth tracks) is reusable; computing a
+   viewport whose origin is a multiple of the zoom MUST give the same pixels
+   as the corresponding crop of the full plot. The GUI hands views below a
+   cell-count threshold (default 2·10¹⁰) to the exact engine.
+8. **Determinism**: identical output across runs and thread counts; pinned by
+   a golden hash tied to `LARGE_PIXELMAP_FORMAT_VERSION`, which MUST be bumped
+   on any output change.
+9. **Provenance**: PNG text chunks and the params sidecar MUST record the
+   engine and all large-mode parameters.
+10. **Performance** (8-core desktop, synthetic repeat-rich genomes): 100 Mb
+    self-comparison at 4000 px in ≤ 5 min and ≤ 3 GB RSS.
+
 ## 5. Out of scope (explicitly excluded)
 
 - The exon / intron view from the original. Can be added later if a need emerges; not
@@ -259,6 +305,9 @@ These do not exist in the original and are the practical reason for redoing the 
 - `libpfetch` (Sanger-internal online sequence fetching).
 - The original's bespoke feature-file format; replaced by GFF3.
 - Network / cloud functionality.
+- Base-level alignment of large-mode chains (gapped extension, CIGAR). Basic
+  co-linear chaining is in scope as a display aid (§4.6.6); use minimap2 PAF
+  overlays for alignments.
 
 ## 6. Architecture
 

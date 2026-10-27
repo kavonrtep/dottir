@@ -40,4 +40,7 @@ pub enum DottirError {
 
     #[error("invalid configuration: {0}")]
     InvalidConfig(String),
+
+    #[error("computation cancelled")]
+    Cancelled,
 }

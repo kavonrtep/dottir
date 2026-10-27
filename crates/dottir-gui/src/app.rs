@@ -1,7 +1,12 @@
 //! Top-level egui application.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
+use dottir_core::large::{
+    ChainConfig, ClassMask, ClassThresholds, DepthMethod, LargeConfig, LargePlot, RepeatClass,
+    SpacedSeed, Viewport,
+};
 use dottir_core::{
     extract_ridges_from_pixels, snap_zoom_to_period_divisor, BlastMode, DotPlot, PlotConfig, Ridge,
     RidgeDirection, RidgeParams, ScoreMatrix, Strand, Triangle,
@@ -114,7 +119,169 @@ struct Settings {
     /// the slider can seed itself sensibly when the user toggles auto
     /// off mid-session.
     auto_pixel_fac: bool,
+    /// Large-sequence mode (ADR 0007).
+    large: LargeSettings,
 }
+
+/// Which engine computes a view.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EngineChoice {
+    /// Large engine above `threshold_cells` visible cells, exact below.
+    Auto,
+    Exact,
+    Large,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DepthChoice {
+    Seed,
+    Kmer,
+    None,
+}
+
+/// Large-mode settings. The first group needs a recompute (and, for
+/// seed/depth/floors, a re-index); the display group does not.
+#[derive(Clone)]
+struct LargeSettings {
+    engine: EngineChoice,
+    /// Visible matrix cells above which `Auto` uses the large engine.
+    threshold_cells: f64,
+    seed_pattern: String,
+    two_hit_dist: u32,
+    max_occ: u32,
+    depth: DepthChoice,
+    depth_k: u8,
+    thresholds: ClassThresholds,
+    /// Soft-masked (lowercase) bases count as at least `mid`.
+    softmask_as_repeat: bool,
+    memory_limit_bytes: u64,
+    // Display only.
+    classes: ClassMask,
+    colour_by_class: bool,
+    show_chains: bool,
+    chain_min_score: f32,
+}
+
+impl Default for LargeSettings {
+    fn default() -> Self {
+        Self {
+            engine: EngineChoice::Auto,
+            threshold_cells: 2e10,
+            seed_pattern: dottir_core::large::seed::DEFAULT_PATTERN.to_string(),
+            two_hit_dist: 100,
+            max_occ: 1000,
+            depth: DepthChoice::Seed,
+            depth_k: 21,
+            thresholds: ClassThresholds::default(),
+            softmask_as_repeat: true,
+            memory_limit_bytes: 6 << 30,
+            classes: ClassMask::ALL,
+            colour_by_class: true,
+            show_chains: false,
+            chain_min_score: 1000.0,
+        }
+    }
+}
+
+impl LargeSettings {
+    fn to_session(&self) -> crate::session::SessionLarge {
+        crate::session::SessionLarge {
+            engine: match self.engine {
+                EngineChoice::Auto => "auto",
+                EngineChoice::Exact => "exact",
+                EngineChoice::Large => "large",
+            }
+            .into(),
+            threshold_cells: self.threshold_cells,
+            seed_pattern: self.seed_pattern.clone(),
+            two_hit_dist: self.two_hit_dist,
+            max_occ: self.max_occ,
+            depth: match self.depth {
+                DepthChoice::Seed => "seed",
+                DepthChoice::Kmer => "kmer",
+                DepthChoice::None => "none",
+            }
+            .into(),
+            depth_k: self.depth_k,
+            class_thresholds: [
+                self.thresholds.low,
+                self.thresholds.mid,
+                self.thresholds.high,
+            ],
+            softmask_as_repeat: self.softmask_as_repeat,
+            memory_limit_mib: self.memory_limit_bytes >> 20,
+            shown_classes: self
+                .classes
+                .classes()
+                .iter()
+                .map(|c| c.name().to_string())
+                .collect(),
+            colour_by_class: self.colour_by_class,
+            show_chains: self.show_chains,
+            chain_min_score: self.chain_min_score,
+        }
+    }
+
+    /// Unknown or invalid values fall back to the defaults.
+    fn from_session(s: &crate::session::SessionLarge) -> Self {
+        let d = Self::default();
+        let [low, mid, high] = s.class_thresholds;
+        let thresholds = ClassThresholds { low, mid, high };
+        Self {
+            engine: match s.engine.as_str() {
+                "exact" => EngineChoice::Exact,
+                "large" => EngineChoice::Large,
+                _ => EngineChoice::Auto,
+            },
+            threshold_cells: s.threshold_cells,
+            seed_pattern: if SpacedSeed::parse(&s.seed_pattern).is_ok() {
+                s.seed_pattern.clone()
+            } else {
+                d.seed_pattern
+            },
+            two_hit_dist: s.two_hit_dist,
+            max_occ: s.max_occ,
+            depth: match s.depth.as_str() {
+                "kmer" => DepthChoice::Kmer,
+                "none" => DepthChoice::None,
+                _ => DepthChoice::Seed,
+            },
+            depth_k: s.depth_k,
+            thresholds: if thresholds.validate().is_ok() {
+                thresholds
+            } else {
+                d.thresholds
+            },
+            softmask_as_repeat: s.softmask_as_repeat,
+            memory_limit_bytes: s.memory_limit_mib << 20,
+            classes: ClassMask::from_classes(
+                &s.shown_classes
+                    .iter()
+                    .filter_map(|n| RepeatClass::from_name(n))
+                    .collect::<Vec<_>>(),
+            ),
+            colour_by_class: s.colour_by_class,
+            show_chains: s.show_chains,
+            chain_min_score: s.chain_min_score,
+        }
+    }
+
+    fn depth_method(&self) -> DepthMethod {
+        match self.depth {
+            DepthChoice::Seed => DepthMethod::Seed,
+            DepthChoice::Kmer => DepthMethod::Kmer { k: self.depth_k },
+            DepthChoice::None => DepthMethod::None,
+        }
+    }
+}
+
+/// Colour of each repeat class when colouring by class.
+const CLASS_COLOURS: [Color32; RepeatClass::COUNT] = [
+    Color32::from_rgb(0, 0, 0),
+    Color32::from_rgb(30, 90, 200),
+    Color32::from_rgb(230, 140, 0),
+    Color32::from_rgb(210, 30, 30),
+];
 
 /// Resize-retarget threshold: if the plot canvas grows or shrinks by
 /// more than this fraction relative to the canvas size at last
@@ -148,6 +315,7 @@ impl Default for Settings {
             show_ridge_overlay: false,
             ridge_min_length: 8,
             ridge_max_gap: 2,
+            large: LargeSettings::default(),
         }
     }
 }
@@ -308,7 +476,7 @@ pub struct DottirApp {
     /// instant; otherwise the cache miss triggers a fresh compute.
     /// Cleared on any settings change that would invalidate the
     /// pixelmap (matrix, window size, strand, etc.).
-    pixelmap_cache: std::collections::VecDeque<(ViewSlice, u32, DotPlot)>,
+    pixelmap_cache: std::collections::VecDeque<(ViewSlice, u32, DotPlot, Option<LargePlot>)>,
     /// View offset to apply when the next compute result lands.
     /// Set by `action_rect_zoom` / `action_back` so the new pixelmap
     /// (which has different dims, hence different coord space) gets
@@ -374,6 +542,17 @@ pub struct DottirApp {
     /// single "darkness" control; overlapping bands self-darken via
     /// compositing.
     annot_alpha: f32,
+    /// Large-engine inputs shared with the worker; rebuilt lazily after a
+    /// sequence load or a change to the depth floors.
+    large_source: Option<Arc<crate::compute_worker::LargeSource>>,
+    /// Bumped whenever `large_source` is rebuilt, so the worker re-indexes.
+    large_source_key: u64,
+    /// Full large-engine result behind the current `plot`, if the large
+    /// engine produced it.
+    large_plot: Option<LargePlot>,
+    /// Window size resolved by the large engine; reused by exact-engine
+    /// detail views so both engines draw the same features.
+    locked_window: Option<u32>,
 }
 
 /// Maximum number of history entries kept around for Back. Older
@@ -460,6 +639,7 @@ impl DottirApp {
             startup.pixel_fac
         };
         let settings = Settings {
+            large: LargeSettings::default(),
             mode: startup.mode,
             matrix_name: startup.matrix_name.clone(),
             window_size: startup.window_size,
@@ -519,6 +699,10 @@ impl DottirApp {
             subject_annot: None,
             annot_show: true,
             annot_alpha: 0.35,
+            large_source: None,
+            large_source_key: 0,
+            large_plot: None,
+            locked_window: None,
         };
 
         // Pre-load any sequences supplied on the command line. Errors
@@ -587,6 +771,8 @@ impl DottirApp {
                     self.set_annotation(role, set);
                 }
                 // Fresh sequence data → reset view state and caches.
+                self.large_source = None;
+                self.large_plot = None;
                 self.view_offset = Vec2::ZERO;
                 self.crosshair = None;
                 self.current_slice = None;
@@ -791,26 +977,37 @@ impl DottirApp {
     /// Look up a cached pixelmap for the given `(slice, compute_zoom)`
     /// (LRU "touch on read"). Cleared whenever settings that affect
     /// the pixelmap change.
-    fn cache_get(&mut self, slice: &ViewSlice, compute_zoom: u32) -> Option<DotPlot> {
+    fn cache_get(
+        &mut self,
+        slice: &ViewSlice,
+        compute_zoom: u32,
+    ) -> Option<(DotPlot, Option<LargePlot>)> {
         let pos = self
             .pixelmap_cache
             .iter()
-            .position(|(s, z, _)| *z == compute_zoom && s == slice)?;
-        let (s, z, plot) = self.pixelmap_cache.remove(pos)?;
-        let restored = plot.clone();
-        self.pixelmap_cache.push_back((s, z, plot));
+            .position(|(s, z, _, _)| *z == compute_zoom && s == slice)?;
+        let (s, z, plot, large) = self.pixelmap_cache.remove(pos)?;
+        let restored = (plot.clone(), large.clone());
+        self.pixelmap_cache.push_back((s, z, plot, large));
         Some(restored)
     }
 
     /// Insert a freshly computed pixelmap into the cache; evict
     /// oldest if at capacity.
-    fn cache_insert(&mut self, slice: ViewSlice, compute_zoom: u32, plot: DotPlot) {
+    fn cache_insert(
+        &mut self,
+        slice: ViewSlice,
+        compute_zoom: u32,
+        plot: DotPlot,
+        large: Option<LargePlot>,
+    ) {
         self.pixelmap_cache
-            .retain(|(s, z, _)| *z != compute_zoom || s != &slice);
+            .retain(|(s, z, _, _)| *z != compute_zoom || s != &slice);
         if self.pixelmap_cache.len() >= HISTORY_MAX {
             self.pixelmap_cache.pop_front();
         }
-        self.pixelmap_cache.push_back((slice, compute_zoom, plot));
+        self.pixelmap_cache
+            .push_back((slice, compute_zoom, plot, large));
     }
 
     /// Drop everything pixel-dependent — call when settings that
@@ -821,6 +1018,75 @@ impl DottirApp {
         self.pixelmap_cache.clear();
         self.history.clear();
         self.locked_pixel_fac = None;
+        self.locked_window = None;
+    }
+
+    /// Whether `slice` is computed by the large engine.
+    fn use_large_engine(&self, slice: &ViewSlice) -> bool {
+        if self.settings.mode != BlastMode::Blastn
+            || self.settings.reverse_query
+            || self.settings.reverse_subject
+        {
+            return false;
+        }
+        match self.settings.large.engine {
+            EngineChoice::Exact => false,
+            EngineChoice::Large => true,
+            EngineChoice::Auto => {
+                slice.q_range.len() as f64 * slice.s_range.len() as f64
+                    > self.settings.large.threshold_cells
+            }
+        }
+    }
+
+    /// Inputs for the large engine, built on first use after a load.
+    fn large_source(&mut self) -> Option<Arc<crate::compute_worker::LargeSource>> {
+        if let Some(src) = &self.large_source {
+            return Some(src.clone());
+        }
+        let q = self.query.as_ref()?;
+        let s = self.subject.as_ref()?;
+        let is_self = self.settings.self_comparison && q.bytes() == s.bytes();
+        let ls = &self.settings.large;
+        let floor = |seq: &Sequence| {
+            ls.softmask_as_repeat
+                .then(|| {
+                    dottir_io::large::soft_mask_floor(seq, ls.thresholds.floor_of(RepeatClass::Mid))
+                })
+                .flatten()
+        };
+        self.large_source_key += 1;
+        let src = Arc::new(crate::compute_worker::LargeSource {
+            key: self.large_source_key,
+            query: Arc::from(q.bytes()),
+            q_breaks: q.breaks(),
+            q_floor: floor(q),
+            subject: (!is_self).then(|| Arc::from(s.bytes())),
+            s_breaks: s.breaks(),
+            s_floor: if is_self { None } else { floor(s) },
+        });
+        self.large_source = Some(src.clone());
+        Some(src)
+    }
+
+    /// Re-derive the displayed pixelmap from the large result after a
+    /// display-only change (class toggles, strand colouring).
+    fn rederive_large_plot(&mut self) {
+        if let Some(lp) = &self.large_plot {
+            let mut plot = lp.to_dot_plot(self.settings.large.classes, self.separate_strands());
+            if let Some(old) = &self.plot {
+                plot.params = old.params;
+            }
+            self.plot = Some(plot);
+            self.texture_dirty = true;
+            self.refresh_ridges();
+        }
+    }
+
+    fn separate_strands(&self) -> bool {
+        self.settings.inverted_repeat_colour
+            && self.settings.mode == BlastMode::Blastn
+            && matches!(self.settings.strand, Strand::Both)
     }
 
     /// Restore the canonical (display-matched) compute zoom over the
@@ -1023,7 +1289,23 @@ impl DottirApp {
         let target_slice = target_slice.unwrap_or_else(|| ViewSlice::full(qlen, slen));
 
         // Cache hit: restore instantly, no worker dispatch.
-        if let Some(plot) = self.cache_get(&target_slice, target_zoom) {
+        let use_large = self.use_large_engine(&target_slice);
+        // The large engine aligns its origin to the zoom grid; snap the
+        // slice so the GUI's slice-local coordinates match the pixmap.
+        let target_slice = if use_large {
+            let z = target_zoom as usize;
+            ViewSlice {
+                q_range: target_slice.q_range.start / z * z..target_slice.q_range.end,
+                s_range: target_slice.s_range.start / z * z..target_slice.s_range.end,
+            }
+        } else {
+            target_slice
+        };
+        if let Some((mut plot, large)) = self.cache_get(&target_slice, target_zoom) {
+            if let Some(lp) = &large {
+                plot = lp.to_dot_plot(self.settings.large.classes, self.separate_strands());
+            }
+            self.large_plot = large;
             tracing::info!(
                 "cache hit at zoom={target_zoom}, slice {}..{} × {}..{}",
                 target_slice.q_range.start,
@@ -1039,6 +1321,10 @@ impl DottirApp {
             if let Some(off) = self.pending_view_offset_after_compute.take() {
                 self.view_offset = off;
             }
+            return;
+        }
+        if use_large {
+            self.dispatch_large(target_slice, target_zoom);
             return;
         }
         // Re-borrow now that the cache check is done (avoids a
@@ -1069,7 +1355,7 @@ impl DottirApp {
         let mut cfg = PlotConfig {
             mode: self.settings.mode,
             matrix,
-            window_size: self.settings.window_size,
+            window_size: self.settings.window_size.or(self.locked_window),
             zoom: self.settings.zoom.max(1),
             pixel_fac: cfg_pixel_fac,
             strand: self.settings.strand,
@@ -1113,6 +1399,7 @@ impl DottirApp {
             query: q_slice,
             subject: s_slice,
             config: cfg,
+            large: None,
         };
         tracing::info!(
             "dispatch compute id={id}, zoom={target_zoom}, slice {}..{} × {}..{}",
@@ -1123,6 +1410,72 @@ impl DottirApp {
         );
         self.last_dispatched_slice = Some(target_slice);
         self.worker.dispatch(req);
+        self.compute_in_flight = true;
+    }
+
+    fn dispatch_large(&mut self, slice: ViewSlice, zoom: u32) {
+        let Some(source) = self.large_source() else {
+            return;
+        };
+        let ls = self.settings.large.clone();
+        let seed = match SpacedSeed::parse(&ls.seed_pattern) {
+            Ok(s) => s,
+            Err(e) => {
+                self.last_error = Some(format!("seed pattern: {e}"));
+                return;
+            }
+        };
+        let qlen = source.query.len();
+        let slen = source.subject.as_ref().map_or(qlen, |s| s.len());
+        let full = slice.q_range == (0..qlen) && slice.s_range == (0..slen);
+        let config = LargeConfig {
+            matrix: ScoreMatrix::dna_identity(),
+            window_size: self.settings.window_size,
+            zoom,
+            pixel_fac: if self.settings.auto_pixel_fac {
+                0
+            } else {
+                self.settings.pixel_fac.max(1)
+            },
+            strand: self.settings.strand,
+            self_comparison: source.subject.is_none(),
+            triangle: self.settings.triangle,
+            disable_mirror: false,
+            memory_limit_bytes: ls.memory_limit_bytes,
+            seed,
+            two_hit_dist: ls.two_hit_dist,
+            max_occ: ls.max_occ,
+            extend: None,
+            depth: ls.depth_method(),
+            classes: ls.thresholds,
+            chain: Some(ChainConfig::default()),
+            viewport: (!full).then(|| Viewport {
+                q: slice.q_range.clone(),
+                s: slice.s_range.clone(),
+            }),
+        };
+        self.last_dispatched_id = self.last_dispatched_id.wrapping_add(1);
+        let id = self.last_dispatched_id;
+        tracing::info!(
+            "dispatch large compute id={id}, zoom={zoom}, slice {}..{} × {}..{}",
+            slice.q_range.start,
+            slice.q_range.end,
+            slice.s_range.start,
+            slice.s_range.end,
+        );
+        self.last_dispatched_slice = Some(slice);
+        self.worker.dispatch(crate::compute_worker::ComputeRequest {
+            id,
+            query: vec![],
+            subject: vec![],
+            config: PlotConfig::default_blastn(ScoreMatrix::dna_identity()),
+            large: Some(crate::compute_worker::LargeJob {
+                source,
+                config,
+                classes: ls.classes,
+                separate_strands: self.separate_strands(),
+            }),
+        });
         self.compute_in_flight = true;
     }
 
@@ -1186,9 +1539,18 @@ impl DottirApp {
                     if let Some(slice) = self.last_dispatched_slice.take() {
                         // Insert into LRU cache for instant restore on
                         // Back / Fit cycling.
-                        self.cache_insert(slice.clone(), plot.params.zoom, plot.clone());
+                        self.cache_insert(
+                            slice.clone(),
+                            plot.params.zoom,
+                            plot.clone(),
+                            r.large.clone(),
+                        );
                         self.current_slice = Some(slice);
                     }
+                    if r.large.is_some() && self.settings.window_size.is_none() {
+                        self.locked_window = Some(plot.params.window_size);
+                    }
+                    self.large_plot = r.large;
                     // Lock the resolved auto pixel_fac on the first
                     // compute after a settings change, so subsequent
                     // sliced computes use the same darkness scaling.
@@ -1245,7 +1607,46 @@ impl DottirApp {
         // reverse in magenta — overlapping cells take whichever
         // channel is stronger after the greyramp.
         let mut rgba = Vec::with_capacity(pw * ph * 4);
+        let by_class = self.settings.large.colour_by_class
+            && self
+                .large_plot
+                .as_ref()
+                .is_some_and(|lp| lp.width == plot.width && lp.height == plot.height);
+        if by_class {
+            let lp = self.large_plot.as_ref().expect("checked above");
+            let shown = self.settings.large.classes.classes();
+            let channels: Vec<(Color32, [&[u8]; 2])> = shown
+                .iter()
+                .map(|&c| {
+                    (
+                        CLASS_COLOURS[c.index()],
+                        [lp.channel(false, c), lp.channel(true, c)],
+                    )
+                })
+                .collect();
+            for i in 0..pw * ph {
+                // Strongest visible class wins the pixel.
+                let mut best: Option<(u8, Color32)> = None;
+                for (colour, strands) in &channels {
+                    for ch in strands.iter().filter(|c| !c.is_empty()) {
+                        let ink = 255 - lut[ch[i] as usize];
+                        if ink > 0 && best.is_none_or(|(b, _)| ink > b) {
+                            best = Some((ink, *colour));
+                        }
+                    }
+                }
+                let px = match best {
+                    None => [255, 255, 255, 255],
+                    Some((ink, c)) => {
+                        let mix = |v: u8| (255 - (ink as u16 * (255 - v as u16) / 255)) as u8;
+                        [mix(c.r()), mix(c.g()), mix(c.b()), 255]
+                    }
+                };
+                rgba.extend_from_slice(&px);
+            }
+        }
         match rev_view {
+            _ if by_class => {}
             Some(rev) if self.settings.inverted_repeat_colour => {
                 for i in 0..fwd_view.len() {
                     let f = lut[fwd_view[i] as usize];
@@ -1769,6 +2170,11 @@ impl DottirApp {
                     );
                 }
                 ui.separator();
+
+                if self.large_plot.is_some() {
+                    self.large_panel_ui(ui);
+                    ui.separator();
+                }
 
                 // ── Greyramp ──
                 ui.label(
@@ -2306,6 +2712,10 @@ impl DottirApp {
                      zoom doubles.",
                 );
 
+                ui.separator();
+                ui.heading("Large sequences");
+                changed |= self.large_settings_ui(ui);
+
                 // Vector ridge overlay — display-only, no recompute.
                 // Tied to its own local `ridges_changed` flag so
                 // settings panel adjustments don't trigger the full
@@ -2383,6 +2793,8 @@ impl DottirApp {
             });
         self.show_settings = open;
         if changed {
+            // Floors and self-comparison detection live in the source.
+            self.large_source = None;
             // Any setting that affects the pixelmap invalidates the
             // cache + history (which would point at incompatible
             // pixelmaps under the new parameters).
@@ -2391,12 +2803,255 @@ impl DottirApp {
         }
     }
 
+    /// Large-mode parameters in the Settings window. Returns whether a
+    /// recompute is needed.
+    fn large_settings_ui(&mut self, ui: &mut egui::Ui) -> bool {
+        let ls = &mut self.settings.large;
+        let mut changed = false;
+        ui.horizontal(|ui| {
+            ui.label("Engine:");
+            for (v, label, tip) in [
+                (
+                    EngineChoice::Auto,
+                    "Auto",
+                    "Seed-based large engine for big views, exact Dotter engine once zoomed in.",
+                ),
+                (
+                    EngineChoice::Exact,
+                    "Exact",
+                    "Always score every cell (Dotter).",
+                ),
+                (
+                    EngineChoice::Large,
+                    "Large",
+                    "Always use the seed-based engine (DNA only).",
+                ),
+            ] {
+                changed |= ui
+                    .selectable_value(&mut ls.engine, v, label)
+                    .on_hover_text(tip)
+                    .changed();
+            }
+        });
+        if ls.engine == EngineChoice::Auto {
+            ui.horizontal(|ui| {
+                ui.label("Switch above (Mcells):");
+                let mut mcells = ls.threshold_cells / 1e6;
+                if ui
+                    .add(
+                        egui::DragValue::new(&mut mcells)
+                            .range(1.0..=1e9)
+                            .speed(100.0),
+                    )
+                    .on_hover_text(
+                        "Views with more query × subject cells than this use the large engine.",
+                    )
+                    .changed()
+                {
+                    ls.threshold_cells = mcells * 1e6;
+                    changed = true;
+                }
+            });
+        }
+        if ls.engine == EngineChoice::Exact {
+            return changed;
+        }
+        ui.horizontal(|ui| {
+            ui.label("Seed:");
+            changed |= ui
+                .add(egui::TextEdit::singleline(&mut ls.seed_pattern).desired_width(150.0))
+                .on_hover_text("Spaced seed, 1 = must match. Weight 6–13 (default 12-of-19).")
+                .lost_focus();
+        });
+        ui.horizontal(|ui| {
+            ui.label("Two-hit distance:");
+            changed |= ui
+                .add(egui::DragValue::new(&mut ls.two_hit_dist).range(10..=2000))
+                .changed();
+            ui.label("Max occ:");
+            changed |= ui
+                .add(egui::DragValue::new(&mut ls.max_occ).range(10..=100_000))
+                .on_hover_text(
+                    "Seeds more frequent than this are skipped (and count as high-copy).",
+                )
+                .changed();
+        });
+        ui.horizontal(|ui| {
+            ui.label("Repeat depth:");
+            for (v, label, tip) in [
+                (
+                    DepthChoice::Seed,
+                    "Seed",
+                    "Copies found by a self-comparison seed pass; sees diverged repeats.",
+                ),
+                (
+                    DepthChoice::Kmer,
+                    "k-mer",
+                    "Exact k-mer counts; fast, young repeats only.",
+                ),
+                (DepthChoice::None, "None", "No repeat classes."),
+            ] {
+                changed |= ui
+                    .selectable_value(&mut ls.depth, v, label)
+                    .on_hover_text(tip)
+                    .changed();
+            }
+            if ls.depth == DepthChoice::Kmer {
+                changed |= ui
+                    .add(
+                        egui::DragValue::new(&mut ls.depth_k)
+                            .range(11..=31)
+                            .prefix("k="),
+                    )
+                    .changed();
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.label("Copies ≥ low/mid/high:");
+            let t = &mut ls.thresholds;
+            let before = *t;
+            ui.add(egui::DragValue::new(&mut t.low).range(2..=1000));
+            ui.add(egui::DragValue::new(&mut t.mid).range(3..=10_000));
+            ui.add(egui::DragValue::new(&mut t.high).range(4..=60_000));
+            if t.validate().is_err() {
+                *t = before;
+            }
+            changed |= *t != before;
+        });
+        changed |= ui
+            .checkbox(
+                &mut ls.softmask_as_repeat,
+                "Soft-masked (lowercase) bases are repeats",
+            )
+            .changed();
+        ui.horizontal(|ui| {
+            ui.label("Memory cap (MiB):");
+            let mut mib = (ls.memory_limit_bytes >> 20) as u32;
+            if ui
+                .add(Slider::new(&mut mib, 256..=65_536).logarithmic(true))
+                .changed()
+            {
+                ls.memory_limit_bytes = (mib as u64) << 20;
+                changed = true;
+            }
+        });
+        changed
+    }
+
+    /// Side-panel controls for a large-engine plot: display-only.
+    fn large_panel_ui(&mut self, ui: &mut egui::Ui) {
+        ui.label(
+            egui::RichText::new("Repeat classes")
+                .strong()
+                .size(13.0)
+                .color(Color32::from_gray(50)),
+        );
+        let mut redraw = false;
+        let thresholds = self.settings.large.thresholds;
+        let ranges = [
+            format!("< {}", thresholds.low),
+            format!("{}–{}", thresholds.low, thresholds.mid - 1),
+            format!("{}–{}", thresholds.mid, thresholds.high - 1),
+            format!("≥ {}", thresholds.high),
+        ];
+        let ls = &mut self.settings.large;
+        for c in RepeatClass::ALL {
+            ui.horizontal(|ui| {
+                let mut on = ls.classes.contains(c);
+                if ui.checkbox(&mut on, "").changed() {
+                    ls.classes = ls.classes.with(c, on);
+                    redraw = true;
+                }
+                let (rect, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
+                ui.painter()
+                    .rect_filled(rect, 2.0, CLASS_COLOURS[c.index()]);
+                ui.label(
+                    egui::RichText::new(format!("{} ({} copies)", c.name(), ranges[c.index()]))
+                        .size(11.0),
+                );
+            });
+        }
+        ui.horizontal(|ui| {
+            if ui
+                .small_button("Synteny")
+                .on_hover_text("Unique + low only")
+                .clicked()
+            {
+                ls.classes = ClassMask::from_classes(&[RepeatClass::Unique, RepeatClass::Low]);
+                redraw = true;
+            }
+            if ui
+                .small_button("Repeats")
+                .on_hover_text("Mid + high only")
+                .clicked()
+            {
+                ls.classes = ClassMask::from_classes(&[RepeatClass::Mid, RepeatClass::High]);
+                redraw = true;
+            }
+            if ui.small_button("All").clicked() {
+                ls.classes = ClassMask::ALL;
+                redraw = true;
+            }
+        });
+        redraw |= ui
+            .checkbox(&mut ls.colour_by_class, "Colour by class")
+            .changed();
+        ui.checkbox(&mut ls.show_chains, "Show synteny chains")
+            .on_hover_text("Co-linear chains of unique/low-copy runs (not alignments).");
+        if ls.show_chains {
+            ui.add(
+                Slider::new(&mut ls.chain_min_score, 100.0..=100_000.0)
+                    .logarithmic(true)
+                    .text("min score"),
+            );
+        }
+        if let Some(lp) = &self.large_plot {
+            let shown = lp
+                .chains
+                .iter()
+                .filter(|c| c.score >= self.settings.large.chain_min_score as f64)
+                .count();
+            let st = lp.stats;
+            ui.label(
+                egui::RichText::new(format!(
+                    "{} anchors · {} runs · {} chains{}",
+                    format_thousands(st.anchors as usize),
+                    format_thousands(st.runs as usize),
+                    shown,
+                    if st.capped_query_positions > 0 {
+                        format!(
+                            " · {} capped",
+                            format_thousands(st.capped_query_positions as usize)
+                        )
+                    } else {
+                        String::new()
+                    }
+                ))
+                .size(11.0)
+                .color(Color32::from_gray(80)),
+            );
+        }
+        if redraw {
+            self.rederive_large_plot();
+        }
+    }
+
     fn draw_status_bar(&self, ctx: &Context) {
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 if self.compute_in_flight {
                     ui.spinner();
-                    ui.label("Recomputing…");
+                    let (stage, f) = self.worker.progress();
+                    let text = match stage {
+                        crate::compute_worker::Stage::Indexing => {
+                            format!("Indexing for large mode… {:.0}%", f * 100.0)
+                        }
+                        crate::compute_worker::Stage::Large => {
+                            format!("Large engine… {:.0}%", f * 100.0)
+                        }
+                        _ => "Recomputing…".to_string(),
+                    };
+                    ui.label(text);
                     ui.separator();
                 }
                 if let Some(err) = &self.last_error {
@@ -2404,8 +3059,13 @@ impl DottirApp {
                     return;
                 }
                 if let Some(plot) = &self.plot {
+                    let engine = if self.large_plot.is_some() {
+                        "large"
+                    } else {
+                        "exact"
+                    };
                     ui.label(format!(
-                        "pixelmap {}×{}, W={}",
+                        "{engine} engine · pixelmap {}×{}, W={}",
                         plot.width, plot.height, plot.params.window_size
                     ));
                     if let Some((q_seq, s_seq)) = self.crosshair {
@@ -3017,6 +3677,48 @@ impl DottirApp {
                         RidgeDirection::Reverse => stroke_rev,
                     };
                     clip_painter.line_segment([p0, p1], stroke);
+                }
+            }
+
+            // Large mode: synteny chains as vector lines, forward dark
+            // green, reverse magenta. Coordinates are absolute residues.
+            if let (true, Some(lp)) = (self.settings.large.show_chains, &self.large_plot) {
+                let min = self.settings.large.chain_min_score as f64;
+                let z = zoom_us as f32;
+                let to_screen = |q: u32, s: u32| {
+                    Pos2::new(
+                        plot_area.left() + (q as f32 - q_off as f32) / z / ppp - draw_offset.x,
+                        plot_area.top() + (s as f32 - s_off as f32) / z / ppp - draw_offset.y,
+                    )
+                };
+                let fwd = egui::Stroke::new(2.0, Color32::from_rgba_unmultiplied(0, 140, 60, 200));
+                let rev = egui::Stroke::new(2.0, Color32::from_rgba_unmultiplied(190, 0, 190, 200));
+                for c in lp.chains.iter().filter(|c| c.score >= min) {
+                    let (p0, p1, stroke) = if c.reverse {
+                        (
+                            to_screen(c.q_start, c.s_end),
+                            to_screen(c.q_end, c.s_start),
+                            rev,
+                        )
+                    } else {
+                        (
+                            to_screen(c.q_start, c.s_start),
+                            to_screen(c.q_end, c.s_end),
+                            fwd,
+                        )
+                    };
+                    clip_painter.line_segment([p0, p1], stroke);
+                    if lp.self_comparison && lp.origin_q == lp.origin_s {
+                        // Mirror across the diagonal like the raster.
+                        let m = |p: Pos2| {
+                            let q =
+                                (p.x + draw_offset.x - plot_area.left()) * ppp * z + q_off as f32;
+                            let s =
+                                (p.y + draw_offset.y - plot_area.top()) * ppp * z + s_off as f32;
+                            to_screen(s as u32, q as u32)
+                        };
+                        clip_painter.line_segment([m(p0), m(p1)], stroke);
+                    }
                 }
             }
 
@@ -4302,6 +5004,7 @@ fn save_session(app: &mut DottirApp) {
             align_dock_visible: app.align_dock_visible,
             align_window_size: app.settings.align_window_size,
         },
+        large: Some(app.settings.large.to_session()),
     };
     let pick = rfd::FileDialog::new()
         .set_title("Save dottir session")
@@ -4355,6 +5058,12 @@ fn open_session(app: &mut DottirApp) {
         app.settings.triangle = t;
     }
     app.settings.memory_limit_bytes = s.plot.memory_limit_mib * 1024 * 1024;
+    app.settings.large = s
+        .large
+        .as_ref()
+        .map(LargeSettings::from_session)
+        .unwrap_or_default();
+    app.large_source = None;
     app.greyramp = Greyramp {
         white: s.greyramp.white,
         black: s.greyramp.black,

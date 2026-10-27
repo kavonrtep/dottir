@@ -9,6 +9,7 @@
 - [The `dottir periodogram` CLI](./periodogram.md)
 - [The `dottir find-peaks` CLI](./find-peaks.md)
 - [The `dottir-gui` interactive viewer](./gui.md)
+- [Large sequences](./large.md)
 
 # Concepts
 

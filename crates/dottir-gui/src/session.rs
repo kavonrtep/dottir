@@ -23,6 +23,30 @@ pub struct Session {
     pub plot: SessionPlot,
     pub greyramp: SessionGreyramp,
     pub view: SessionView,
+    /// Large-sequence mode settings (ADR 0007). Absent in older sessions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub large: Option<SessionLarge>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionLarge {
+    /// "auto" / "exact" / "large".
+    pub engine: String,
+    pub threshold_cells: f64,
+    pub seed_pattern: String,
+    pub two_hit_dist: u32,
+    pub max_occ: u32,
+    /// "seed" / "kmer" / "none".
+    pub depth: String,
+    pub depth_k: u8,
+    /// `[low, mid, high]` copy-number thresholds.
+    pub class_thresholds: [u16; 3],
+    pub softmask_as_repeat: bool,
+    pub memory_limit_mib: u64,
+    pub shown_classes: Vec<String>,
+    pub colour_by_class: bool,
+    pub show_chains: bool,
+    pub chain_min_score: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -200,6 +224,22 @@ mod tests {
                 align_dock_visible: true,
                 align_window_size: 100,
             },
+            large: Some(SessionLarge {
+                engine: "auto".into(),
+                threshold_cells: 2e10,
+                seed_pattern: "1110100110010101111".into(),
+                two_hit_dist: 100,
+                max_occ: 1000,
+                depth: "seed".into(),
+                depth_k: 21,
+                class_thresholds: [2, 5, 51],
+                softmask_as_repeat: true,
+                memory_limit_mib: 6144,
+                shown_classes: vec!["unique".into(), "low".into()],
+                colour_by_class: true,
+                show_chains: true,
+                chain_min_score: 1000.0,
+            }),
         }
     }
 
@@ -211,6 +251,20 @@ mod tests {
         assert_eq!(back.version, s.version);
         assert_eq!(back.plot.matrix_name, s.plot.matrix_name);
         assert_eq!(back.view.crosshair, s.view.crosshair);
+        assert_eq!(
+            back.large.unwrap().shown_classes,
+            s.large.unwrap().shown_classes
+        );
+    }
+
+    #[test]
+    fn sessions_without_large_section_still_load() {
+        let mut s = fixture();
+        s.large = None;
+        let toml_text = toml::to_string_pretty(&s).unwrap();
+        assert!(!toml_text.contains("[large]"));
+        let back: Session = toml::from_str(&toml_text).unwrap();
+        assert!(back.large.is_none());
     }
 
     #[test]

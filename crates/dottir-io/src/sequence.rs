@@ -48,6 +48,9 @@ pub struct Sequence {
     pub seq: Vec<u8>,
     /// Per-record metadata, in file order.
     pub records: Vec<RecordSpan>,
+    /// Soft-masked (lowercase in the input) runs, in concatenated
+    /// coordinates, sorted.
+    pub soft_mask: Vec<std::ops::Range<usize>>,
     /// The on-disk source path, when known. `None` for in-memory
     /// inputs (tests, future drag-and-drop from STDIN, …).
     pub source_path: Option<PathBuf>,
@@ -61,10 +64,16 @@ impl Sequence {
         let total: usize = records.iter().map(|r| r.sequence.len()).sum();
         let mut seq = Vec::with_capacity(total);
         let mut spans = Vec::with_capacity(records.len());
+        let mut soft_mask = Vec::new();
         let mut offset = 0;
         for r in records {
             let len = r.sequence.len();
             seq.extend_from_slice(&r.sequence);
+            soft_mask.extend(
+                r.soft_masked
+                    .iter()
+                    .map(|m| m.start + offset..m.end + offset),
+            );
             spans.push(RecordSpan {
                 id: r.id,
                 description: r.description,
@@ -75,6 +84,7 @@ impl Sequence {
         Sequence {
             seq,
             records: spans,
+            soft_mask,
             source_path: source,
         }
     }
@@ -221,6 +231,7 @@ mod tests {
             id: id.to_string(),
             description: None,
             sequence: seq.to_vec(),
+            soft_masked: vec![],
         }
     }
 

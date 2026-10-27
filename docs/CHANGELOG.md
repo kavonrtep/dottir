@@ -7,6 +7,45 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+* **Large-sequence mode** (ADR 0007, spec §4.6): a seed-based engine for DNA
+  comparisons at chromosome/genome scale (tested to 100 Mb × 100 Mb,
+  multi-record).
+  - Spaced-seed index + two-hit diagonal filter; anchored diagonals are
+    scored with the exact sliding-window score, so large-mode pixels never
+    exceed the exact engine's and the greyramp keeps its meaning.
+  - Repeat classes (`unique`/`low`/`mid`/`high`) per dot from a per-base
+    copy-number track — `seed` (diverged repeats), `kmer`, or `none` — plus
+    soft-masking and GFF3/BED repeat annotations. Classes are separate
+    channels: show, hide or colour them without recomputing.
+  - Basic co-linear chaining of unique/low-copy runs into synteny blocks,
+    exported as PAF (`--chains-out`, no CIGAR).
+  - `dottir batch`: `--engine exact|large|auto`, `--seed-pattern`,
+    `--two-hit-dist`, `--max-occ`, `--depth`, `--class-thresholds`,
+    `--hide-classes`, `--softmask-class`, `--repeat-annot[-subject]`,
+    `--repeat-types`, `--chains-out`, `--depth-out` (bedGraph). Engine and
+    parameters are recorded in PNG text chunks and in a new `[large]`
+    sidecar section.
+  - `dottir-gui`: *Settings → Large sequences*; `Auto` uses the large engine
+    for big views and the exact engine once zoomed in. The index is built
+    once and reused; progress is shown in the status bar and superseded jobs
+    are cancelled. Side panel: class toggles and presets, colour by class,
+    synteny-chain overlay. Settings are saved in sessions.
+  - Synthetic benchmark generator:
+    `cargo run --release -p dottir-cli --example simulate_genome`.
+* FASTA parsing records soft-masked (lowercase) runs
+  (`FastaRecord::soft_masked`, `Sequence::soft_mask`).
+
+### Changed
+
+* `dottir batch` defaults to `--engine auto`: BLASTN inputs above 10¹¹
+  cells (≈ 316 kb × 316 kb, about a minute of exact compute) now use the
+  large engine and, without an explicit
+  zoom, are fitted to 4000 px. Pass `--engine exact` for the old behaviour.
+* The GUI compute worker skips queued requests superseded by a newer one.
+* New `DottirError::Cancelled` variant.
+
 ## [0.4.0] - 2026-09-11
 
 ### Added

@@ -788,7 +788,7 @@ fn compute_blastx(
 ///
 /// `disable_mirror = true` short-circuits to a no-op regardless of mode,
 /// honouring spec §4.1.8 / the original `--disable-mirror` flag.
-fn mirror_self_comparison(
+pub(crate) fn mirror_self_comparison(
     data: &mut [u8],
     width: usize,
     height: usize,

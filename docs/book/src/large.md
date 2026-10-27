@@ -1,0 +1,132 @@
+# Large sequences
+
+The exact engine scores every cell of the query × subject matrix. That is
+what makes Dotter's pictures trustworthy, but it stops scaling at a few
+megabases. For chromosome- and genome-scale DNA comparisons dottir has a
+second engine, the **large engine** ([ADR 0007](./adr.md)).
+
+## How it works
+
+1. The subject is indexed with a **spaced seed** (default 12-of-19,
+   `1110100110010101111`). Spaced seeds tolerate scattered mismatches much
+   better than contiguous k-mers, which matters for diverged repeats.
+2. The query is streamed on both strands. A seed hit survives only if a
+   second hit lies on the same diagonal within `--two-hit-dist` (100 bp).
+   This removes essentially all random hits while keeping similarity down
+   to roughly 75–80 % identity.
+3. The surviving diagonal runs are scored with **the same sliding-window
+   score as the exact engine** (matrix, window size, pixel factor,
+   anti-diagonal rule). A large-mode pixel is therefore never darker than
+   the exact pixel, and equal on the drawn diagonals; the greyramp means the
+   same in both engines.
+4. Every dot gets a **repeat class** — `unique`, `low`, `mid`, `high` — from
+   the copy number of the bases it connects, so repeats can be shown,
+   hidden or coloured without recomputing.
+5. Optionally, unique/low-copy runs are **chained** into co-linear synteny
+   blocks (coordinates and a score; not alignments).
+
+## When it is used
+
+`dottir batch --engine auto` (the default) switches to the large engine
+when query × subject exceeds `--large-threshold-cells` (10¹¹, about
+316 kb × 316 kb — roughly a minute of exact compute; a 1 Mb self-plot
+takes ~10 min exact versus 0.5 s large). Use `--engine large` or `--engine exact` to force either.
+Without `--zoom`/`--auto-zoom`, a large-engine plot is fitted to 4000 px.
+
+In the GUI (*Settings → Large sequences*), `Auto` uses the large engine for
+any view with more than 2·10¹⁰ visible cells (about 140 kb × 140 kb) and the
+exact engine once you zoom in further, so detail views stay fully
+Dotter-faithful. The first large view builds the index (status bar:
+*Indexing for large mode…*); later views reuse it.
+
+## Repeat classes
+
+Copy number is estimated per base, within its own sequence:
+
+| `--depth` | What it counts | Use |
+|-----------|----------------|-----|
+| `seed` (default) | 1 + diagonal runs covering the base in a self-comparison | Diverged repeats (old TE families). One extra seeding pass per sequence. |
+| `kmer` | exact canonical k-mer copies (`--depth-k`, default 21) | Faster; sees only young repeats (< ~5 % divergence). |
+| `none` | nothing | Classes come only from soft-masking / annotations. |
+
+Thresholds `--class-thresholds 2,5,51` mean: fewer than 2 copies is
+`unique`, 2–4 `low`, 5–50 `mid`, 51 and more `high`. A dot takes the higher
+class of its two bases. In addition:
+
+* soft-masked (lowercase) bases are at least `mid`
+  (`--softmask-class none|low|mid|high`);
+* features from `--repeat-annot` / `--repeat-annot-subject` (GFF3 or BED,
+  filtered by `--repeat-types LTR,...`) are `high`. A GFF3-with-FASTA input
+  supplies its own features when `--repeat-types` is given.
+
+Seeds occurring more than `--max-occ` times (1000) are skipped to bound run
+time — typically satellites. They count as `high`, and the number of capped
+positions is reported in the log and the params sidecar.
+
+## Recipes
+
+```sh
+# Repeat landscape of a chromosome: everything, classes coloured in the GUI.
+dottir-gui chr1.fa
+
+# Synteny between two assemblies, repeats hidden, chains exported.
+dottir batch asmA.fa asmB.fa -o synteny.png \
+    --hide-classes mid,high --chains-out synteny.paf
+
+# Only the repeats, using RepeatMasker output as an extra mask.
+dottir batch chr1.fa -o repeats.png \
+    --hide-classes unique,low --repeat-annot chr1.rm.gff3
+
+# Export the copy-number track (binned to the zoom) for a genome browser.
+dottir batch chr1.fa -o chr1.png --depth-out chr1.depth
+```
+
+In the GUI the side panel shows the four classes with checkboxes, the
+**Synteny** (unique + low) / **Repeats** (mid + high) / **All** presets,
+**Colour by class** (black / blue / orange / red) and **Show synteny
+chains** with a minimum-score slider. These are display-only changes.
+
+## Chains
+
+`--chains-out FILE.paf` writes one PAF line per chain: record-local
+coordinates, strand, `tp:A:P`, `cm:i:` (anchors) and `s1:i:` (score). There
+is no CIGAR. By default only `unique` and `low` runs are chained
+(`--chain-max-class`), so repeats do not glue unrelated blocks together;
+`--chain-min-score` (300) drops short chains. For base-level alignments,
+run minimap2 and load its PAF.
+
+## Parameters
+
+| Flag | Default | Effect |
+|------|---------|--------|
+| `--engine` | `auto` | `exact`, `large` or `auto` |
+| `--large-threshold-cells` | 1e11 | `auto` switch point |
+| `--seed-pattern` | `1110100110010101111` | weight 6–13, span ≤ 32 |
+| `--two-hit-dist` | 100 | max distance between two hits on one diagonal |
+| `--max-occ` | 1000 | skip seeds more frequent than this |
+| `--extend` | W | cells scored beyond each run |
+| `--depth` / `--depth-k` | `seed` / 21 | copy-number method |
+| `--class-thresholds` | `2,5,51` | class boundaries |
+| `--hide-classes` | — | classes left out of the image |
+| `--large-memory-limit-bytes` | 6 GiB | index + depth + channels |
+
+## Performance
+
+On an 8-core desktop with synthetic, repeat-rich genomes:
+
+| Input | Wall time | Peak RSS |
+|-------|-----------|----------|
+| 10 Mb self | 4–7 s | 0.5 GB |
+| 100 Mb self | 2 min 14 s | 1.9 GB |
+| 100 Mb × 100 Mb | 4 min 7 s | 2.5 GB |
+
+Run time grows with the number of seed hits, i.e. with repeat content. If
+a repeat-rich genome is slow, lower `--max-occ` or use a heavier seed.
+
+## Limitations
+
+* DNA only; `-r`/`-v` and `--repeat-uniform-rendering` are not supported.
+* The `.dot` export stores the shown classes merged; class channels are not
+  preserved. PNG/SVG plus the params sidecar are the reproducible outputs.
+* Similarity below roughly 75 % identity is not seeded; zoom in (exact
+  engine) to see it.

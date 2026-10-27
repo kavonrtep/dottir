@@ -1,6 +1,6 @@
 # ADR 0007 — Seed-based large-sequence mode
 
-* Status: Proposed
+* Status: Accepted (implemented 2026-10-28)
 * Date: 2026-10-27
 * Deciders: petr
 * Spec reference: §4.1 (algorithmic invariants), §4.5.1 (performance),
@@ -45,13 +45,24 @@ minimizers on their own.
    pixel containing an anchor span.** This keeps the greyramp semantics
    identical between modes.
 
-5. **Repeat classes from a separate depth track.** Copy number is taken from
-   long k-mers (default k = 21, configurable) counted across all inputs, or
-   from GFF3/soft-mask annotations. Each anchor is binned into a class
-   (unique / low / mid / high); pixels hold one `u8` channel per
-   *(strand × class)*. Showing or hiding repeats is a display operation with
-   no recompute. A per-seed occurrence cap bounds runtime; pixels where the
-   cap fired are flagged.
+5. **Repeat classes from a separate depth track.** Each sequence gets a
+   per-base copy number, counted within that sequence. Two methods:
+   * `seed` (default): one plus the number of off-diagonal two-hit runs
+     covering the base in a self-comparison pass; positions whose seed
+     exceeds `max_occ` count as high-copy. As divergence-tolerant as the
+     plot itself; costs one extra seeding pass per sequence.
+   * `kmer`: exact canonical k-mer counts (default k = 21). Faster, but
+     benchmarking showed it calls 18–25 %-diverged TE families "unique",
+     because they share almost no exact 21-mers — hence not the default.
+
+   Soft-masked bases and GFF3/BED repeat features raise the floor. Each dot
+   is classed by the max of its query/subject base (unique / low / mid /
+   high); pixels hold one `u8` channel per *(strand × class)*, so showing or
+   hiding repeats is a display operation with no recompute. A per-seed
+   occurrence cap bounds runtime; capped positions are reported as counts
+   per pixel column (query) and row (subject) rather than as a pixel flag,
+   since marking every pixel a capped seed would have hit is exactly the
+   work the cap avoids.
 
 6. **Basic co-linear chaining as a display aid.** Anchors are chained per
    *(record pair, strand)* with a minimap2-style simplified DP (bounded
@@ -68,8 +79,16 @@ minimizers on their own.
 * No new dependencies are required.
 * Large-mode output is not comparable to C dotter except via the `≤ exact`
   invariant, which is property-tested on small inputs.
-* Memory budget differs from the exact engine (index ≈ 0.5 GB per pattern
-  per 100 Mb); large mode gets its own `memory_limit` default (4 GB).
+* Memory budget differs from the exact engine (index ≈ 0.7 GB per 100 Mb of
+  subject); large mode gets its own memory limit (core default 4 GiB, CLI and
+  GUI default 6 GiB).
+* Measured on synthetic, repeat-rich genomes (8 cores): 10 Mb self-plot 3–5 s;
+  100 Mb self-plot 2 min 14 s / 1.9 GB; 100 Mb × 100 Mb pairwise 4 min 7 s /
+  2.5 GB (seed depth on both inputs included).
+* `dottir batch` gains `--engine exact|large|auto` (default `auto`: large
+  above 10¹¹ cells), so very large BLASTN inputs no longer default to the
+  exact engine. On the benchmark machine a 1 Mb self-plot takes ~10 min
+  with the exact engine and 0.5 s with the large engine.
 * Exports (PNG tEXt, params sidecar) MUST record `mode = large` and the
   seed/filter/class parameters so a figure is reproducible.
 

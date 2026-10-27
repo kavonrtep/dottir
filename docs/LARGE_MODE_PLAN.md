@@ -11,13 +11,24 @@ v0.5.x.
 
 | ID | Item | Status |
 |----|------|--------|
-| L0 | ADR, spec section, benchmark corpora | ☐ |
-| L1 | Seed index + query streaming + two-hit filter | ☐ |
-| L2 | Seeded exact scoring → dot layer, CLI `--mode large` | ☐ |
-| L3 | Repeat depth track, classes, occurrence cap | ☐ |
-| L4 | GUI integration + semantic zoom | ☐ |
-| L5 | Chaining layer + export | ☐ |
-| L6 | Docs, book chapter, release | ☐ |
+| L0 | ADR, spec section, benchmark corpora | ☑ synthetic generator (`examples/simulate_genome.rs`); real plant benchmarks still to run |
+| L1 | Seed index + query streaming + two-hit filter | ☑ |
+| L2 | Seeded exact scoring → dot layer, CLI `--engine large` | ☑ |
+| L3 | Repeat depth track, classes, occurrence cap | ☑ plus `seed` depth method (see ADR 0007) |
+| L4 | GUI integration + semantic zoom | ☑ except depth/capped tracks along the axes and GFF3 repeat floors in the GUI |
+| L5 | Chaining layer + export | ☑ PAF; BED-pair export and SVG chain lines not done |
+| L6 | Docs, book chapter, release | ☑ docs; release pending |
+
+Measured (8 cores, synthetic repeat-rich genomes, seed depth): 100 Mb
+self-plot 2 min 14 s / 1.9 GB; 100 Mb × 100 Mb 4 min 7 s / 2.5 GB.
+
+Deviations from the plan below:
+
+* Capped seeds are reported per pixel column/row (`q_capped`, `s_capped`),
+  not as a per-pixel flag.
+* The CLI flag is `--engine` (`--mode` was already the BLAST mode).
+* Large goldens are a pinned FNV hash of all channels + chains in
+  `large/tests.rs` rather than PNG files.
 
 ## Pipeline overview
 

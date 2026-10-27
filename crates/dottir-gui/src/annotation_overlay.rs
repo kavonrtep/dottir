@@ -271,6 +271,7 @@ mod tests {
         Sequence {
             seq,
             records,
+            soft_mask: vec![],
             source_path: None,
         }
     }

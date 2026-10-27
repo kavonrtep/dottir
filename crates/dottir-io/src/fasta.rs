@@ -30,6 +30,9 @@ pub struct FastaRecord {
     pub description: Option<String>,
     /// Sequence, uppercased, whitespace stripped.
     pub sequence: Vec<u8>,
+    /// Record-local runs of lowercase (soft-masked) residues in the input,
+    /// sorted and non-overlapping. Lost by uppercasing, so kept here.
+    pub soft_masked: Vec<std::ops::Range<usize>>,
 }
 
 #[derive(Debug, Error)]
@@ -87,6 +90,7 @@ pub fn parse_fasta(text: &str) -> Result<Vec<FastaRecord>, FastaError> {
     let mut records: Vec<FastaRecord> = Vec::new();
     let mut current_header: Option<(String, Option<String>)> = None;
     let mut current_seq: Vec<u8> = Vec::new();
+    let mut current_mask: Vec<std::ops::Range<usize>> = Vec::new();
     let mut header_offset: u64 = 0;
     let mut offset: u64 = 0;
 
@@ -103,6 +107,7 @@ pub fn parse_fasta(text: &str) -> Result<Vec<FastaRecord>, FastaError> {
                     id,
                     description,
                     sequence: std::mem::take(&mut current_seq),
+                    soft_masked: std::mem::take(&mut current_mask),
                 });
             } else if !current_seq.is_empty() {
                 return Err(FastaError::MissingHeader);
@@ -117,6 +122,13 @@ pub fn parse_fasta(text: &str) -> Result<Vec<FastaRecord>, FastaError> {
             // Sequence line: strip whitespace, uppercase, append.
             for &b in bytes {
                 if !b.is_ascii_whitespace() {
+                    if b.is_ascii_lowercase() {
+                        let at = current_seq.len();
+                        match current_mask.last_mut() {
+                            Some(r) if r.end == at => r.end = at + 1,
+                            _ => current_mask.push(at..at + 1),
+                        }
+                    }
                     current_seq.push(b.to_ascii_uppercase());
                 }
             }
@@ -131,6 +143,7 @@ pub fn parse_fasta(text: &str) -> Result<Vec<FastaRecord>, FastaError> {
             id,
             description,
             sequence: current_seq,
+            soft_masked: current_mask,
         });
     } else if !current_seq.is_empty() {
         return Err(FastaError::MissingHeader);
@@ -181,6 +194,15 @@ mod tests {
     fn lowercase_uppercased() {
         let recs = parse_fasta(">a\nacgt\n").unwrap();
         assert_eq!(recs[0].sequence, b"ACGT");
+    }
+
+    #[test]
+    fn soft_mask_runs_survive_uppercasing() {
+        let recs = parse_fasta(">a\nACgt\nnnAC\nGTa\n>b\nAc\n").unwrap();
+        assert_eq!(recs[0].soft_masked, vec![2..6, 10..11]);
+        assert_eq!(recs[1].soft_masked, vec![1..2]);
+        let s = crate::Sequence::from_records(recs, None);
+        assert_eq!(s.soft_mask, vec![2..6, 10..11, 12..13]);
     }
 
     #[test]

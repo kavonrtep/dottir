@@ -56,6 +56,9 @@ Caused by:
 
 ## Flags
 
+Large-sequence flags (`--engine`, `--seed-pattern`, `--hide-classes`,
+`--chains-out`, …) are described in [Large sequences](./large.md).
+
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--mode {blastn,blastp,blastx}` | `blastn` | BLAST mode. `blastx` is not yet implemented. |

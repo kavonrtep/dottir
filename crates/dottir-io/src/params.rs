@@ -25,6 +25,32 @@ pub struct ParamsSidecar {
     pub subject: InputInfo,
     pub plot: PlotParamsInfo,
     pub host: HostInfo,
+    /// Present when the seed-based large-sequence engine produced the plot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub large: Option<LargeParamsInfo>,
+}
+
+/// Large-mode parameters and run statistics (ADR 0007).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LargeParamsInfo {
+    pub format_version: u32,
+    pub seed: String,
+    pub two_hit_dist: u32,
+    pub max_occ: u32,
+    pub extend: u32,
+    /// `seed`, `kmer:<k>` or `none`.
+    pub depth: String,
+    /// `[low, mid, high]` copy-number thresholds.
+    pub class_thresholds: [u16; 3],
+    pub shown_classes: Vec<String>,
+    pub soft_mask_class: Option<String>,
+    pub repeat_annotation: Option<String>,
+    pub raw_hits: u64,
+    pub anchors: u64,
+    pub runs: u64,
+    pub scored_cells: u64,
+    pub capped_query_positions: u64,
+    pub chains: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -171,10 +197,34 @@ mod tests {
                 os: "linux".into(),
                 timestamp_utc: "2026-05-16T00:00:00Z".into(),
             },
+            large: None,
         };
         let toml_text = s.to_toml().unwrap();
+        assert!(!toml_text.contains("[large]"));
         let back: ParamsSidecar = toml::from_str(&toml_text).unwrap();
         assert_eq!(back.plot.window_size, s.plot.window_size);
         assert_eq!(back.query.sha256, s.query.sha256);
+
+        let mut l = s.clone();
+        l.large = Some(LargeParamsInfo {
+            format_version: 1,
+            seed: "1110100110010101111".into(),
+            two_hit_dist: 100,
+            max_occ: 1000,
+            extend: 25,
+            depth: "seed".into(),
+            class_thresholds: [2, 5, 51],
+            shown_classes: vec!["unique".into(), "low".into()],
+            soft_mask_class: Some("mid".into()),
+            repeat_annotation: None,
+            raw_hits: 10,
+            anchors: 4,
+            runs: 2,
+            scored_cells: 300,
+            capped_query_positions: 0,
+            chains: Some(1),
+        });
+        let back: ParamsSidecar = toml::from_str(&l.to_toml().unwrap()).unwrap();
+        assert_eq!(back.large.unwrap().shown_classes, vec!["unique", "low"]);
     }
 }

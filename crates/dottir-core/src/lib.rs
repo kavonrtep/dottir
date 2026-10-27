@@ -33,6 +33,7 @@ pub mod antidiag;
 pub mod error;
 pub mod find_peaks;
 pub mod karlin;
+pub mod large;
 pub mod matrix;
 pub mod periodogram;
 pub mod pixel;

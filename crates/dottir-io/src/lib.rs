@@ -24,6 +24,7 @@ pub mod annotation;
 pub mod dot_format;
 pub mod fasta;
 pub mod input;
+pub mod large;
 pub mod params;
 pub mod png_export;
 pub mod sequence;
