@@ -21,6 +21,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod aligner;
 pub mod alignment;
 pub mod annotation;
 pub mod cache;

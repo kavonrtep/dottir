@@ -1,7 +1,10 @@
-//! `dottir batch --engine genome` (ADR 0008): draw a PAF of two
-//! assemblies without loading their sequences.
+//! `dottir batch --engine genome` (ADR 0008): draw the alignments of two
+//! assemblies — from `--paf` or an external aligner — without loading
+//! their sequences.
 
+use std::cell::OnceCell;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 
 use anyhow::{bail, Context, Result};
 use dottir_core::genome::alignment::sort_alignments;
@@ -11,6 +14,7 @@ use dottir_core::genome::{
     filter, rasterize, sort_query, Alignment, AxisLayout, FilterConfig, GenomeRecord, RasterConfig,
     GENOME_FORMAT_VERSION,
 };
+use dottir_io::aligner::{align, AlignRequest, Aligner};
 use dottir_io::faidx::{plain_fasta, FastaIndex};
 use dottir_io::genome_export::{write_association, write_fasta_records};
 use dottir_io::paf::{read_paf_file, write_paf, PafError};
@@ -18,7 +22,7 @@ use dottir_io::params::{
     sha256_file, DottirInfo, GenomeParamsInfo, HostInfo, InputInfo, ParamsSidecar, PlotParamsInfo,
 };
 
-use crate::large_batch::{EngineArg, LargeArgs};
+use crate::large_batch::EngineArg;
 use crate::BatchArgs;
 
 /// Default largest plot dimension in pixels.
@@ -28,10 +32,48 @@ const DEFAULT_PLOT_PX: u32 = 4000;
 #[derive(clap::Args, Debug, Clone)]
 pub struct GenomeArgs {
     /// Alignments to draw (PAF, plain or gzipped), e.g. from
-    /// `minimap2 -x asm20 FIRST.fa SECOND.fa`. Implies `--engine genome`.
-    /// The first input is the horizontal (reference) axis.
+    /// `minimap2 -x asm20 FIRST.fa SECOND.fa`, instead of running an
+    /// aligner. Implies `--engine genome`. The first input is the
+    /// horizontal (reference) axis.
     #[arg(long, value_name = "FILE")]
     pub paf: Option<PathBuf>,
+
+    /// `--engine auto` uses genome mode from this many matrix cells
+    /// (first × second input length) when an aligner is available.
+    #[arg(long, value_name = "CELLS", default_value_t = 1e17)]
+    pub genome_threshold_cells: f64,
+
+    /// Aligner: `auto` (mm2plus, else minimap2), a name on PATH, or a
+    /// path to a minimap2-compatible binary.
+    #[arg(long, value_name = "NAME|PATH", default_value = "auto")]
+    pub aligner: String,
+
+    /// minimap2 preset (`-x`).
+    #[arg(long, value_name = "PRESET", default_value = "asm20")]
+    pub preset: String,
+
+    /// Extra aligner arguments, space-separated (e.g. "-c" for exact
+    /// identities, at several times the run time).
+    #[arg(long, value_name = "ARGS", allow_hyphen_values = true)]
+    pub aligner_args: Option<String>,
+
+    /// Aligner threads (0 = all cores).
+    #[arg(long, value_name = "N", default_value_t = 0)]
+    pub threads: usize,
+
+    /// Query records are sent to the aligner in pieces of at most this
+    /// many bp (pairwise only), which bounds its memory.
+    #[arg(long, value_name = "BP", default_value_t = 10_000_000)]
+    pub chunk_size: u64,
+
+    /// Self-comparison: keep every chain (`-P`), i.e. all copies of each
+    /// repeat against each other. Can be millions of alignments.
+    #[arg(long)]
+    pub self_all_copies: bool,
+
+    /// Re-run the aligner even if a cached result exists.
+    #[arg(long)]
+    pub no_cache: bool,
 
     /// Drop alignments shorter than this (bp, longer span).
     #[arg(long, value_name = "BP", default_value_t = 0)]
@@ -81,18 +123,67 @@ pub struct GenomeArgs {
     pub paf_out: Option<PathBuf>,
 }
 
+/// Rough residue count from the file size (gzip compresses DNA ~4×).
+fn estimated_len(path: &Path) -> u64 {
+    let size = std::fs::metadata(path).map_or(0, |m| m.len());
+    let gz = std::fs::File::open(path)
+        .and_then(|mut f| {
+            let mut m = [0u8; 2];
+            std::io::Read::read_exact(&mut f, &mut m).map(|_| m == [0x1f, 0x8b])
+        })
+        .unwrap_or(false);
+    if gz {
+        size.saturating_mul(5)
+    } else {
+        size
+    }
+}
+
 /// Whether `dottir batch` should take the genome path.
-pub fn wanted(large: &LargeArgs, genome: &GenomeArgs) -> Result<bool> {
+pub fn wanted(args: &BatchArgs) -> Result<bool> {
+    let (large, genome) = (&args.large, &args.genome);
     match (large.engine, &genome.paf) {
-        (EngineArg::Genome, Some(_)) => Ok(true),
-        (EngineArg::Genome, None) => {
-            bail!("--engine genome needs --paf (running an aligner is not implemented yet)")
-        }
-        (EngineArg::Auto, Some(_)) => Ok(true),
+        (EngineArg::Genome, _) | (EngineArg::Auto, Some(_)) => Ok(true),
         (EngineArg::Exact | EngineArg::Large, Some(_)) => {
             bail!("--paf is only used by --engine genome")
         }
-        _ => Ok(false),
+        (EngineArg::Exact | EngineArg::Large, None) => Ok(false),
+        (EngineArg::Auto, None) => auto_wants_genome(args),
+    }
+}
+
+fn auto_wants_genome(args: &BatchArgs) -> Result<bool> {
+    let threshold = args.genome.genome_threshold_cells;
+    let second = args.subject.as_deref().unwrap_or(&args.query);
+    // Cheap estimate first; only plausible candidates get indexed.
+    let estimate = estimated_len(&args.query) as f64 * estimated_len(second) as f64;
+    if estimate < threshold / 4.0 {
+        return Ok(false);
+    }
+    let cache = dottir_io::cache::cache_dir();
+    let len = |p: &Path| -> Result<u64> {
+        Ok(open_assembly(p, &cache)?
+            .records
+            .iter()
+            .map(|r| r.len)
+            .sum())
+    };
+    let cells = len(&args.query)? as f64 * len(second)? as f64;
+    if cells < threshold {
+        return Ok(false);
+    }
+    match Aligner::detect(&args.genome.aligner) {
+        Ok(a) => {
+            tracing::info!(
+                "engine auto: {cells:.2e} cells >= {threshold:.2e} and {} found, using genome mode",
+                a.name
+            );
+            Ok(true)
+        }
+        Err(e) => {
+            tracing::warn!("engine auto: {cells:.2e} cells, but {e}; using the large engine");
+            Ok(false)
+        }
     }
 }
 
@@ -100,6 +191,16 @@ struct Assembly {
     path: PathBuf,
     index: FastaIndex,
     records: Vec<GenomeRecord>,
+    sha256: OnceCell<String>,
+}
+
+impl Assembly {
+    fn sha256(&self) -> Result<&str> {
+        if self.sha256.get().is_none() {
+            let _ = self.sha256.set(sha256_file(&self.path)?);
+        }
+        Ok(self.sha256.get().map(String::as_str).unwrap_or_default())
+    }
 }
 
 fn open_assembly(path: &Path, cache: &Path) -> Result<Assembly> {
@@ -120,6 +221,7 @@ fn open_assembly(path: &Path, cache: &Path) -> Result<Assembly> {
         path: path.to_path_buf(),
         index,
         records,
+        sha256: OnceCell::new(),
     })
 }
 
@@ -196,9 +298,89 @@ fn write_exports(
     Ok(())
 }
 
+/// Where the alignments came from, for the sidecar.
+struct Source {
+    paf_path: Option<PathBuf>,
+    paf_sha256: String,
+    aligner: Option<Aligner>,
+    aligner_args: Option<Vec<String>>,
+    chunk_size: Option<u64>,
+}
+
+fn run_aligner(
+    g: &GenomeArgs,
+    x: &Assembly,
+    y: &Assembly,
+    self_comparison: bool,
+) -> Result<(Vec<Alignment>, Source)> {
+    let aligner = Aligner::detect(&g.aligner)?;
+    tracing::info!(
+        "aligner: {} ({})",
+        aligner.program.display(),
+        aligner.version
+    );
+    let threads = match g.threads {
+        0 => std::thread::available_parallelism().map_or(1, |n| n.get()),
+        n => n,
+    };
+    let req = AlignRequest {
+        reference: &x.index,
+        query: &y.index,
+        reference_sha256: x.sha256()?.to_string(),
+        query_sha256: y.sha256()?.to_string(),
+        preset: g.preset.clone(),
+        extra_args: g
+            .aligner_args
+            .as_deref()
+            .map(|a| a.split_whitespace().map(String::from).collect())
+            .unwrap_or_default(),
+        threads,
+        chunk_size: g.chunk_size,
+        self_comparison,
+        all_copies: g.self_all_copies,
+    };
+    let last = std::sync::Mutex::new(0u64);
+    let progress = |done: u64, total: u64| {
+        let decile = done * 10 / total.max(1);
+        let mut l = last.lock().unwrap();
+        if decile > *l {
+            *l = decile;
+            tracing::info!("aligned {done} / {total} pieces");
+        }
+    };
+    let started = std::time::Instant::now();
+    let cache = dottir_io::cache::cache_dir();
+    let out = align(
+        &aligner,
+        &req,
+        &cache,
+        !g.no_cache,
+        &progress,
+        &AtomicBool::new(false),
+    )?;
+    if out.cached {
+        tracing::info!("reusing cached alignments {}", out.paf.display());
+    } else {
+        tracing::info!(
+            "aligned in {:.1?}; cached as {}",
+            started.elapsed(),
+            out.paf.display()
+        );
+    }
+    let alns = read_paf_file(&out.paf, &y.records, &x.records)
+        .with_context(|| format!("reading {}", out.paf.display()))?;
+    let source = Source {
+        paf_path: None,
+        paf_sha256: sha256_file(&out.paf)?,
+        aligner_args: Some(req.output_args()),
+        chunk_size: (!self_comparison).then_some(g.chunk_size),
+        aligner: Some(aligner),
+    };
+    Ok((alns, source))
+}
+
 pub fn run(args: &BatchArgs) -> Result<()> {
     let g = &args.genome;
-    let paf = g.paf.as_deref().context("genome mode needs --paf")?;
     let self_comparison = args.subject.is_none();
     if self_comparison && g.sort_query {
         bail!("--sort-query needs two inputs");
@@ -211,10 +393,24 @@ pub fn run(args: &BatchArgs) -> Result<()> {
             path: x.path.clone(),
             index: x.index.clone(),
             records: x.records.clone(),
+            sha256: x.sha256.clone(),
         },
     };
 
-    let alns = read_oriented(paf, &x.records, &y.records)?;
+    let (alns, source) = match &g.paf {
+        Some(paf) => {
+            let alns = read_oriented(paf, &x.records, &y.records)?;
+            let source = Source {
+                paf_path: Some(paf.clone()),
+                paf_sha256: sha256_file(paf)?,
+                aligner: None,
+                aligner_args: None,
+                chunk_size: None,
+            };
+            (alns, source)
+        }
+        None => run_aligner(g, &x, &y, self_comparison)?,
+    };
     let cfg = FilterConfig {
         min_len: g.min_aln_len,
         min_identity: g.min_identity,
@@ -277,12 +473,11 @@ pub fn run(args: &BatchArgs) -> Result<()> {
     let raster = rasterize(drawn.iter().copied(), &x_layout, &y_layout, &rcfg);
     tracing::info!("{}×{} px, {bp_per_px} bp/px", raster.width, raster.height);
 
-    let paf_sha = sha256_file(paf)?;
     let chunks = [
         ("dottir-engine", "genome".to_string()),
         ("dottir-version", env!("CARGO_PKG_VERSION").to_string()),
         ("dottir-genome-format", GENOME_FORMAT_VERSION.to_string()),
-        ("dottir-paf-sha256", paf_sha.clone()),
+        ("dottir-paf-sha256", source.paf_sha256.clone()),
         ("dottir-bp-per-px", bp_per_px.to_string()),
     ];
     let chunk_refs: Vec<(&str, &str)> = chunks.iter().map(|(k, v)| (*k, v.as_str())).collect();
@@ -302,7 +497,7 @@ pub fn run(args: &BatchArgs) -> Result<()> {
         let info = |a: &Assembly| -> Result<InputInfo> {
             Ok(InputInfo {
                 path: a.path.display().to_string(),
-                sha256: sha256_file(&a.path)?,
+                sha256: a.sha256()?.to_string(),
                 size_bytes: std::fs::metadata(&a.path)?.len(),
                 n_records: a.records.len(),
                 total_residues: a.records.iter().map(|r| r.len).sum::<u64>() as usize,
@@ -342,13 +537,18 @@ pub fn run(args: &BatchArgs) -> Result<()> {
             large: None,
             genome: Some(GenomeParamsInfo {
                 format_version: GENOME_FORMAT_VERSION,
-                source: "paf".to_string(),
-                paf_path: Some(paf.display().to_string()),
-                paf_sha256: Some(paf_sha),
-                aligner: None,
-                aligner_version: None,
-                aligner_args: None,
-                chunk_size: None,
+                source: if source.aligner.is_some() {
+                    "aligner"
+                } else {
+                    "paf"
+                }
+                .to_string(),
+                paf_path: source.paf_path.as_ref().map(|p| p.display().to_string()),
+                paf_sha256: Some(source.paf_sha256.clone()),
+                aligner: source.aligner.as_ref().map(|a| a.name.clone()),
+                aligner_version: source.aligner.as_ref().map(|a| a.version.clone()),
+                aligner_args: source.aligner_args.clone(),
+                chunk_size: source.chunk_size,
                 min_aln_len: g.min_aln_len,
                 min_identity: g.min_identity,
                 primary_only: g.primary_only,

@@ -242,7 +242,7 @@ fn main() -> Result<()> {
 
 fn run_batch(args: BatchArgs) -> Result<()> {
     // Genome mode never loads the sequences, so it branches off first.
-    if genome_batch::wanted(&args.large, &args.genome)? {
+    if genome_batch::wanted(&args)? {
         return genome_batch::run(&args);
     }
     let mode = args.mode.to_core();
