@@ -122,7 +122,9 @@ Findings of `docs/reviews/since-v0.4.0.md`:
   indexing could not be cancelled; both now stop within 50 ms.
 * GUI PNG/SVG export applied the score greyramp in coverage shading, so
   the coverage sensitivity was lost; exports now use the on-screen
-  mapping and record the shading in their metadata.
+  mapping and record the shading in their metadata. They now also keep
+  the screen's colours (repeat classes, inverted repeats in magenta) as
+  RGB images.
 * FASTA indexing rejected a full-width last line without a newline.
 * A PAF made with the axes swapped failed to load when both assemblies
   share record names (`chr1`) with different lengths.

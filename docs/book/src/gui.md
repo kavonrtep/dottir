@@ -55,8 +55,13 @@ through the `--gff*` flags or **File → Load GFF3/BED…** instead.
 
 ## Panels
 
-* **Top menu**: File → Open query / Open subject / Save PNG; View →
-  Reset pan/zoom / Reset greyramp / Switch theme / Settings.
+* **Top menu**: File → Open query / Open subject / Save PNG / Save SVG;
+  View → Reset pan/zoom / Reset greyramp / Switch theme / Settings.
+  Saved images hold the pixelmap exactly as shown — greyramp or coverage
+  ramp, repeat-class colours, inverted repeats in magenta — written as
+  greyscale when nothing is coloured, else RGB; the shading and its
+  thresholds are recorded in the file's metadata. Overlays drawn on top of
+  the canvas (annotations, chains, crosshair) are not included.
 * **Central canvas**: textured pixelmap with the crosshair overlay.
 * **Right panel — Greyramp**: white/black sliders + Swap/Reset + a
   live LUT strip preview. The LUT is applied on every redraw; the

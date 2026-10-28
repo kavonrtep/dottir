@@ -67,16 +67,83 @@ pub fn write_svg<P: AsRef<Path>>(
     } else {
         std::borrow::Cow::Borrowed(pixels)
     };
-    let mut png_buf = Vec::with_capacity(png_input.len() + 1024);
+    let png_buf = encode_png(width, height, png::ColorType::Grayscale, &png_input)?;
+    write_svg_document(
+        path.as_ref(),
+        width,
+        height,
+        &png_buf,
+        margin,
+        axis_records_x,
+        axis_records_y,
+        metadata,
+    )
+}
+
+/// As [`write_svg`] for display-ready RGB pixels (`width × height × 3`
+/// bytes), e.g. repeat classes in colour.
+#[allow(clippy::too_many_arguments)]
+pub fn write_rgb_svg<P: AsRef<Path>>(
+    path: P,
+    width: u32,
+    height: u32,
+    rgb: &[u8],
+    margin: u32,
+    axis_records_x: &[crate::text_overlay::AxisRecord],
+    axis_records_y: &[crate::text_overlay::AxisRecord],
+    metadata: &[(&str, &str)],
+) -> Result<(), SvgError> {
+    if rgb.len() != (width as usize) * (height as usize) * 3 {
+        return Err(SvgError::DimensionMismatch {
+            width,
+            height,
+            len: rgb.len(),
+        });
+    }
+    let png_buf = encode_png(width, height, png::ColorType::Rgb, rgb)?;
+    write_svg_document(
+        path.as_ref(),
+        width,
+        height,
+        &png_buf,
+        margin,
+        axis_records_x,
+        axis_records_y,
+        metadata,
+    )
+}
+
+fn encode_png(
+    width: u32,
+    height: u32,
+    color: png::ColorType,
+    pixels: &[u8],
+) -> Result<Vec<u8>, SvgError> {
+    let mut png_buf = Vec::with_capacity(pixels.len() + 1024);
     {
         let cursor = Cursor::new(&mut png_buf);
         let mut encoder = png::Encoder::new(cursor, width, height);
-        encoder.set_color(png::ColorType::Grayscale);
+        encoder.set_color(color);
         encoder.set_depth(png::BitDepth::Eight);
         let mut writer = encoder.write_header()?;
-        writer.write_image_data(&png_input)?;
+        writer.write_image_data(pixels)?;
     }
-    let png_b64 = base64::engine::general_purpose::STANDARD.encode(&png_buf);
+    Ok(png_buf)
+}
+
+/// The SVG around an encoded pixelmap PNG: metadata, frame, ticks, labels.
+#[allow(clippy::too_many_arguments)]
+fn write_svg_document(
+    path: &Path,
+    width: u32,
+    height: u32,
+    png_buf: &[u8],
+    margin: u32,
+    axis_records_x: &[crate::text_overlay::AxisRecord],
+    axis_records_y: &[crate::text_overlay::AxisRecord],
+    metadata: &[(&str, &str)],
+) -> Result<(), SvgError> {
+    let png_b64 = base64::engine::general_purpose::STANDARD.encode(png_buf);
 
     let total_w = width + 2 * margin;
     let total_h = height + 2 * margin;
@@ -286,6 +353,33 @@ use crate::text_overlay::format_kb;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rgb_svg_embeds_a_colour_png() {
+        let dir = std::env::temp_dir().join(format!("dottir_rgb_svg_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("a.svg");
+        let rgb: Vec<u8> = (0..6).flat_map(|_| [220_u8, 30, 220]).collect();
+        write_rgb_svg(&p, 3, 2, &rgb, 50, &[], &[], &[("shading", "score")]).unwrap();
+        let text = std::fs::read_to_string(&p).unwrap();
+        let b64 = text
+            .split("base64,")
+            .nth(1)
+            .unwrap()
+            .split('"')
+            .next()
+            .unwrap();
+        let png = base64::engine::general_purpose::STANDARD
+            .decode(b64)
+            .unwrap();
+        let info = png::Decoder::new(std::io::Cursor::new(png))
+            .read_info()
+            .unwrap();
+        assert_eq!(info.info().color_type, png::ColorType::Rgb);
+        assert!(text.contains("<dottir:shading>score</dottir:shading>"));
+        assert!(write_rgb_svg(&p, 3, 3, &rgb, 50, &[], &[], &[]).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn writes_valid_svg_with_metadata() {

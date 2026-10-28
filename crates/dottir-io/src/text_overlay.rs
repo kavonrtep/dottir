@@ -276,6 +276,45 @@ impl AxisRecord {
     }
 }
 
+/// As [`compose_image_with_axes`] for RGB pixels (`plot_w × plot_h × 3`
+/// bytes); returns an RGB canvas. Axes and labels are the greyscale ones;
+/// anything they draw inside the plot area stays on top of the pixels.
+#[allow(clippy::too_many_arguments)]
+pub fn compose_rgb_image_with_axes(
+    rgb: &[u8],
+    plot_w: u32,
+    plot_h: u32,
+    coord_w: u32,
+    coord_h: u32,
+    margin: u32,
+    axis_records_x: &[AxisRecord],
+    axis_records_y: &[AxisRecord],
+) -> (Vec<u8>, u32, u32) {
+    let white = vec![255_u8; plot_w as usize * plot_h as usize];
+    let (grey, total_w, total_h) = compose_image_with_axes(
+        &white,
+        plot_w,
+        plot_h,
+        coord_w,
+        coord_h,
+        margin,
+        axis_records_x,
+        axis_records_y,
+    );
+    let mut out: Vec<u8> = grey.iter().flat_map(|&g| [g, g, g]).collect();
+    let (m, tw) = (margin as usize, total_w as usize);
+    for row in 0..plot_h as usize {
+        for col in 0..plot_w as usize {
+            let dst = (m + row) * tw + m + col;
+            if grey[dst] == 255 {
+                let src = (row * plot_w as usize + col) * 3;
+                out[dst * 3..dst * 3 + 3].copy_from_slice(&rgb[src..src + 3]);
+            }
+        }
+    }
+    (out, total_w, total_h)
+}
+
 /// Compose a `(plot_w × plot_h)` greyscale pixelmap into a larger
 /// canvas with a margin on every side, a 1-px axis frame, tick marks
 /// at top and left, and numeric labels along both axes. Returns
@@ -908,6 +947,32 @@ mod tests {
         // 10k+ uses integer thousands.
         assert_eq!(format_kb(12_345), "12k");
         assert_eq!(format_kb(1_500_000), "1.5M");
+    }
+
+    #[test]
+    fn rgb_compose_matches_grey_axes_and_keeps_colour() {
+        let (w, h, m) = (40_u32, 30_u32, 70_u32);
+        let rgb: Vec<u8> = (0..w * h).flat_map(|_| [220_u8, 30, 220]).collect();
+        let recs = [AxisRecord::new("a", 0, 20), AxisRecord::new("b", 20, 40)];
+        let (out, tw, th) = compose_rgb_image_with_axes(&rgb, w, h, w, h, m, &recs, &recs);
+        let white = vec![255_u8; (w * h) as usize];
+        let (grey, gw, gh) = compose_image_with_axes(&white, w, h, w, h, m, &recs, &recs);
+        assert_eq!((tw, th), (gw, gh));
+        assert_eq!(out.len(), grey.len() * 3);
+        let mut coloured = 0;
+        for (i, &g) in grey.iter().enumerate() {
+            let px = &out[i * 3..i * 3 + 3];
+            let (x, y) = (i as u32 % tw, i as u32 / tw);
+            let inside = (m..m + w).contains(&x) && (m..m + h).contains(&y);
+            if inside && g == 255 {
+                assert_eq!(px, [220, 30, 220]);
+                coloured += 1;
+            } else {
+                // Margins, labels and anything drawn over the plot.
+                assert_eq!(px, [g, g, g]);
+            }
+        }
+        assert!(coloured > 0);
     }
 
     #[test]

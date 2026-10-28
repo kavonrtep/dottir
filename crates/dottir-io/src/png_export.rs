@@ -90,6 +90,41 @@ pub fn write_grayscale_png<P: AsRef<Path>>(
     write_grayscale_png_raw(path, width, height, pixels, text_chunks)
 }
 
+/// As [`write_grayscale_png_with_axes`] for display-ready RGB pixels
+/// (`width × height × 3` bytes), e.g. repeat classes in colour.
+#[allow(clippy::too_many_arguments)]
+pub fn write_rgb_png_with_axes<P: AsRef<Path>>(
+    path: P,
+    width: u32,
+    height: u32,
+    coord_w: u32,
+    coord_h: u32,
+    rgb: &[u8],
+    margin: u32,
+    axis_records_x: &[crate::text_overlay::AxisRecord],
+    axis_records_y: &[crate::text_overlay::AxisRecord],
+    text_chunks: &[(&str, &str)],
+) -> Result<(), PngError> {
+    if rgb.len() != (width as usize) * (height as usize) * 3 {
+        return Err(PngError::DimensionMismatch {
+            width,
+            height,
+            len: rgb.len(),
+        });
+    }
+    let (canvas, total_w, total_h) = crate::text_overlay::compose_rgb_image_with_axes(
+        rgb,
+        width,
+        height,
+        coord_w,
+        coord_h,
+        margin,
+        axis_records_x,
+        axis_records_y,
+    );
+    write_rgb_png(path, total_w, total_h, &canvas, text_chunks)
+}
+
 /// Write an 8-bit RGB PNG (`pixels` = `width × height × 3` bytes).
 pub fn write_rgb_png<P: AsRef<Path>>(
     path: P,

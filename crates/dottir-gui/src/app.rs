@@ -2078,13 +2078,11 @@ impl DottirApp {
         }
     }
 
-    fn ensure_texture(&mut self, ctx: &Context) {
-        let Some(plot) = &self.plot else {
-            return;
-        };
-        if !self.texture_dirty && self.texture.is_some() {
-            return;
-        }
+    /// The plot as shown: RGBA pixels (greyramp or coverage ramp, repeat-
+    /// class colours, inverted repeats in magenta) and their size. Image
+    /// exports write exactly this.
+    fn display_rgba(&self) -> Option<(Vec<u8>, usize, usize)> {
+        let plot = self.plot.as_ref()?;
         let coverage = self.coverage_shading();
         let lut = self.display_lut();
         let (pw, ph) = (plot.width as usize, plot.height as usize);
@@ -2168,6 +2166,16 @@ impl DottirApp {
                 }
             }
         }
+        Some((rgba, pw, ph))
+    }
+
+    fn ensure_texture(&mut self, ctx: &Context) {
+        if !self.texture_dirty && self.texture.is_some() {
+            return;
+        }
+        let Some((rgba, pw, ph)) = self.display_rgba() else {
+            return;
+        };
         let image = ColorImage::from_rgba_unmultiplied([pw, ph], &rgba);
         // The dotter-faithful render is always 1:1 (pixelmap pixel =
         // screen pixel). NEAREST → no GPU resampling, no sub-pixel
@@ -2176,6 +2184,7 @@ impl DottirApp {
         let handle = ctx.load_texture("dottir-pixelmap", image, TextureOptions::NEAREST);
         self.texture = Some(handle);
         self.texture_dirty = false;
+        let (coverage, lut) = (self.coverage_shading(), self.display_lut());
         self.axis_profile = self
             .shown_large_plot()
             .and_then(|lp| AxisProfile::of(lp, self.settings.large.classes, coverage, &lut));
@@ -6068,14 +6077,17 @@ fn save_svg(app: &mut DottirApp) {
         app.last_error = Some("nothing to save — compute a plot first".into());
         return;
     };
-    let lut = app.display_lut();
+    let shown = app.display_rgba();
     let metadata = app.export_metadata();
     let pick = rfd::FileDialog::new()
         .set_title("Save SVG")
         .add_filter("SVG", &["svg"])
         .save_file();
     if let Some(path) = pick {
-        let mapped: Vec<u8> = plot.pixels.iter().map(|&v| lut[v as usize]).collect();
+        let Some((rgba, _, _)) = shown else {
+            return;
+        };
+        let pixels = ExportPixels::of(&rgba);
         let recs_x: Vec<_> = app
             .query
             .as_ref()
@@ -6108,20 +6120,17 @@ fn save_svg(app: &mut DottirApp) {
                     .collect()
             })
             .unwrap_or_default();
-        match dottir_io::svg_export::write_svg(
-            &path,
-            plot.width,
-            plot.height,
-            &mapped,
-            50,
-            &recs_x,
-            &recs_y,
-            &metadata
-                .iter()
-                .map(|(k, v)| (*k, v.as_str()))
-                .collect::<Vec<_>>(),
-            false, // mapped is already in display space (LUT applied)
-        ) {
+        let meta: Vec<(&str, &str)> = metadata.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        let (w, h) = (plot.width, plot.height);
+        let written = match &pixels {
+            ExportPixels::Grey(g) => {
+                dottir_io::svg_export::write_svg(&path, w, h, g, 50, &recs_x, &recs_y, &meta, false)
+            }
+            ExportPixels::Rgb(c) => {
+                dottir_io::svg_export::write_rgb_svg(&path, w, h, c, 50, &recs_x, &recs_y, &meta)
+            }
+        };
+        match written {
             Ok(()) => {}
             Err(e) => app.last_error = Some(format!("SVG save failed: {e}")),
         }
@@ -6318,16 +6327,17 @@ fn save_png(app: &mut DottirApp) {
         app.last_error = Some("nothing to save — compute a plot first".into());
         return;
     };
-    let lut = app.display_lut();
+    let shown = app.display_rgba();
     let metadata = app.export_metadata();
     let pick = rfd::FileDialog::new()
         .set_title("Save PNG")
         .add_filter("PNG", &["png"])
         .save_file();
     if let Some(path) = pick {
-        // Apply the display LUT before saving so the on-disk image
-        // matches what's on screen.
-        let mapped: Vec<u8> = plot.pixels.iter().map(|&v| lut[v as usize]).collect();
+        let Some((rgba, _, _)) = shown else {
+            return;
+        };
+        let pixels = ExportPixels::of(&rgba);
         let recs_x: Vec<_> = app
             .query
             .as_ref()
@@ -6377,24 +6387,41 @@ fn save_png(app: &mut DottirApp) {
             .as_ref()
             .map(|s| s.len() as u32)
             .unwrap_or(plot.height);
-        match dottir_io::png_export::write_grayscale_png_with_axes(
-            &path,
-            plot.width,
-            plot.height,
-            qlen,
-            slen,
-            &mapped,
-            margin,
-            &recs_x,
-            &recs_y,
-            &metadata
-                .iter()
-                .map(|(k, v)| (*k, v.as_str()))
-                .collect::<Vec<_>>(),
-            false, // mapped is already in display space (LUT applied)
-        ) {
+        let meta: Vec<(&str, &str)> = metadata.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        let (w, h) = (plot.width, plot.height);
+        let written = match &pixels {
+            ExportPixels::Grey(g) => dottir_io::png_export::write_grayscale_png_with_axes(
+                &path, w, h, qlen, slen, g, margin, &recs_x, &recs_y, &meta, false,
+            ),
+            ExportPixels::Rgb(c) => dottir_io::png_export::write_rgb_png_with_axes(
+                &path, w, h, qlen, slen, c, margin, &recs_x, &recs_y, &meta,
+            ),
+        };
+        match written {
             Ok(()) => {}
             Err(e) => app.last_error = Some(format!("PNG save failed: {e}")),
+        }
+    }
+}
+
+/// Displayed pixels for an image export: greyscale when nothing on screen
+/// is coloured, else RGB.
+#[derive(Debug, PartialEq)]
+enum ExportPixels {
+    Grey(Vec<u8>),
+    Rgb(Vec<u8>),
+}
+
+impl ExportPixels {
+    fn of(rgba: &[u8]) -> Self {
+        if rgba.chunks_exact(4).all(|p| p[0] == p[1] && p[1] == p[2]) {
+            Self::Grey(rgba.chunks_exact(4).map(|p| p[0]).collect())
+        } else {
+            Self::Rgb(
+                rgba.chunks_exact(4)
+                    .flat_map(|p| [p[0], p[1], p[2]])
+                    .collect(),
+            )
         }
     }
 }
@@ -6403,6 +6430,17 @@ fn save_png(app: &mut DottirApp) {
 mod large_display_tests {
     use super::*;
     use dottir_core::large::coverage_code;
+
+    #[test]
+    fn export_pixels_keep_colour_only_when_shown() {
+        let grey = [7, 7, 7, 255, 200, 200, 200, 255];
+        assert_eq!(ExportPixels::of(&grey), ExportPixels::Grey(vec![7, 200]));
+        let colour = [7, 7, 7, 255, 220, 30, 220, 255];
+        assert_eq!(
+            ExportPixels::of(&colour),
+            ExportPixels::Rgb(vec![7, 7, 7, 220, 30, 220])
+        );
+    }
 
     #[test]
     fn display_lut_follows_coverage_sensitivity() {
