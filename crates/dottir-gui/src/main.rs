@@ -25,6 +25,7 @@ mod annotation_overlay;
 mod app;
 mod compute_worker;
 mod genome_view;
+mod record_sort;
 mod session;
 
 use std::path::PathBuf;
@@ -153,6 +154,19 @@ struct Cli {
     /// Genome self-comparison: keep all copies of repeats (`-P`).
     #[arg(long)]
     self_all_copies: bool,
+
+    /// Reorder and reverse-complement the subject's (`vertical`) or the
+    /// query's (`horizontal`) records along the other sequence after
+    /// loading (the D-GENIES contig sort; DNA, two inputs). Also in
+    /// *View → Sort records*.
+    #[arg(long, value_enum, value_name = "AXIS")]
+    sort_records: Option<SortArg>,
+}
+
+#[derive(Copy, Clone, Debug, clap::ValueEnum)]
+enum SortArg {
+    Vertical,
+    Horizontal,
 }
 
 #[derive(Copy, Clone, Debug, clap::ValueEnum)]
@@ -232,6 +246,10 @@ impl Cli {
             annot_query: self.annot_query.or_else(|| self.annot_self.clone()),
             annot_subject: self.annot_subject.or(self.annot_self),
             genome: None,
+            sort_records: self.sort_records.map(|a| match a {
+                SortArg::Vertical => dottir_core::genome::SortAxis::Vertical,
+                SortArg::Horizontal => dottir_core::genome::SortAxis::Horizontal,
+            }),
         }
     }
 }

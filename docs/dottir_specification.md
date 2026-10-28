@@ -337,6 +337,14 @@ mode.
 10. **Engine selection**: `--engine auto` selects genome mode when
     query × subject ≥ `--genome-threshold-cells` (default 10¹⁷) and an
     aligner is available.
+11. **Record sorting in dotplots**: the item 6 order MAY also be applied
+    to either input of an exact- or large-engine dotplot
+    (`--sort-records vertical|horizontal`), using the large engine's
+    whole-plot synteny chains as the alignments. It reorders and
+    reverse-complements the input before plotting and MUST NOT change the
+    scoring; positions and annotations MUST stay in source-record
+    coordinates, and the order MUST be recorded in the sidecar
+    (`[record_sort]`) and session.
 
 ## 5. Out of scope (explicitly excluded)
 

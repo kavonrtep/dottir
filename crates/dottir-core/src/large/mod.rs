@@ -1221,6 +1221,29 @@ fn depth_bins(
 }
 
 /// [`LargeSession::compute`].
+/// Plot size (pixels along the longer axis) used by [`whole_plot_chains`].
+pub const SORT_PLOT_PX: usize = 4000;
+
+/// Synteny chains of the whole plot, as used to sort records
+/// ([`crate::genome::sort_by_chains`]): `cfg` without a viewport, with
+/// chaining on (default [`ChainConfig`] unless set), at a zoom that fits
+/// the plot into [`SORT_PLOT_PX`] pixels.
+pub fn whole_plot_chains(
+    input: &LargeInput<'_>,
+    cfg: &LargeConfig,
+    ctl: &Control<'_>,
+) -> Result<Vec<Chain>, DottirError> {
+    let mut cfg = cfg.clone();
+    cfg.chain.get_or_insert_with(ChainConfig::default);
+    cfg.viewport = None;
+    cfg.coverage = false;
+    let longest = input.query.len().max(input.subject.map_or(0, <[u8]>::len));
+    cfg.zoom = cfg.zoom.max(longest.div_ceil(SORT_PLOT_PX).max(1) as u32);
+    Ok(LargeSession::prepare(input, &cfg, ctl)?
+        .compute(&cfg, ctl)?
+        .chains)
+}
+
 pub fn compute_large_dotplot(
     input: &LargeInput<'_>,
     cfg: &LargeConfig,

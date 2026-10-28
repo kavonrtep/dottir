@@ -9,7 +9,9 @@
 //! * [`order`] — query record sorting and orientation (D-GENIES);
 //! * [`layout`] — record order and orientation → axis coordinates;
 //! * [`arrange`] — filters + sorting + layouts for one plot;
-//! * [`raster`] — order-independent rasterisation.
+//! * [`raster`] — order-independent rasterisation;
+//! * [`records`] — the same sort for dotplot records, from large-engine
+//!   chains.
 //!
 //! Filters, sorting and the small-record mix blocks follow D-GENIES
 //! (Cabanettes & Klopp 2018, `dgenies/lib/paf.py`, GPL-3.0).
@@ -24,6 +26,7 @@ pub mod filter;
 pub mod layout;
 pub mod order;
 pub mod raster;
+pub mod records;
 
 pub use alignment::{Alignment, GenomeRecord};
 pub use arrange::{arrange, Arranged};
@@ -31,3 +34,4 @@ pub use filter::FilterConfig;
 pub use layout::{AxisLayout, AxisSegment};
 pub use order::{sort_query, QueryOrder};
 pub use raster::{rasterize, GenomeRaster, RasterConfig};
+pub use records::{sort_by_chains, InputRecord, SortAxis};

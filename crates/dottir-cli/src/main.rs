@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 
+use dottir_core::genome::SortAxis;
 use dottir_core::{
     compute_dotplot, pick_auto_zoom, snap_zoom_to_period_divisor, BlastMode, PlotConfig,
     ScoreMatrix, Strand, Triangle, PIXELMAP_FORMAT_VERSION,
@@ -268,6 +269,26 @@ fn run_batch(args: BatchArgs) -> Result<()> {
             .with_context(|| format!("reading subject {}", subject_path.display()))?;
         report_input("subject", &s);
         s
+    };
+    let (query_input, subject_input, record_sort) = match args.large.sort_records {
+        None => (query_input, subject_input, None),
+        Some(axis) => {
+            if is_self_comparison {
+                anyhow::bail!("--sort-records needs two inputs");
+            }
+            if mode != BlastMode::Blastn {
+                anyhow::bail!("--sort-records needs DNA (blastn) inputs");
+            }
+            let (q, s, info) = large_batch::sort_records(
+                &args.large,
+                axis.axis(),
+                &matrix,
+                query_input,
+                subject_input,
+            )
+            .context("sorting records")?;
+            (q, s, Some(info))
+        }
     };
     let query = query_input.sequence.clone();
     let subject = subject_input.sequence.clone();
@@ -622,6 +643,15 @@ fn run_batch(args: BatchArgs) -> Result<()> {
             },
             large: large_info.clone(),
             genome: None,
+            record_sort: record_sort.map(|r| dottir_io::params::RecordSortInfo {
+                axis: match r.axis {
+                    SortAxis::Vertical => "vertical",
+                    SortAxis::Horizontal => "horizontal",
+                }
+                .to_string(),
+                chains: r.chains,
+                order: r.order,
+            }),
         };
         std::fs::write(&sidecar_path, sidecar.to_toml()?)?;
         tracing::info!("wrote sidecar {}", sidecar_path.display());

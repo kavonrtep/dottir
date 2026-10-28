@@ -18,6 +18,7 @@ use egui::{
 };
 
 use crate::genome_view::{GenomeAction, GenomeInputs, GenomeLoad, GenomeView};
+use dottir_core::genome::SortAxis;
 
 /// Startup-time configuration assembled from CLI args, applied once
 /// by [`DottirApp::new`].
@@ -39,6 +40,8 @@ pub struct StartupConfig {
     pub annot_subject: Option<PathBuf>,
     /// Open a genome comparison (ADR 0008) instead of a dotplot.
     pub genome: Option<GenomeInputs>,
+    /// Sort one axis's records once the sequences are loaded.
+    pub sort_records: Option<SortAxis>,
 }
 
 impl Default for StartupConfig {
@@ -57,6 +60,7 @@ impl Default for StartupConfig {
             annot_query: None,
             annot_subject: None,
             genome: None,
+            sort_records: None,
         }
     }
 }
@@ -622,6 +626,15 @@ pub struct DottirApp {
     genome_pending: Option<crate::session::SessionGenome>,
     /// Keep showing the dotplot when that load finishes.
     genome_reopen_dotplot: bool,
+    /// Record sorting in progress.
+    record_sort_job: Option<crate::record_sort::SortJob>,
+    /// Sorts still to run (a session being restored).
+    record_sort_queue: std::collections::VecDeque<SortAxis>,
+    /// Sorts applied to the current sequences, in order.
+    record_sorts: Vec<SortAxis>,
+    /// The sequences before sorting, for *File order*.
+    unsorted_query: Option<Sequence>,
+    unsorted_subject: Option<Sequence>,
 }
 
 /// Maximum number of history entries kept around for Back. Older
@@ -779,6 +792,11 @@ impl DottirApp {
             genome_dialog: None,
             genome_pending: None,
             genome_reopen_dotplot: false,
+            record_sort_job: None,
+            record_sort_queue: std::collections::VecDeque::new(),
+            record_sorts: Vec::new(),
+            unsorted_query: None,
+            unsorted_subject: None,
         };
 
         // Pre-load any sequences supplied on the command line. Errors
@@ -810,6 +828,7 @@ impl DottirApp {
         if let Some(inputs) = startup.genome {
             app.start_genome_load(&cc.egui_ctx, inputs);
         }
+        app.record_sort_queue.extend(startup.sort_records);
         app
     }
 
@@ -876,6 +895,7 @@ impl DottirApp {
                 self.query_annot = None;
                 self.subject_annot = None;
                 self.settings.self_comparison = same;
+                self.forget_record_sorts();
                 self.history.clear();
                 self.last_error = None;
                 let detected = self.query.as_ref().map(Sequence::detect_alphabet);
@@ -917,6 +937,7 @@ impl DottirApp {
                         self.subject_annot = None;
                     }
                 }
+                self.forget_record_sorts();
                 self.last_error = None;
                 if let Some(set) = embedded {
                     self.set_annotation(role, set);
@@ -926,6 +947,212 @@ impl DottirApp {
             Err(e) => {
                 self.last_error = Some(format!("failed to load {}: {e}", path.display()));
             }
+        }
+    }
+
+    fn forget_record_sorts(&mut self) {
+        self.record_sorts.clear();
+        self.unsorted_query = None;
+        self.unsorted_subject = None;
+        if let Some(job) = self.record_sort_job.take() {
+            job.cancel();
+        }
+    }
+
+    /// Why records cannot be sorted now, if they cannot.
+    fn record_sort_blocker(&self) -> Option<&'static str> {
+        if self.query.is_none() || self.subject.is_none() {
+            Some("load two sequences first")
+        } else if self.settings.self_comparison {
+            Some("needs two different sequences")
+        } else if self.settings.mode != BlastMode::Blastn {
+            Some("DNA (BLASTN) only")
+        } else if self.record_sort_job.is_some() {
+            Some("sorting…")
+        } else {
+            None
+        }
+    }
+
+    /// Order and orient one axis's records along the other (D-GENIES, from
+    /// whole-plot large-engine chains), in the background.
+    fn start_record_sort(&mut self, ctx: &Context, axis: SortAxis) {
+        if let Some(why) = self.record_sort_blocker() {
+            self.last_error = Some(format!("sort records: {why}"));
+            return;
+        }
+        let Some(source) = self.large_source() else {
+            return;
+        };
+        let ls = &self.settings.large;
+        let seed = match SpacedSeed::parse(&ls.seed_pattern) {
+            Ok(s) => s,
+            Err(e) => {
+                self.last_error = Some(format!("seed pattern: {e}"));
+                return;
+            }
+        };
+        let config = LargeConfig {
+            matrix: ScoreMatrix::dna_identity(),
+            window_size: self.settings.window_size,
+            memory_limit_bytes: ls.memory_limit_bytes,
+            seed,
+            two_hit_dist: ls.two_hit_dist,
+            max_occ: ls.max_occ,
+            sample: ls.seed_sample,
+            depth_sample: ls.depth_sample,
+            depth: ls.depth_method(),
+            classes: ls.thresholds,
+            chain: Some(ChainConfig::default()),
+            ..LargeConfig::default()
+        };
+        let ctx = ctx.clone();
+        self.record_sort_job = Some(crate::record_sort::SortJob::start(
+            source,
+            config,
+            axis,
+            move || ctx.request_repaint(),
+        ));
+    }
+
+    fn poll_record_sort(&mut self, ctx: &Context) {
+        let Some(result) = self.record_sort_job.as_ref().and_then(|j| j.poll()) else {
+            if self.record_sort_job.is_none() && self.record_sort_blocker().is_none() {
+                if let Some(axis) = self.record_sort_queue.pop_front() {
+                    self.start_record_sort(ctx, axis);
+                }
+            }
+            return;
+        };
+        let job = self.record_sort_job.take().expect("polled above");
+        match result {
+            Ok(chains) => self.apply_record_sort(job.axis, &chains),
+            Err(e) => {
+                self.record_sort_queue.clear();
+                if !e.to_lowercase().contains("cancel") {
+                    self.last_error = Some(format!("sort records: {e}"));
+                }
+            }
+        }
+    }
+
+    fn apply_record_sort(&mut self, axis: SortAxis, chains: &[dottir_core::large::Chain]) {
+        let (Some(q), Some(s)) = (&self.query, &self.subject) else {
+            return;
+        };
+        let o = crate::record_sort::order(chains, q, s, axis);
+        let order: Vec<usize> = o.order.iter().map(|&r| r as usize).collect();
+        let (target, unsorted, role) = match axis {
+            SortAxis::Vertical => (
+                &mut self.subject,
+                &mut self.unsorted_subject,
+                SeqRole::Subject,
+            ),
+            SortAxis::Horizontal => (&mut self.query, &mut self.unsorted_query, SeqRole::Query),
+        };
+        let Some(seq) = target.take() else {
+            return;
+        };
+        let sorted = seq.reordered(&order, &o.flips);
+        unsorted.get_or_insert(seq);
+        *target = Some(sorted);
+        tracing::info!(
+            "sorted {} records from {} chains: {} reversed, {} without chains",
+            order.len(),
+            chains.len(),
+            o.flips.iter().filter(|&&f| f).count(),
+            o.placements.iter().filter(|p| p.is_none()).count()
+        );
+        self.record_sorts.push(axis);
+        self.rebind_annotation(role);
+        self.history.clear();
+        self.sequences_changed(DetectedAlphabet::Dna);
+    }
+
+    /// Back to the records' file order.
+    fn restore_record_order(&mut self) {
+        let mut changed = false;
+        if let Some(q) = self.unsorted_query.take() {
+            self.query = Some(q);
+            self.rebind_annotation(SeqRole::Query);
+            changed = true;
+        }
+        if let Some(s) = self.unsorted_subject.take() {
+            self.subject = Some(s);
+            self.rebind_annotation(SeqRole::Subject);
+            changed = true;
+        }
+        self.record_sorts.clear();
+        if changed {
+            self.history.clear();
+            self.sequences_changed(DetectedAlphabet::Dna);
+        }
+    }
+
+    /// Re-bind an axis's annotation after its sequence changed order.
+    fn rebind_annotation(&mut self, role: SeqRole) {
+        let (annot, seq) = match role {
+            SeqRole::Query => (&mut self.query_annot, &self.query),
+            SeqRole::Subject => (&mut self.subject_annot, &self.subject),
+        };
+        if let (Some(a), Some(seq)) = (annot.take(), seq) {
+            *annot = Some(a.rebind(seq));
+        }
+    }
+
+    fn draw_record_sort_window(&mut self, ctx: &Context) {
+        let Some(job) = &self.record_sort_job else {
+            return;
+        };
+        let (frac, elapsed) = job.progress();
+        egui::Window::new("Sorting records")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+            .show(ctx, |ui| {
+                ui.label("Synteny chains of the whole plot (large engine)…");
+                ui.add(egui::ProgressBar::new(frac).show_percentage());
+                ui.label(format!("{:.0} s", elapsed.as_secs_f32()));
+                if ui.button("Cancel").clicked() {
+                    job.cancel();
+                }
+            });
+        ctx.request_repaint_after(std::time::Duration::from_millis(500));
+    }
+
+    fn record_sort_menu(&mut self, ui: &mut egui::Ui) {
+        let blocker = self.record_sort_blocker();
+        let ctx = ui.ctx().clone();
+        for (axis, label) in [
+            (SortAxis::Vertical, "Subject (vertical) along query"),
+            (SortAxis::Horizontal, "Query (horizontal) along subject"),
+        ] {
+            let r = ui
+                .add_enabled(blocker.is_none(), egui::Button::new(label))
+                .on_hover_text(
+                    "Order and reverse-complement records to follow the other \
+                     sequence (the D-GENIES contig sort), from the large \
+                     engine's synteny chains of the whole plot",
+                );
+            let r = match blocker {
+                Some(why) => r.on_disabled_hover_text(why),
+                None => r,
+            };
+            if r.clicked() {
+                ui.close_menu();
+                self.start_record_sort(&ctx, axis);
+            }
+        }
+        let sorted = self.unsorted_query.is_some() || self.unsorted_subject.is_some();
+        if ui
+            .add_enabled(
+                sorted && self.record_sort_job.is_none(),
+                egui::Button::new("File order"),
+            )
+            .clicked()
+        {
+            ui.close_menu();
+            self.restore_record_order();
         }
     }
 
@@ -2002,7 +2229,9 @@ impl eframe::App for DottirApp {
         // panel reads `self.plot`. Stale results are discarded inside.
         self.poll_compute_results();
         self.poll_genome_load();
+        self.poll_record_sort(ctx);
         self.draw_genome_windows(ctx);
+        self.draw_record_sort_window(ctx);
         if self.genome_active && self.genome.is_some() {
             self.update_genome(ctx);
             return;
@@ -2607,6 +2836,7 @@ impl DottirApp {
                         ui.close_menu();
                         self.genome_active = true;
                     }
+                    ui.menu_button("Sort records", |ui| self.record_sort_menu(ui));
                     if ui.button("Fit (reset to canonical zoom)").clicked() {
                         self.action_fit();
                     }
@@ -5864,15 +6094,23 @@ fn save_session(app: &mut DottirApp) {
     };
     // A genome drill-down's regions are not files of their own; the
     // genome section reopens the comparison instead.
-    let file = |s: &Option<Sequence>| {
-        s.as_ref()
-            .filter(|s| s.records.iter().all(|r| r.origin.is_none()))
+    // Sorted sequences are saved as their files plus the sorts to redo.
+    let file = |s: Option<&Sequence>| {
+        s.filter(|s| s.records.iter().all(|r| r.origin.is_none()))
             .and_then(|s| s.source_path.clone())
     };
     let session = Session {
         version: SESSION_VERSION,
-        query: file(&app.query),
-        subject: file(&app.subject),
+        query: file(app.unsorted_query.as_ref().or(app.query.as_ref())),
+        subject: file(app.unsorted_subject.as_ref().or(app.subject.as_ref())),
+        sorted_records: app
+            .record_sorts
+            .iter()
+            .map(|a| match a {
+                SortAxis::Vertical => "vertical".to_string(),
+                SortAxis::Horizontal => "horizontal".to_string(),
+            })
+            .collect(),
         plot: SessionPlot {
             mode: codec::mode_to_str(app.settings.mode).to_string(),
             matrix_name: app.settings.matrix_name.clone(),
@@ -6014,6 +6252,15 @@ fn open_session(app: &mut DottirApp, ctx: &Context) {
     app.light_theme = s.view.light_theme;
     app.align_dock_visible = s.view.align_dock_visible;
     app.settings.align_window_size = s.view.align_window_size.clamp(20, 400);
+    app.record_sort_queue = s
+        .sorted_records
+        .iter()
+        .filter_map(|a| match a.as_str() {
+            "vertical" => Some(SortAxis::Vertical),
+            "horizontal" => Some(SortAxis::Horizontal),
+            _ => None,
+        })
+        .collect();
     app.genome_active = false;
     if let Some(g) = s.genome {
         let inputs = g.inputs.clone();

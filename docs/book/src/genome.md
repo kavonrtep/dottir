@@ -104,6 +104,10 @@ position of its alignments there. A record is reverse-complemented when its
 long alignments run against the reference. Records without alignments go
 last. Reversed records are labelled with a trailing `-`.
 
+The same sort is available for ordinary dotplots of multi-record FASTA
+files, with either input sorted: see
+[Sorting records](./large.md#sorting-records).
+
 | Flag | Writes |
 |------|--------|
 | `--assoc-out FILE.tsv` | per record in plot order: best reference record, strand, aligned extents (D-GENIES columns) |

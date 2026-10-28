@@ -2,7 +2,6 @@
 //! soft-masking and repeat annotations, chain export as PAF, and depth
 //! tracks as bedGraph.
 
-use std::collections::BTreeMap;
 use std::io::{BufWriter, Write};
 use std::path::Path;
 
@@ -33,11 +32,7 @@ pub fn annotation_floor(
     types: &[String],
     value: u16,
 ) -> (Vec<u16>, usize) {
-    let by_id: BTreeMap<&str, std::ops::Range<usize>> = seq
-        .records
-        .iter()
-        .map(|r| (r.id.as_str(), r.range.clone()))
-        .collect();
+    let locator = seq.feature_locator();
     let mut floor = vec![0u16; seq.len()];
     let mut skipped = 0;
     for f in &annots.features {
@@ -48,13 +43,13 @@ pub fn annotation_floor(
         {
             continue;
         }
-        let Some(rec) = by_id.get(f.record.as_str()) else {
+        let at = locator.locate(&f.record, f.range.clone());
+        if at.is_empty() {
             skipped += 1;
-            continue;
-        };
-        let lo = (rec.start + f.range.start).min(rec.end);
-        let hi = (rec.start + f.range.end).min(rec.end);
-        floor[lo..hi].fill(value);
+        }
+        for r in at {
+            floor[r].fill(value);
+        }
     }
     (floor, skipped)
 }

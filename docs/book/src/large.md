@@ -159,6 +159,38 @@ side chains along small indels of a block while keeping duplicated blocks
 elsewhere. For base-level alignments,
 run minimap2 and load its PAF.
 
+## Sorting records
+
+Contigs, scaffolds or BAC clones in file order make a scattered plot.
+`--sort-records vertical` reorders the second input's records along the
+first, and reverse-complements those that run against it, so the plot
+becomes one diagonal per reference record; `horizontal` sorts the first
+input along the second.
+
+```sh
+dottir batch chromosome.fa contigs.fa --sort-records vertical -o sorted.png
+```
+
+The rule is the D-GENIES contig sort used in
+[genome mode](./genome.md#sorting-and-exports), with the large engine's
+synteny chains of the whole plot standing in for alignments (one extra
+large-engine pass over the inputs, also when the exact engine draws the
+plot). Records without chains go last. It works for both engines, DNA
+only, with two inputs.
+
+Only the input order changes, not the scores. Coordinates in the status
+bar, the alignment view and annotation overlays stay in the original
+records (`ctg12:1,234 (−)` for a reverse-complemented record). The new
+order, with reversed records marked `-`, is in the sidecar's
+`[record_sort]` section.
+
+In the GUI: *View → Sort records*, or `dottir-gui A.fa B.fa --sort-records
+vertical`; *File order* undoes it, and sessions redo it on opening.
+
+On the synthetic contig corpus (42 contigs from a 10 Mb genome, 13
+reversed, plus 4 unrelated) every contig is placed on the right
+chromosome, in the right order and orientation; sorting took 9 s.
+
 ## Parameters
 
 | Flag | Default | Effect |

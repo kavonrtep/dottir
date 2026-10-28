@@ -512,6 +512,7 @@ pub fn run(args: &BatchArgs) -> Result<()> {
                 timestamp_utc: crate::now_iso_utc(),
             },
             large: None,
+            record_sort: None,
             genome: Some(GenomeParamsInfo {
                 format_version: GENOME_FORMAT_VERSION,
                 source: if source.aligner.is_some() {

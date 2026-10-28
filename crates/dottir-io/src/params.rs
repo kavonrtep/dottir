@@ -32,6 +32,20 @@ pub struct ParamsSidecar {
     /// horizontal (reference) axis, `subject` the vertical one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub genome: Option<GenomeParamsInfo>,
+    /// Present when `--sort-records` reordered one input's records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record_sort: Option<RecordSortInfo>,
+}
+
+/// How one input's records were reordered before plotting (D-GENIES
+/// order from large-engine chains).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RecordSortInfo {
+    /// "vertical" (subject records) or "horizontal" (query records).
+    pub axis: String,
+    pub chains: usize,
+    /// Record names in plot order; reverse-complemented ones end in `-`.
+    pub order: Vec<String>,
 }
 
 /// Genome-mode parameters and statistics (spec §4.7.9).
@@ -248,6 +262,7 @@ mod tests {
             },
             large: None,
             genome: None,
+            record_sort: None,
         };
         let toml_text = s.to_toml().unwrap();
         assert!(!toml_text.contains("[large]"));

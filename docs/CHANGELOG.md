@@ -33,6 +33,14 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     drill-down of the view (or a record pair) into the large / exact
     dotplot, with positions reported in the original records; sessions
     store the comparison.
+* **Record sorting for dotplots** (spec §4.7.11): `--sort-records
+  vertical|horizontal` in `dottir batch` and `dottir-gui`, *View → Sort
+  records* (with *File order* to undo) — the D-GENIES contig order and
+  orientation from the large engine's synteny chains, for either input
+  and either engine. Coordinates and GFF3/BED overlays stay in source
+  records; the order is recorded in the sidecar (`[record_sort]`) and in
+  sessions. Annotation overlays now also follow genome drill-down
+  regions.
 * **Large-sequence mode** (ADR 0007, spec §4.6): a seed-based engine for DNA
   comparisons at chromosome/genome scale (tested to 100 Mb × 100 Mb,
   multi-record).

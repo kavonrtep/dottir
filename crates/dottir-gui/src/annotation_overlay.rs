@@ -74,32 +74,17 @@ impl AxisAnnot {
     /// Bind a parsed set to `seq`, choosing a sensible default color-by key
     /// and building the initial palette.
     pub fn new(set: AnnotSet, seq: &Sequence) -> Self {
-        // record id -> buffer start. Last span wins on duplicate ids (rare);
-        // duplicate FASTA ids are already ambiguous upstream.
-        let mut starts: BTreeMap<&str, &std::ops::Range<usize>> = BTreeMap::new();
-        for rec in &seq.records {
-            starts.insert(rec.id.as_str(), &rec.range);
-        }
-
+        // Through region origins, so reordered, reverse-complemented
+        // and drill-down records keep their features.
+        let locator = seq.feature_locator();
         let mut bound = Vec::new();
         let mut skipped = 0usize;
         for (i, f) in set.features.iter().enumerate() {
-            let Some(span) = starts.get(f.record.as_str()) else {
+            let at = locator.locate(&f.record, f.range.clone());
+            if at.is_empty() {
                 skipped += 1;
-                continue;
-            };
-            let rec_len = span.end - span.start;
-            // Clamp to the record; drop features starting past its end.
-            let lo = f.range.start.min(rec_len);
-            let hi = f.range.end.min(rec_len);
-            if hi <= lo {
-                skipped += 1;
-                continue;
             }
-            bound.push(BoundFeature {
-                range: (span.start + lo)..(span.start + hi),
-                src: i,
-            });
+            bound.extend(at.into_iter().map(|range| BoundFeature { range, src: i }));
         }
 
         let color_by = default_color_by(&set);
@@ -114,6 +99,17 @@ impl AxisAnnot {
         };
         ax.rebuild_palette();
         ax
+    }
+
+    /// Bind the same set to a reordered `seq`, keeping colours and
+    /// hidden values.
+    pub fn rebind(self, seq: &Sequence) -> Self {
+        let mut a = AxisAnnot::new(self.set, seq);
+        a.color_by = self.color_by;
+        a.palette = self.palette;
+        a.hidden = self.hidden;
+        a.bed_color = self.bed_color;
+        a
     }
 
     pub fn is_bed(&self) -> bool {

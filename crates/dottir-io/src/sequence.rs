@@ -27,6 +27,43 @@ pub struct RecordSpan {
     pub origin: Option<RegionOrigin>,
 }
 
+/// See [`Sequence::feature_locator`].
+pub struct FeatureLocator<'a> {
+    by_name: std::collections::BTreeMap<&'a str, Vec<&'a RecordSpan>>,
+}
+
+impl FeatureLocator<'_> {
+    /// Concatenated-buffer ranges holding `range` (0-based, end-exclusive)
+    /// of record `name`, clipped to what the sequence contains; empty when
+    /// none of it is present.
+    pub fn locate(&self, name: &str, range: std::ops::Range<usize>) -> Vec<std::ops::Range<usize>> {
+        let Some(spans) = self.by_name.get(name) else {
+            return Vec::new();
+        };
+        spans
+            .iter()
+            .filter_map(|r| {
+                let (lo, hi) = match &r.origin {
+                    None => (range.start.min(r.len()), range.end.min(r.len())),
+                    Some(o) => {
+                        let a = (range.start as u64).max(o.range.start);
+                        let b = (range.end as u64).min(o.range.end);
+                        if a >= b {
+                            return None;
+                        }
+                        if o.reverse {
+                            ((o.range.end - b) as usize, (o.range.end - a) as usize)
+                        } else {
+                            ((a - o.range.start) as usize, (b - o.range.start) as usize)
+                        }
+                    }
+                };
+                (lo < hi).then(|| r.range.start + lo..r.range.start + hi)
+            })
+            .collect()
+    }
+}
+
 /// Where a region record came from: `range` (0-based, end-exclusive) of
 /// record `record`, reverse-complemented if `reverse`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -174,6 +211,87 @@ impl Sequence {
         &self.seq
     }
 
+    /// The records in `order` (record indices), reverse-complemented
+    /// where `flips[i]` is set for record `i` (DNA, IUPAC-aware). Soft
+    /// masking follows the bases. Reversed records, and records that were
+    /// already regions, carry a [`RegionOrigin`] so positions and
+    /// annotations still map to the source records.
+    pub fn reordered(&self, order: &[usize], flips: &[bool]) -> Sequence {
+        let mut seq = Vec::with_capacity(self.seq.len());
+        let mut records = Vec::with_capacity(order.len());
+        let mut soft_mask = Vec::new();
+        for &i in order {
+            let r = &self.records[i];
+            let flip = flips.get(i).copied().unwrap_or(false);
+            let at = seq.len();
+            let bases = &self.seq[r.range.clone()];
+            let first = self.soft_mask.partition_point(|m| m.end <= r.range.start);
+            let masks = self.soft_mask[first..]
+                .iter()
+                .take_while(|m| m.start < r.range.end)
+                .map(|m| {
+                    m.start.max(r.range.start) - r.range.start
+                        ..m.end.min(r.range.end) - r.range.start
+                });
+            if flip {
+                seq.extend(
+                    bases
+                        .iter()
+                        .rev()
+                        .map(|&b| crate::genome_export::complement(b)),
+                );
+                let len = r.len();
+                let mut m: Vec<_> = masks
+                    .map(|m| at + len - m.end..at + len - m.start)
+                    .collect();
+                m.reverse();
+                soft_mask.extend(m);
+            } else {
+                seq.extend_from_slice(bases);
+                soft_mask.extend(masks.map(|m| at + m.start..at + m.end));
+            }
+            let origin = match (&r.origin, flip) {
+                (Some(o), _) => Some(RegionOrigin {
+                    reverse: o.reverse ^ flip,
+                    ..o.clone()
+                }),
+                (None, true) => Some(RegionOrigin {
+                    record: r.id.clone(),
+                    range: 0..r.len() as u64,
+                    reverse: true,
+                }),
+                (None, false) => None,
+            };
+            records.push(RecordSpan {
+                id: r.id.clone(),
+                description: r.description.clone(),
+                range: at..seq.len(),
+                origin,
+            });
+        }
+        Sequence {
+            seq,
+            records,
+            soft_mask,
+            source_path: self.source_path.clone(),
+        }
+    }
+
+    /// Maps record-local feature coordinates (GFF3 / BED) into this
+    /// sequence, through region origins.
+    pub fn feature_locator(&self) -> FeatureLocator<'_> {
+        let mut by_name: std::collections::BTreeMap<&str, Vec<&RecordSpan>> =
+            std::collections::BTreeMap::new();
+        for r in &self.records {
+            let name = r
+                .origin
+                .as_ref()
+                .map_or(r.id.as_str(), |o| o.record.as_str());
+            by_name.entry(name).or_default().push(r);
+        }
+        FeatureLocator { by_name }
+    }
+
     /// Heuristically classify this sequence as DNA or protein.
     /// Same rule the original Dotter uses (`detectSeqType`): if the
     /// non-`ACGTNU` ratio across the first sampled residues exceeds a
@@ -243,6 +361,52 @@ pub fn detect_alphabet(seq: &[u8]) -> DetectedAlphabet {
         DetectedAlphabet::Protein
     } else {
         DetectedAlphabet::Dna
+    }
+}
+
+#[cfg(test)]
+mod reorder_tests {
+    use super::*;
+    use crate::fasta::parse_fasta;
+
+    #[test]
+    fn reordering_flips_bases_masks_and_feature_positions() {
+        let recs = parse_fasta(">a\nAAcgT\n>b\nGGGG\n").unwrap();
+        let s = Sequence::from_records(recs, None);
+        let r = s.reordered(&[1, 0], &[true, false]);
+        // b, then a reverse-complemented: AcgTT (mask on cg -> cg).
+        assert_eq!(r.seq, b"GGGGACGTT");
+        assert_eq!(r.soft_mask, vec![5..7]);
+        assert_eq!(r.records[1].id, "a");
+        let o = r.records[1].origin.as_ref().unwrap();
+        assert!(o.reverse && o.range == (0..5));
+        assert!(r.records[0].origin.is_none());
+        // a[3..5) ("gT") lies at buffer 4..6 after the flip.
+        let loc = r.feature_locator();
+        assert_eq!(loc.locate("a", 3..5), vec![4..6]);
+        assert_eq!(loc.locate("b", 1..2), vec![1..2]);
+        assert!(loc.locate("c", 0..1).is_empty());
+        // Flipping back restores the original.
+        let back = r.reordered(&[1, 0], &[false, true]);
+        assert_eq!(back.seq, s.seq);
+        assert_eq!(back.soft_mask, s.soft_mask);
+        assert!(!back.records[0].origin.as_ref().unwrap().reverse);
+    }
+
+    #[test]
+    fn locator_clips_features_to_regions() {
+        let s = Sequence::from_records(parse_fasta(">r\nACGTACGTAC\n").unwrap(), None);
+        let mut region = s.clone();
+        region.records[0].origin = Some(RegionOrigin {
+            record: "r".into(),
+            range: 100..110,
+            reverse: true,
+        });
+        let loc = region.feature_locator();
+        // Source 95..103 overlaps the region at 100..103, which is the
+        // region's last three bases when reversed.
+        assert_eq!(loc.locate("r", 95..103), vec![7..10]);
+        assert!(loc.locate("r", 0..50).is_empty());
     }
 }
 

@@ -6,11 +6,12 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use anyhow::{bail, Context, Result};
 use clap::ValueEnum;
 
+use dottir_core::genome::{sort_by_chains, InputRecord, SortAxis};
 use dottir_core::large::{
-    seed::DEFAULT_PATTERN, ChainConfig, ClassMask, ClassThresholds, Control, DepthMethod,
-    LargeConfig, LargeInput, LargeSession, RepeatClass, Shade, SpacedSeed,
+    seed::DEFAULT_PATTERN, whole_plot_chains, ChainConfig, ClassMask, ClassThresholds, Control,
+    DepthMethod, LargeConfig, LargeInput, LargeSession, RepeatClass, Shade, SpacedSeed,
 };
-use dottir_core::{BlastMode, DotPlot, PlotConfig};
+use dottir_core::{BlastMode, DotPlot, PlotConfig, ScoreMatrix};
 use dottir_io::params::LargeParamsInfo;
 use dottir_io::{AnnotSet, SeqInput, Sequence};
 
@@ -24,6 +25,23 @@ pub enum EngineArg {
     Genome,
     /// `large` when query × subject exceeds `--large-threshold-cells`.
     Auto,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+pub enum SortRecordsArg {
+    /// The second input's (vertical) records, along the first.
+    Vertical,
+    /// The first input's (horizontal) records, along the second.
+    Horizontal,
+}
+
+impl SortRecordsArg {
+    pub fn axis(self) -> SortAxis {
+        match self {
+            Self::Vertical => SortAxis::Vertical,
+            Self::Horizontal => SortAxis::Horizontal,
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -58,6 +76,14 @@ pub struct LargeArgs {
     /// Plot engine.
     #[arg(long, value_enum, default_value_t = EngineArg::Auto)]
     pub engine: EngineArg,
+
+    /// Reorder and reverse-complement one input's records along the other
+    /// before plotting (the D-GENIES contig sort, from the large engine's
+    /// synteny chains of the whole plot; DNA, two inputs, any engine).
+    /// Positions and annotations keep their original coordinates; the
+    /// order is recorded in the sidecar.
+    #[arg(long, value_enum, value_name = "AXIS")]
+    pub sort_records: Option<SortRecordsArg>,
 
     /// `--engine auto` switches to `large` above this many matrix cells.
     #[arg(long, value_name = "CELLS", default_value_t = 1e11)]
@@ -236,6 +262,153 @@ fn floor_for(
     Ok(dottir_io::large::merge_floors(soft, annot))
 }
 
+/// Engine settings from the CLI flags; plot geometry stays at defaults.
+fn engine_config(args: &LargeArgs, thresholds: ClassThresholds) -> Result<LargeConfig> {
+    Ok(LargeConfig {
+        memory_limit_bytes: args.large_memory_limit_bytes,
+        seed: SpacedSeed::parse(&args.seed_pattern)?,
+        two_hit_dist: args.two_hit_dist,
+        max_occ: args.max_occ,
+        sample: args.seed_sample.0,
+        depth_sample: args.depth_sample.0,
+        extend: args.extend,
+        depth: match args.depth {
+            DepthArg::Seed => DepthMethod::Seed,
+            DepthArg::Kmer => DepthMethod::Kmer { k: args.depth_k },
+            DepthArg::None => DepthMethod::None,
+        },
+        classes: thresholds,
+        ..LargeConfig::default()
+    })
+}
+
+fn chain_config(args: &LargeArgs) -> Result<ChainConfig> {
+    Ok(ChainConfig {
+        max_class: parse_class(&args.chain_max_class)?,
+        min_score: args.chain_min_score,
+        ..ChainConfig::default()
+    })
+}
+
+/// A per-base depth floor, if any.
+type Floor = Option<Vec<u16>>;
+
+/// Depth floors from soft-masking and repeat annotations.
+fn floors(
+    args: &LargeArgs,
+    query_input: &SeqInput,
+    subject_input: &SeqInput,
+    is_self: bool,
+    thresholds: &ClassThresholds,
+) -> Result<(Floor, Floor)> {
+    let q_floor = floor_for(
+        "query",
+        &query_input.sequence,
+        query_input.annotations.as_ref(),
+        args.repeat_annot.as_ref(),
+        args,
+        thresholds,
+    )?;
+    let s_floor = if is_self {
+        None
+    } else {
+        floor_for(
+            "subject",
+            &subject_input.sequence,
+            subject_input.annotations.as_ref(),
+            args.repeat_annot_subject.as_ref(),
+            args,
+            thresholds,
+        )?
+    };
+    Ok((q_floor, s_floor))
+}
+
+/// How `--sort-records` reordered an input.
+pub struct RecordSort {
+    pub axis: SortAxis,
+    pub chains: usize,
+    /// Record names in the new order, reversed ones with a trailing `-`.
+    pub order: Vec<String>,
+}
+
+/// `--sort-records`: order and orient the records of one input along the
+/// other as D-GENIES does, from the large engine's synteny chains of the
+/// whole plot. DNA pairwise comparisons only.
+pub fn sort_records(
+    args: &LargeArgs,
+    axis: SortAxis,
+    matrix: &ScoreMatrix,
+    query_input: SeqInput,
+    subject_input: SeqInput,
+) -> Result<(SeqInput, SeqInput, RecordSort)> {
+    let thresholds = parse_thresholds(&args.class_thresholds)?;
+    let lcfg = LargeConfig {
+        matrix: matrix.clone(),
+        chain: Some(chain_config(args)?),
+        ..engine_config(args, thresholds)?
+    };
+    let (q_floor, s_floor) = floors(args, &query_input, &subject_input, false, &thresholds)?;
+    let (query, subject) = (&query_input.sequence, &subject_input.sequence);
+    let (q_breaks, s_breaks) = (query.breaks(), subject.breaks());
+    let input = LargeInput {
+        query: query.bytes(),
+        q_breaks: &q_breaks,
+        q_floor: q_floor.as_deref(),
+        subject: Some(subject.bytes()),
+        s_breaks: &s_breaks,
+        s_floor: s_floor.as_deref(),
+    };
+    let started = std::time::Instant::now();
+    let chains = whole_plot_chains(&input, &lcfg, &Control::default())?;
+    let recs = |s: &Sequence| -> Vec<InputRecord> {
+        s.records
+            .iter()
+            .map(|r| InputRecord {
+                name: r.id.clone(),
+                range: r.range.clone(),
+            })
+            .collect()
+    };
+    let o = sort_by_chains(&chains, &recs(query), &recs(subject), axis);
+    let order: Vec<usize> = o.order.iter().map(|&r| r as usize).collect();
+    let which = match axis {
+        SortAxis::Vertical => "subject",
+        SortAxis::Horizontal => "query",
+    };
+    tracing::info!(
+        "sorted {} {which} records from {} chains in {:.1?}: {} reversed, {} without chains",
+        order.len(),
+        chains.len(),
+        started.elapsed(),
+        o.flips.iter().filter(|&&f| f).count(),
+        o.placements.iter().filter(|p| p.is_none()).count()
+    );
+    let (mut query_input, mut subject_input) = (query_input, subject_input);
+    let target = match axis {
+        SortAxis::Vertical => &mut subject_input,
+        SortAxis::Horizontal => &mut query_input,
+    };
+    let names = order
+        .iter()
+        .map(|&r| {
+            let id = &target.sequence.records[r].id;
+            if o.flips[r] {
+                format!("{id}-")
+            } else {
+                id.clone()
+            }
+        })
+        .collect();
+    target.sequence = target.sequence.reordered(&order, &o.flips);
+    let info = RecordSort {
+        axis,
+        chains: chains.len(),
+        order: names,
+    };
+    Ok((query_input, subject_input, info))
+}
+
 pub struct LargeOutcome {
     pub plot: DotPlot,
     pub info: LargeParamsInfo,
@@ -262,22 +435,13 @@ pub fn run(
         .map(|c| parse_class(c))
         .collect::<Result<_>>()?;
     let shown = hidden.iter().fold(ClassMask::ALL, |m, &c| m.with(c, false));
-    let seed = SpacedSeed::parse(&args.seed_pattern)?;
 
     let chain = args
         .chains_out
         .as_ref()
-        .map(|_| -> Result<ChainConfig> {
-            Ok(ChainConfig {
-                max_class: parse_class(&args.chain_max_class)?,
-                min_score: args.chain_min_score,
-                ..ChainConfig::default()
-            })
-        })
+        .map(|_| chain_config(args))
         .transpose()?;
-
     let lcfg = LargeConfig {
-        coverage: false,
         matrix: cfg.matrix.clone(),
         window_size: cfg.window_size,
         zoom: cfg.zoom,
@@ -286,43 +450,10 @@ pub fn run(
         self_comparison: is_self,
         triangle: cfg.triangle,
         disable_mirror: cfg.disable_mirror,
-        memory_limit_bytes: args.large_memory_limit_bytes,
-        seed,
-        two_hit_dist: args.two_hit_dist,
-        max_occ: args.max_occ,
-        sample: args.seed_sample.0,
-        depth_sample: args.depth_sample.0,
-        extend: args.extend,
-        depth: match args.depth {
-            DepthArg::Seed => DepthMethod::Seed,
-            DepthArg::Kmer => DepthMethod::Kmer { k: args.depth_k },
-            DepthArg::None => DepthMethod::None,
-        },
-        classes: thresholds,
         chain,
-        viewport: None,
+        ..engine_config(args, thresholds)?
     };
-
-    let q_floor = floor_for(
-        "query",
-        query,
-        query_input.annotations.as_ref(),
-        args.repeat_annot.as_ref(),
-        args,
-        &thresholds,
-    )?;
-    let s_floor = if is_self {
-        None
-    } else {
-        floor_for(
-            "subject",
-            subject,
-            subject_input.annotations.as_ref(),
-            args.repeat_annot_subject.as_ref(),
-            args,
-            &thresholds,
-        )?
-    };
+    let (q_floor, s_floor) = floors(args, query_input, subject_input, is_self, &thresholds)?;
     let q_breaks = query.breaks();
     let s_breaks = subject.breaks();
     let input = LargeInput {

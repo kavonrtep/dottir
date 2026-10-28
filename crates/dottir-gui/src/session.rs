@@ -29,6 +29,10 @@ pub struct Session {
     /// Genome comparison (ADR 0008). Absent in older sessions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub genome: Option<SessionGenome>,
+    /// Record sorts applied after loading, in order: "vertical" (subject
+    /// records along the query) or "horizontal".
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sorted_records: Vec<String>,
 }
 
 /// A genome comparison and its view settings. The alignments are not
@@ -323,6 +327,7 @@ mod tests {
                 seed_sample: Some(0),
                 depth_sample: Some(4),
             }),
+            sorted_records: vec!["vertical".into()],
             genome: Some(SessionGenome {
                 inputs: crate::genome_view::GenomeInputs {
                     reference: PathBuf::from("/tmp/ref.fa.gz"),
@@ -352,6 +357,7 @@ mod tests {
         assert_eq!(back.plot.matrix_name, s.plot.matrix_name);
         assert_eq!(back.view.crosshair, s.view.crosshair);
         assert_eq!(back.genome, s.genome);
+        assert_eq!(back.sorted_records, s.sorted_records);
         assert_eq!(
             back.large.unwrap().shown_classes,
             s.large.unwrap().shown_classes
