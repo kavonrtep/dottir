@@ -75,6 +75,19 @@ impl Alignment {
         }
     }
 
+    /// The same alignment with query and target exchanged.
+    pub fn swapped(&self) -> Self {
+        Self {
+            q_rec: self.t_rec,
+            q_start: self.t_start,
+            q_end: self.t_end,
+            t_rec: self.q_rec,
+            t_start: self.q_start,
+            t_end: self.q_end,
+            ..self.clone()
+        }
+    }
+
     /// Target coordinate paired with `q_end`.
     pub fn t_at_q_end(&self) -> u64 {
         if self.reverse {

@@ -12,11 +12,11 @@ v0.6.x.
 
 | ID | Item | Status |
 |----|------|--------|
-| G0 | ADR, spec section, corpora | ☐ ADR proposed |
-| G1 | PAF reader, FASTA index, genome layout | ☐ |
-| G2 | Filters, ordering, rasterisation, CLI `--engine genome --paf` | ☐ |
+| G0 | ADR, spec section, corpora | ☑ Arabidopsis corpora (Col-CC, TAIR10.1, *A. lyrata*); 1–3 Gb pair still to add |
+| G1 | PAF reader, FASTA index, genome layout | ☑ |
+| G2 | Filters, ordering, rasterisation, CLI `--engine genome --paf` | ☑ PNG; SVG vector lines not done |
 | G3 | Aligner runner: detection, chunking, cache, provenance | ☐ |
-| G4 | Exports: association table, sorted / unaligned FASTA, filtered PAF | ☐ |
+| G4 | Exports: association table, sorted / unaligned FASTA, filtered PAF | ☑ |
 | G5 | GUI genome view and drill-down to large / exact | ☐ |
 | G6 | Docs, book chapter, conda recipe, release | ☐ |
 
@@ -56,6 +56,35 @@ crates/dottir-io/src/
 ├── faidx.rs      # .fai builder, region reader (plain, bgzip via .gzi)
 └── aligner.rs    # detection, version probe, chunked runs, cache
 ```
+
+Measured (8-thread laptop, i7-1165G7; `-x asm20` unless noted):
+
+| Comparison | minimap2 2.31 | mm2plus 1.3 | Records |
+|------------|---------------|-------------|---------|
+| Col-CC × *A. lyrata* | 37 s, 3.7 GB | 37 s, 3.2 GB | 21.6 k |
+| Col-CC × TAIR10.1 (`asm5`) | 28 s, 2.6 GB | 30 s, 3.0 GB | 5.2 k |
+| Col-CC self (`-D --dual=no`) | 50 s, 4.4 GB | 49 s, 4.7 GB | 11.5 k |
+| Col-CC self (`-D -P --dual=no`) | 54 s, 4.4 GB | — | 1.03 M (CEN180 all vs all) |
+| Col-CC × *A. lyrata* (`-c`) | 243 s, 7.3 GB | — | 19.4 k |
+
+mm2plus output differs slightly from minimap2 on the real pair (21,677 vs
+21,596 records); identical on the synthetic pairs. Drawing a PAF takes
+under 0.5 s and < 100 MB. The large engine on Col-CC self: 88 s, 2.7 GB.
+Sorting the synthetic fragmented assembly (46 contigs, 13 reversed, 4
+unplaced) recovers every contig's chromosome, strand and order.
+
+Deviations from the plan below:
+
+* There is no noodles PAF crate; PAF and `.fai` are hand-written.
+  Gzipped FASTA (bgzip included) is decompressed once into the cache.
+* Noise filter, sorting, orientation, mix blocks and the association
+  table follow the D-GENIES source (ADR 0008 §4–5), which differs from the
+  paper's summary assumed below. The noise filter is off by default.
+* "Unaligned" means no alignment at all (D-GENIES), not a share
+  threshold.
+* Axes: the first input is horizontal (reference, PAF target), the
+  second vertical (PAF query, the one sorted). A PAF made the other way
+  round is detected by its record names and swapped.
 
 ---
 

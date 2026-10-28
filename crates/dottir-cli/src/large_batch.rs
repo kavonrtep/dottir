@@ -20,6 +20,8 @@ pub enum EngineArg {
     Exact,
     /// Seed-based engine for megabase inputs (DNA only).
     Large,
+    /// Draw alignments from an external aligner or `--paf` (ADR 0008).
+    Genome,
     /// `large` when query × subject exceeds `--large-threshold-cells`.
     Auto,
 }
@@ -153,6 +155,7 @@ impl LargeArgs {
     pub fn use_large(&self, mode: BlastMode, qlen: usize, slen: usize) -> Result<bool> {
         match self.engine {
             EngineArg::Exact => Ok(false),
+            EngineArg::Genome => bail!("the genome engine does not compute a matrix"),
             EngineArg::Large if mode != BlastMode::Blastn => {
                 bail!("--engine large supports BLASTN (DNA) only")
             }

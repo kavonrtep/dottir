@@ -27,6 +27,7 @@ pub mod cache;
 pub mod dot_format;
 pub mod faidx;
 pub mod fasta;
+pub mod genome_export;
 pub mod input;
 pub mod large;
 pub mod paf;

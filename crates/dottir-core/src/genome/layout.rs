@@ -1,11 +1,14 @@
 //! Axis layout: which record sits where along an axis, in which
-//! orientation, and the "other" block of merged small records (D-GENIES).
+//! orientation, and which runs of small records are merged into "mix"
+//! blocks (as D-GENIES `Paf.parse_index`).
 
 use super::alignment::GenomeRecord;
 
-/// D-GENIES merges records shorter than this share of the assembly into
-/// one block at the end of the axis.
+/// Records shorter than this share of the assembly are small.
 pub const DEFAULT_SMALL_FRACTION: f64 = 0.002;
+/// A run of at least this many consecutive small records is merged into
+/// one mix block; shorter runs are shown as separate records.
+pub const MIN_MIX_RECORDS: usize = 5;
 
 /// One record placed on an axis.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -16,8 +19,8 @@ pub struct AxisSegment {
     pub len: u64,
     /// Drawn reverse-complemented (record end at `start`).
     pub reverse: bool,
-    /// Part of the merged "other" block.
-    pub small: bool,
+    /// Index into [`AxisLayout::mixes`] when part of a mix block.
+    pub mix: Option<u32>,
 }
 
 /// Records of one assembly laid end to end along an axis.
@@ -28,16 +31,15 @@ pub struct AxisLayout {
     /// Record index → index into `segments`.
     by_rec: Vec<u32>,
     pub total: u64,
-    /// Axis range of the merged small records, if any.
-    pub other: Option<std::ops::Range<u64>>,
+    /// Axis ranges of the mix blocks, in axis order.
+    pub mixes: Vec<std::ops::Range<u64>>,
 }
 
 impl AxisLayout {
     /// Lay out `records` in `order` (a permutation of record indices;
     /// `None` = file order), drawing records with `flips[rec]` reversed.
-    /// Records shorter than `small_fraction` of the total go last, in the
-    /// same relative order, as the "other" block — unless every record
-    /// is that short.
+    /// Runs of at least [`MIN_MIX_RECORDS`] consecutive records shorter
+    /// than `small_fraction` of the total become mix blocks.
     pub fn new(
         records: &[GenomeRecord],
         order: Option<&[u32]>,
@@ -48,32 +50,38 @@ impl AxisLayout {
         let order = order.unwrap_or(&identity);
         debug_assert_eq!(order.len(), records.len());
         let total: u64 = records.iter().map(|r| r.len).sum();
-        let cutoff = (total as f64 * small_fraction) as u64;
-        let is_small = |r: u32| records[r as usize].len < cutoff;
-        let merge = order.iter().any(|&r| !is_small(r));
-        let (big, small): (Vec<u32>, Vec<u32>) =
-            order.iter().partition(|&&r| !merge || !is_small(r));
+        let cutoff = total as f64 * small_fraction;
 
-        let mut segments = Vec::with_capacity(records.len());
+        let mut segments: Vec<AxisSegment> = Vec::with_capacity(records.len());
         let mut at = 0u64;
-        let mut other_start = None;
-        for (&rec, is_other) in big
-            .iter()
-            .map(|r| (r, false))
-            .chain(small.iter().map(|r| (r, true)))
-        {
-            if is_other && other_start.is_none() {
-                other_start = Some(at);
-            }
+        for &rec in order {
             let len = records[rec as usize].len;
             segments.push(AxisSegment {
                 rec,
                 start: at,
                 len,
                 reverse: flips.get(rec as usize).copied().unwrap_or(false),
-                small: is_other,
+                mix: None,
             });
             at += len;
+        }
+        let small = |s: &AxisSegment| (s.len as f64) < cutoff;
+        let mut mixes = Vec::new();
+        let mut i = 0;
+        while i < segments.len() {
+            if !small(&segments[i]) {
+                i += 1;
+                continue;
+            }
+            let j = i + segments[i..].iter().take_while(|s| small(s)).count();
+            if j - i >= MIN_MIX_RECORDS {
+                let m = mixes.len() as u32;
+                mixes.push(segments[i].start..segments[j - 1].start + segments[j - 1].len);
+                for s in &mut segments[i..j] {
+                    s.mix = Some(m);
+                }
+            }
+            i = j;
         }
         let mut by_rec = vec![0u32; records.len()];
         for (i, s) in segments.iter().enumerate() {
@@ -83,7 +91,7 @@ impl AxisLayout {
             segments,
             by_rec,
             total: at,
-            other: other_start.map(|s| s..at),
+            mixes,
         }
     }
 
@@ -133,7 +141,7 @@ mod tests {
         assert_eq!(l.to_axis(1, 10), 110);
         assert_eq!(l.locate(110).map(|(s, p)| (s.rec, p)), Some((1, 10)));
         assert_eq!(l.locate(180), None);
-        assert!(l.other.is_none());
+        assert!(l.mixes.is_empty());
     }
 
     #[test]
@@ -153,19 +161,23 @@ mod tests {
     }
 
     #[test]
-    fn small_records_merge_at_the_end() {
-        // 1 + 2 bp below 0.2 % of 10_003 bp; they follow the big records.
+    fn runs_of_five_small_records_become_mix_blocks_in_place() {
+        // Total 10_009; small = below 20 bp. Records 1..=5 form a run of
+        // five (merged); records 7..=8 a run of two (kept separate).
         let l = AxisLayout::new(
-            &recs(&[1, 5000, 2, 5000]),
+            &recs(&[5000, 1, 1, 1, 1, 1, 4000, 2, 2, 1000]),
             None,
             &[],
             DEFAULT_SMALL_FRACTION,
         );
-        let order: Vec<u32> = l.segments.iter().map(|s| s.rec).collect();
-        assert_eq!(order, vec![1, 3, 0, 2]);
-        assert_eq!(l.other, Some(10_000..10_003));
-        // All small: nothing is merged.
-        let l = AxisLayout::new(&recs(&[1, 1, 1]), None, &[], 0.5);
-        assert!(l.other.is_none());
+        assert_eq!(l.mixes, vec![5000..5005]);
+        let mixed: Vec<u32> = l
+            .segments
+            .iter()
+            .filter(|s| s.mix.is_some())
+            .map(|s| s.rec)
+            .collect();
+        assert_eq!(mixed, vec![1, 2, 3, 4, 5]);
+        assert_eq!(l.segment(6).start, 5005);
     }
 }

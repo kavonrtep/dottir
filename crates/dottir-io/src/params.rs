@@ -28,6 +28,35 @@ pub struct ParamsSidecar {
     /// Present when the seed-based large-sequence engine produced the plot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub large: Option<LargeParamsInfo>,
+    /// Present for genome-mode plots (ADR 0008). The `query` input is the
+    /// horizontal (reference) axis, `subject` the vertical one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub genome: Option<GenomeParamsInfo>,
+}
+
+/// Genome-mode parameters and statistics (spec §4.7.9).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GenomeParamsInfo {
+    pub format_version: u32,
+    /// `paf` or `aligner`.
+    pub source: String,
+    pub paf_path: Option<String>,
+    pub paf_sha256: Option<String>,
+    pub aligner: Option<String>,
+    pub aligner_version: Option<String>,
+    pub aligner_args: Option<Vec<String>>,
+    pub chunk_size: Option<u64>,
+    pub min_aln_len: u64,
+    pub min_identity: f64,
+    pub primary_only: bool,
+    pub remove_noise: bool,
+    /// Line length below which alignments were dropped as noise.
+    pub noise_threshold: Option<f64>,
+    pub sorted_query: bool,
+    pub alignments: usize,
+    pub alignments_drawn: usize,
+    pub bp_per_px: u64,
+    pub line_width: u32,
 }
 
 /// Large-mode parameters and run statistics (ADR 0007).
@@ -123,9 +152,15 @@ impl ParamsSidecar {
 
 /// Compute SHA-256 of a file as a lowercase hex string.
 pub fn sha256_file<P: AsRef<Path>>(path: P) -> Result<String> {
-    let bytes = std::fs::read(path.as_ref())
-        .with_context(|| format!("reading {}", path.as_ref().display()))?;
-    Ok(sha256_bytes(&bytes))
+    let path = path.as_ref();
+    let mut f = std::fs::File::open(path).with_context(|| format!("reading {}", path.display()))?;
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut f, &mut hasher).with_context(|| format!("reading {}", path.display()))?;
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect())
 }
 
 pub fn sha256_bytes(data: &[u8]) -> String {
@@ -212,6 +247,7 @@ mod tests {
                 timestamp_utc: "2026-05-16T00:00:00Z".into(),
             },
             large: None,
+            genome: None,
         };
         let toml_text = s.to_toml().unwrap();
         assert!(!toml_text.contains("[large]"));

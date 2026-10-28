@@ -322,11 +322,11 @@ mode.
 4. **Identity** is `1 − de:f` when present, else PAF column 10 / column 11,
    coloured in bins < 25 / 25–50 / 50–75 / > 75 % (D-GENIES).
 5. **Filters**: minimum length, minimum identity, primary only, and the
-   D-GENIES length-histogram noise filter. Filters are display-only in the
-   GUI.
-6. **Ordering**: query records MAY be sorted along the reference (record
-   with most aligned bp, length-weighted median position, majority strand);
-   ties MUST be broken by record name.
+   D-GENIES length-histogram noise filter (off by default; ADR 0008 §4).
+   Filters are display-only in the GUI.
+6. **Ordering**: query records MAY be sorted along the reference with the
+   D-GENIES gravity rule and oriented with its orientation rule (ADR 0008
+   §5); ties MUST be broken by record name.
 7. **Determinism**: the raster MUST be independent of PAF record order and
    of aligner thread count, given identical PAF content.
 8. **Memory**: sequences MUST be read by region through a FASTA index, not

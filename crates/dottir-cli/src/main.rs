@@ -10,6 +10,7 @@
 //! single self-contained file.
 
 mod find_peaks;
+mod genome_batch;
 mod large_batch;
 mod periodogram;
 
@@ -171,6 +172,9 @@ struct BatchArgs {
 
     #[command(flatten)]
     large: large_batch::LargeArgs,
+
+    #[command(flatten)]
+    genome: genome_batch::GenomeArgs,
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -237,6 +241,10 @@ fn main() -> Result<()> {
 }
 
 fn run_batch(args: BatchArgs) -> Result<()> {
+    // Genome mode never loads the sequences, so it branches off first.
+    if genome_batch::wanted(&args.large, &args.genome)? {
+        return genome_batch::run(&args);
+    }
     let mode = args.mode.to_core();
     let matrix = pick_matrix(args.matrix.as_deref(), mode)?;
 
@@ -613,6 +621,7 @@ fn run_batch(args: BatchArgs) -> Result<()> {
                 timestamp_utc: now_iso_utc(),
             },
             large: large_info.clone(),
+            genome: None,
         };
         std::fs::write(&sidecar_path, sidecar.to_toml()?)?;
         tracing::info!("wrote sidecar {}", sidecar_path.display());

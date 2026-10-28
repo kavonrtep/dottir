@@ -92,21 +92,33 @@ down, where large mode takes over.
      order-independent (max-merge / sums), so output does not depend on
      aligner thread count or PAF order.
    * Filters: minimum length, minimum identity, primary-only, and the
-     D-GENIES noise filter (alignments binned by length; bins below 1 %
-     of the most populated bin are hidden). Records shorter than 0.2 %
-     of the total length are merged into one grey "other" block.
+     D-GENIES noise filter, off by default as in D-GENIES: with more
+     than 1000 alignments, their line lengths (Euclidean, in plot bp) go
+     into n / 10 equal bins; lines shorter than the first bin at or after
+     the most populated one holding fewer than 1/50 of its count are
+     hidden. Runs of at least 5 consecutive records shorter than 0.2 % of
+     the assembly are merged into shaded "mix" blocks where they stand.
+   * These rules, the sorting below and the association table follow
+     the D-GENIES source (`dgenies/lib/paf.py`, GPL-3.0), not only the
+     paper, which simplifies them.
 
-5. **Assembly tools.** Query records can be sorted along the reference:
-   each is placed on the reference record holding most of its aligned bp,
-   at the length-weighted median of its aligned positions there, and
-   oriented by its majority strand; unmatched records go last. Exports:
-   association table (TSV), reordered / reoriented query FASTA,
-   unaligned records (FASTA), filtered PAF.
+5. **Assembly tools.** Query records can be sorted along the reference
+   (D-GENIES `Paf.sort`, on noise-filtered alignments): each alignment
+   weighs (1 + line length)²; a record goes to the reference record with
+   the largest total weight, at the weighted mean of its alignments'
+   reference midpoints there; unmatched records go last. A record is
+   reversed when the query midpoints of its long alignments (> 10 % of
+   the longest, ≥ 1 % of the shorter record) fall along the reference
+   (mean step direction ≤ −0.1), or, with one such alignment, when it is
+   on the `-` strand. Exports: association table (D-GENIES columns),
+   reordered / reoriented query FASTA, records without any alignment
+   (FASTA, both axes), filtered PAF.
 
 6. **Sequences are read by region, not loaded.** Genome mode needs only
    record names and lengths (`.fai`). Drill-down into large or exact mode
-   reads just the visible regions through a FASTA index (built on demand;
-   bgzip inputs via `.gzi`, plain gzip decompressed once into the cache).
+   reads just the visible regions through a FASTA index (samtools `.fai`,
+   built on demand; gzipped inputs, bgzip included, are decompressed once
+   into the cache instead of adding a BGZF reader).
    Two 3 Gb assemblies are never held in memory.
 
 7. **Provenance.** Exports (PNG tEXt, params sidecar) record

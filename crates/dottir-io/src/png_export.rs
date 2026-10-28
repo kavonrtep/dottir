@@ -90,6 +90,31 @@ pub fn write_grayscale_png<P: AsRef<Path>>(
     write_grayscale_png_raw(path, width, height, pixels, text_chunks)
 }
 
+/// Write an 8-bit RGB PNG (`pixels` = `width × height × 3` bytes).
+pub fn write_rgb_png<P: AsRef<Path>>(
+    path: P,
+    width: u32,
+    height: u32,
+    pixels: &[u8],
+    text_chunks: &[(&str, &str)],
+) -> Result<(), PngError> {
+    if pixels.len() != (width as usize) * (height as usize) * 3 {
+        return Err(PngError::DimensionMismatch {
+            width,
+            height,
+            len: pixels.len(),
+        });
+    }
+    let mut encoder = png::Encoder::new(BufWriter::new(File::create(path)?), width, height);
+    encoder.set_color(png::ColorType::Rgb);
+    encoder.set_depth(png::BitDepth::Eight);
+    for (k, v) in text_chunks {
+        encoder.add_text_chunk((*k).to_string(), (*v).to_string())?;
+    }
+    encoder.write_header()?.write_image_data(pixels)?;
+    Ok(())
+}
+
 fn write_grayscale_png_raw<P: AsRef<Path>>(
     path: P,
     width: u32,

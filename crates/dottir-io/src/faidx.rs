@@ -301,6 +301,17 @@ impl FastaIndex {
 
     /// Residues `range` of record `rec`, uppercased.
     pub fn fetch(&self, rec: usize, range: std::ops::Range<u64>) -> Result<Vec<u8>, FaidxError> {
+        let mut seq = self.fetch_raw(rec, range)?;
+        seq.make_ascii_uppercase();
+        Ok(seq)
+    }
+
+    /// Residues `range` of record `rec` as stored (case kept).
+    pub fn fetch_raw(
+        &self,
+        rec: usize,
+        range: std::ops::Range<u64>,
+    ) -> Result<Vec<u8>, FaidxError> {
         let e = &self.entries[rec];
         if range.start > range.end || range.end > e.len {
             return Err(FaidxError::Range {
@@ -320,7 +331,6 @@ impl FastaIndex {
         let mut raw = vec![0u8; (to - from) as usize];
         f.read_exact(&mut raw).map_err(io_err(&self.path))?;
         raw.retain(|b| !b.is_ascii_whitespace());
-        raw.make_ascii_uppercase();
         Ok(raw)
     }
 }
