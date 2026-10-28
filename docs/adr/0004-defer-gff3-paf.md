@@ -5,7 +5,7 @@
 * Deciders: petr
 * Supersedes: nothing; complements ADR 0003.
 * Superseded by: ADR 0005 (GFF3 loader; the MSRV blocker is resolved).
-  PAF remains deferred.
+  PAF remains deferred; ADR 0008 (genome mode) plans the PAF reader.
 
 ## Context
 
