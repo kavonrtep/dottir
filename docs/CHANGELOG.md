@@ -97,6 +97,9 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     where runs meet at chunk boundaries (coverage was double-counted there).
 * FASTA parsing records soft-masked (lowercase) runs
   (`FastaRecord::soft_masked`, `Sequence::soft_mask`).
+* **BLASTX in the GUI alignment view**: the query translated in its
+  best-scoring frame around the crosshair (`F1`–`F3`), instead of "not yet
+  supported".
 * **Genome mode: `--paf-min-len BP`** (GUI: *Skip alignments shorter
   than* in *Open genome comparison*) drops short alignments while the PAF
   is read — PAF files and aligner output — so huge `-P` PAFs of large
@@ -144,6 +147,10 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+* GUI in BLASTX mode treated a pixelmap column (one codon) as one base:
+  the crosshair, rectangle zoom, selections, auto zoom, record breaks,
+  annotation bands, HSP lines and axis labels were off by 3 on x. They now
+  use base positions with 3 bases per column at zoom 1.
 * GUI image exports after zooming in (rectangle zoom, wheel past the
   slice) labelled the slice's image as if it started at residue 0 and
   spanned the whole sequence; axes and record names now show the slice

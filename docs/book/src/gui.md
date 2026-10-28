@@ -163,6 +163,14 @@ annotations overlapping the crosshair residue for the query (`q:`) and
 subject (`s:`) — all of them when features nest — and frames the
 crosshair cell in each alignment row in the feature's color.
 
+In BLASTX mode the query row is the DNA translated around the crosshair,
+in whichever of the three reading frames (of the codons covering the
+crosshair base) scores best against the subject window; the row is
+labelled `F1`–`F3` (frame from the start of the sequence) and its end
+coordinates are in bases. The plot's x axis is in bases too, one column
+per codon: crosshair, rectangle zoom, selections, record breaks,
+annotations and HSPs all use base positions.
+
 ## Selections
 
 A right-button drag selects a rectangle; its menu offers:

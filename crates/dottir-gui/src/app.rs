@@ -1369,7 +1369,7 @@ impl DottirApp {
         let ppp = self.pixels_per_point as f64;
         let phys_w = (plot_w as f64).max(1.0) * ppp;
         let phys_h = (plot_h as f64).max(1.0) * ppp;
-        let zoom_q = (q.len() as f64 / phys_w).ceil() as u32;
+        let zoom_q = (q.len() as f64 / (phys_w * self.qx() as f64)).ceil() as u32;
         let zoom_s = (s.len() as f64 / phys_h).ceil() as u32;
         let base = zoom_q.max(zoom_s).max(1);
         Some(snap_zoom_to_period_divisor(
@@ -1792,6 +1792,16 @@ impl DottirApp {
         }
     }
 
+    /// Query residues per pixelmap column at zoom 1: BLASTX plots one
+    /// column per codon, so x positions are in bases but columns are 3.
+    fn qx(&self) -> usize {
+        if self.settings.mode == BlastMode::Blastx {
+            3
+        } else {
+            1
+        }
+    }
+
     /// Axis span of an image export: the first residue shown on each axis
     /// and the residues covered (the zoomed-in slice, or everything).
     fn export_axes(&self) -> ((u32, u32), u32, u32) {
@@ -1958,6 +1968,7 @@ impl DottirApp {
             return None;
         };
         let cur_zoom = plot.params.zoom.max(1) as f32;
+        let zoom_x = cur_zoom * self.qx() as f32;
         let ppp = self.pixels_per_point;
 
         // Screen → pixelmap-texel. Match the canvas's snap policy
@@ -1987,10 +1998,9 @@ impl DottirApp {
 
         // Pixelmap pixels → *absolute* residues (offset by the
         // current slice's start).
-        let sel_lo_x = cur_slice.q_range.start + (px_lo_x * cur_zoom).floor().max(0.0) as usize;
+        let sel_lo_x = cur_slice.q_range.start + (px_lo_x * zoom_x).floor().max(0.0) as usize;
         let sel_lo_y = cur_slice.s_range.start + (px_lo_y * cur_zoom).floor().max(0.0) as usize;
-        let sel_hi_x =
-            (cur_slice.q_range.start + (px_hi_x * cur_zoom).ceil() as usize).min(q.len());
+        let sel_hi_x = (cur_slice.q_range.start + (px_hi_x * zoom_x).ceil() as usize).min(q.len());
         let sel_hi_y =
             (cur_slice.s_range.start + (px_hi_y * cur_zoom).ceil() as usize).min(s.len());
         (sel_lo_x < sel_hi_x && sel_lo_y < sel_hi_y)
@@ -2022,7 +2032,8 @@ impl DottirApp {
         // Option C policy (one pixmap texel = one physical pixel).
         let phys_w = (plot_area.width() as f64).max(1.0) * (ppp as f64);
         let phys_h = (plot_area.height() as f64).max(1.0) * (ppp as f64);
-        let zoom_x = ((sel_w as f64) / phys_w).ceil() as u32;
+        let qx = self.qx();
+        let zoom_x = ((sel_w as f64) / (phys_w * qx as f64)).ceil() as u32;
         let zoom_y = ((sel_h as f64) / phys_h).ceil() as u32;
         let new_zoom = zoom_x.max(zoom_y).max(1);
 
@@ -2043,7 +2054,8 @@ impl DottirApp {
         // The user's view should land on the selection inside the
         // new slice's pixelmap coords:
         //   pixel = (residue − slice.start) / new_zoom
-        let new_off_x = ((sel_lo_x - new_slice.q_range.start) as f64 / new_zoom as f64) as f32;
+        let new_off_x =
+            ((sel_lo_x - new_slice.q_range.start) as f64 / (new_zoom as usize * qx) as f64) as f32;
         let new_off_y = ((sel_lo_y - new_slice.s_range.start) as f64 / new_zoom as f64) as f32;
 
         tracing::info!(
@@ -2808,6 +2820,7 @@ impl DottirApp {
             return;
         };
         let z = plot.params.zoom.max(1) as i64;
+        let zx = z * self.qx() as i64;
         let (q_off, s_off) = self
             .current_slice
             .as_ref()
@@ -2818,7 +2831,7 @@ impl DottirApp {
         // search radius then explores inward.
         let pw = plot.width as i64;
         let ph = plot.height as i64;
-        let cq_pix = ((cq_seq as i64 - q_off).max(0) / z).clamp(0, pw - 1);
+        let cq_pix = ((cq_seq as i64 - q_off).max(0) / zx).clamp(0, pw - 1);
         let cs_pix = ((cs_seq as i64 - s_off).max(0) / z).clamp(0, ph - 1);
         const RADIUS: i64 = 64;
         let stride = plot.width as usize;
@@ -2856,16 +2869,18 @@ impl DottirApp {
         // the slice origin added back in. The within-block refinement
         // below overrides this when we can actually score the
         // underlying window.
-        let mut q_residue = q_off + qp_best * z + z / 2;
+        let mut q_residue = q_off + qp_best * zx + zx / 2;
         let mut s_residue = s_off + sp_best * z + z / 2;
         // Fine step: walk every residue midpoint in the block,
         // compute the actual sliding-window score, pick the max.
         // Only do this when both sequences are loaded and we have a
         // score matrix — otherwise stick with the block centre.
-        if let (Some(qseq), Some(sseq), Some(matrix)) = (
+        // (Not for BLASTX, whose windows are over translated codons.)
+        if let (Some(qseq), Some(sseq), Some(matrix), false) = (
             self.query.as_ref(),
             self.subject.as_ref(),
             self.settings.build_matrix(),
+            self.settings.mode == BlastMode::Blastx,
         ) {
             let w = plot.params.window_size as i64;
             let half = w / 2;
@@ -2897,7 +2912,7 @@ impl DottirApp {
             .query
             .as_ref()
             .map(|s| s.len() as i64)
-            .unwrap_or(q_off + pw * z);
+            .unwrap_or(q_off + pw * zx);
         let slen_cap = self
             .subject
             .as_ref()
@@ -4539,7 +4554,7 @@ impl DottirApp {
                             .map(|sl| (sl.q_range.start, sl.s_range.start))
                             .unwrap_or((0, 0));
                         let v = if (q_seq as usize) >= q_off && (s_seq as usize) >= s_off {
-                            let qp = ((q_seq as usize) - q_off) / z;
+                            let qp = ((q_seq as usize) - q_off) / (z * self.qx());
                             let sp = ((s_seq as usize) - s_off) / z;
                             if qp < plot.width as usize && sp < plot.height as usize {
                                 plot.pixels[sp * (plot.width as usize) + qp]
@@ -4587,13 +4602,6 @@ impl DottirApp {
                     ui.label("Alignment view: load a query and subject and click on the plot.");
                     return;
                 };
-                if self.settings.mode == BlastMode::Blastx {
-                    ui.label(
-                        "Alignment view: BLASTX (three-frame translated) not yet supported here. \
-                         Use --mode blastp or blastn for now.",
-                    );
-                    return;
-                }
                 let Some((cq_seq, cs_seq)) = self.crosshair else {
                     ui.label("Alignment view: click on the plot to set the crosshair.");
                     return;
@@ -4679,18 +4687,31 @@ impl DottirApp {
                 let s_bytes = s_seq.bytes();
                 let matrix = self.settings.build_matrix();
 
-                // Forward (+/+) alignment columns.
-                let forward_block = build_align_columns(
-                    q_bytes,
-                    s_bytes,
-                    q_centre,
-                    s_centre,
-                    half,
-                    window,
-                    false,
-                    matrix.as_ref(),
-                    self.settings.mode,
-                );
+                // Forward (+/+) alignment columns; BLASTX: the query
+                // translated in its best-scoring frame.
+                let forward_block = if self.settings.mode == BlastMode::Blastx {
+                    build_blastx_columns(
+                        q_bytes,
+                        s_bytes,
+                        q_centre,
+                        s_centre,
+                        half,
+                        window,
+                        matrix.as_ref(),
+                    )
+                } else {
+                    build_align_columns(
+                        q_bytes,
+                        s_bytes,
+                        q_centre,
+                        s_centre,
+                        half,
+                        window,
+                        false,
+                        matrix.as_ref(),
+                        self.settings.mode,
+                    )
+                };
 
                 // Reverse (+/-) alignment columns. BLASTN only —
                 // proteins have no reverse strand. Compares
@@ -4942,7 +4963,8 @@ impl DottirApp {
                                 .map(|sl| (sl.q_range.start as i64, sl.s_range.start as i64))
                                 .unwrap_or((0, 0));
                             // Centre of the pixel's residue block.
-                            let q_seq = q_off + qp * z + z / 2;
+                            let zx = z * self.qx() as i64;
+                            let q_seq = q_off + qp * zx + zx / 2;
                             let s_seq = s_off + sp * z + z / 2;
                             let qlen = self
                                 .query
@@ -5024,9 +5046,10 @@ impl DottirApp {
                         .current_slice
                         .as_ref()
                         .map_or((0, 0), |sl| (sl.q_range.start, sl.s_range.start));
+                    let zx = z * self.qx() as f32;
                     let at = |q: usize, s: usize| {
                         Pos2::new(
-                            plot_area.left() + (q as f32 - q_off as f32) / z / ppp - draw_offset.x,
+                            plot_area.left() + (q as f32 - q_off as f32) / zx / ppp - draw_offset.x,
                             plot_area.top() + (s as f32 - s_off as f32) / z / ppp - draw_offset.y,
                         )
                     };
@@ -5075,7 +5098,7 @@ impl DottirApp {
                             bf.range.start,
                             bf.range.end,
                             aq_off,
-                            azoom,
+                            azoom * self.qx(),
                             plot_area.left(),
                             draw_offset.x,
                             ppp,
@@ -5144,7 +5167,7 @@ impl DottirApp {
                     if break_coord < q_off {
                         continue;
                     }
-                    let pixel_x = (break_coord - q_off) / zoom_us;
+                    let pixel_x = (break_coord - q_off) / (zoom_us * self.qx());
                     if pixel_x >= plot.width as usize {
                         continue;
                     }
@@ -5263,9 +5286,10 @@ impl DottirApp {
                     .current_slice
                     .as_ref()
                     .map_or((0, 0), |sl| (sl.q_range.start, sl.s_range.start));
+                let zx = z * self.qx() as f32;
                 let to_screen = |x: f64, y: f64| {
                     Pos2::new(
-                        plot_area.left() + (x as f32 - q_off as f32) / z / ppp - draw_offset.x,
+                        plot_area.left() + (x as f32 - q_off as f32) / zx / ppp - draw_offset.x,
                         plot_area.top() + (y as f32 - s_off as f32) / z / ppp - draw_offset.y,
                     )
                 };
@@ -5301,7 +5325,7 @@ impl DottirApp {
                     .as_ref()
                     .map(|sl| (sl.q_range.start as f32, sl.s_range.start as f32))
                     .unwrap_or((0.0, 0.0));
-                let cq_pix = ((cq_seq as f32) - q_off) / z;
+                let cq_pix = ((cq_seq as f32) - q_off) / (z * self.qx() as f32);
                 let cs_pix = ((cs_seq as f32) - s_off) / z;
                 // Only draw when the crosshair pixel is inside the
                 // current slice's pixmap; otherwise (zoomed into a
@@ -5532,8 +5556,10 @@ impl DottirApp {
         let world_y_lo = draw_offset.y * ppp;
         let world_y_hi = world_y_lo + plot_area.height() * ppp;
         // Convert to absolute sequence-residue range.
-        let seq_q_lo = q_off + (world_x_lo * zoom_us).max(0.0) as u64;
-        let seq_q_hi = q_off + (world_x_hi * zoom_us) as u64;
+        // BLASTX: one column per codon, labels in bases.
+        let zoom_x = zoom_us * self.qx() as f32;
+        let seq_q_lo = q_off + (world_x_lo * zoom_x).max(0.0) as u64;
+        let seq_q_hi = q_off + (world_x_hi * zoom_x) as u64;
         let seq_s_lo = s_off + (world_y_lo * zoom_us).max(0.0) as u64;
         let seq_s_hi = s_off + (world_y_hi * zoom_us) as u64;
 
@@ -5552,7 +5578,7 @@ impl DottirApp {
         // Pixels-per-residue is now expressed against *logical*
         // points: residue → texel via `/ zoom_us`, then texel →
         // logical via `/ ppp`.
-        let pixels_per_residue_x = 1.0_f32 / (zoom_us * ppp);
+        let pixels_per_residue_x = 1.0_f32 / (zoom_x * ppp);
         let step_x = nice_tick_step(span_x as f64, MIN_LABEL_SPACING_PX / pixels_per_residue_x);
         // Minor ticks (unlabeled) at step/5 intervals — gives 4
         // subdivisions between every labelled tick. Drawn first so
@@ -5562,8 +5588,7 @@ impl DottirApp {
             let mut t = (seq_q_lo / minor_step_x) * minor_step_x;
             while t < seq_q_hi.saturating_add(minor_step_x) {
                 if t >= seq_q_lo && t <= seq_q_hi {
-                    let sx =
-                        plot_area.left() + (t - q_off) as f32 / (zoom_us * ppp) - draw_offset.x;
+                    let sx = plot_area.left() + (t - q_off) as f32 / (zoom_x * ppp) - draw_offset.x;
                     if sx >= plot_area.left() - 1.0 && sx <= plot_area.right() + 1.0 {
                         painter.line_segment(
                             [
@@ -5580,7 +5605,7 @@ impl DottirApp {
         let mut t = (seq_q_lo / step_x as u64) * step_x as u64;
         while t < seq_q_hi.saturating_add(step_x as u64) {
             if t >= seq_q_lo && t <= seq_q_hi {
-                let sx = plot_area.left() + (t - q_off) as f32 / (zoom_us * ppp) - draw_offset.x;
+                let sx = plot_area.left() + (t - q_off) as f32 / (zoom_x * ppp) - draw_offset.x;
                 if sx < plot_area.left() - 1.0 || sx > plot_area.right() + 1.0 {
                     t = t.saturating_add(step_x as u64);
                     if step_x == 0.0 {
@@ -5837,6 +5862,9 @@ struct AlignBlock {
     s_end: i64,
     /// True iff this block is the reverse-strand view.
     reverse: bool,
+    /// BLASTX: the query reading frame shown (1–3, from the sequence
+    /// start); query columns are codons, `q_start`/`q_end` in bases.
+    frame: Option<u8>,
     /// Index of the crosshair column within `cols` (= `half`). Used
     /// to draw the caret marker.
     crosshair_col: usize,
@@ -5919,8 +5947,78 @@ fn build_align_columns(
         s_start: s_start_0.saturating_add(1) as i64,
         s_end: s_end_0.saturating_add(1) as i64,
         reverse,
+        frame: None,
         crosshair_col: half,
     }
+}
+
+/// BLASTX alignment columns: the query translated around base `q_centre`
+/// in the reading frame (of the three codons covering it) that scores
+/// best against subject residues `s_centre ± half`.
+fn build_blastx_columns(
+    q_bytes: &[u8],
+    s_bytes: &[u8],
+    q_centre: usize,
+    s_centre: usize,
+    half: usize,
+    window: usize,
+    matrix: Option<&dottir_core::ScoreMatrix>,
+) -> AlignBlock {
+    let mut best: Option<(i64, AlignBlock)> = None;
+    for k in 0..3 {
+        let Some(codon) = q_centre.checked_sub(k) else {
+            continue;
+        };
+        let mut cols = Vec::with_capacity(window);
+        for i in 0..window {
+            let off = i as isize - half as isize;
+            let qp = codon as isize + 3 * off;
+            let q_oob = qp < 0 || qp as usize + 3 > q_bytes.len();
+            let qc = if q_oob {
+                b'-'
+            } else {
+                let c = &q_bytes[qp as usize..qp as usize + 3];
+                dottir_core::translation::translate_codon([c[0], c[1], c[2]])
+            };
+            let (sc, s_oob) = lookup(s_bytes, s_centre as isize + off);
+            let (class, score) = if q_oob || s_oob {
+                (MatchClass::OutOfBounds, 0)
+            } else {
+                classify_match_with_score(qc, sc, matrix, BlastMode::Blastp)
+            };
+            cols.push(AlignColumn {
+                q: qc,
+                s: sc,
+                class,
+                score,
+            });
+        }
+        let total: i64 = cols.iter().map(|c| i64::from(c.score)).sum();
+        let first = codon as i64 - 3 * half as i64;
+        let block = AlignBlock {
+            cols,
+            q_start: first + 1,
+            q_end: first + 3 * window as i64,
+            s_start: s_centre as i64 - half as i64 + 1,
+            s_end: s_centre as i64 + (window - half) as i64,
+            reverse: false,
+            frame: Some((codon % 3) as u8 + 1),
+            crosshair_col: half,
+        };
+        if best.as_ref().is_none_or(|(b, _)| total > *b) {
+            best = Some((total, block));
+        }
+    }
+    best.map(|(_, b)| b).unwrap_or(AlignBlock {
+        cols: Vec::new(),
+        q_start: 0,
+        q_end: 0,
+        s_start: 0,
+        s_end: 0,
+        reverse: false,
+        frame: None,
+        crosshair_col: 0,
+    })
 }
 
 /// Render one 3-row alignment block (query, match line, subject)
@@ -5969,7 +6067,11 @@ fn draw_align_block(
     // Strand tag in the leftmost margin column, centred on the
     // alignment block (the 3 residue rows; the caret row is above).
     let alignment_top = rect.top() + caret_h;
-    let strand_label = if block.reverse { "+/-" } else { "+/+" };
+    let strand_label = match block.frame {
+        Some(f) => format!("F{f}"),
+        None if block.reverse => "+/-".to_string(),
+        None => "+/+".to_string(),
+    };
     painter.text(
         Pos2::new(
             rect.left() + strand_label_w * 0.5,
@@ -6182,7 +6284,14 @@ fn format_alignment_clipboard(
         forward.cols.len(),
     );
     out.push('\n');
-    let _ = writeln!(out, "+/+");
+    match forward.frame {
+        Some(f) => {
+            let _ = writeln!(out, "query frame {f} (translated)");
+        }
+        None => {
+            let _ = writeln!(out, "+/+");
+        }
+    }
     write_align_block_text(&mut out, forward);
     if let Some(rev) = reverse {
         out.push('\n');
@@ -7277,5 +7386,28 @@ mod selection_tests {
             "a\t8\t10\ts\t6\t10\tselection\t.\t+\t-\n\
              b\t0\t2\ts\t6\t10\tselection\t.\t+\t-\n"
         );
+    }
+}
+
+#[cfg(test)]
+mod blastx_view_tests {
+    use super::*;
+
+    #[test]
+    fn blastx_view_picks_the_frame_that_matches() {
+        // MKW encoded in frame 2 (one leading base); subject MKW.
+        let q = b"GATGAAATGGCC";
+        let s = b"MKW";
+        let m = dottir_core::ScoreMatrix::blosum62();
+        // Crosshair on the second base of the K codon (base 5).
+        let b = build_blastx_columns(q, s, 5, 1, 1, 3, Some(&m));
+        let pep: Vec<u8> = b.cols.iter().map(|c| c.q).collect();
+        assert_eq!(pep, b"MKW");
+        assert_eq!(b.frame, Some(2));
+        assert_eq!((b.q_start, b.q_end), (2, 10));
+        assert!(b.cols.iter().all(|c| c.class == MatchClass::Identical));
+        // Near the start, codons before the sequence are out of bounds.
+        let b = build_blastx_columns(q, s, 1, 0, 1, 3, Some(&m));
+        assert_eq!(b.cols[0].class, MatchClass::OutOfBounds);
     }
 }
