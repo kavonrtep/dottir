@@ -73,7 +73,8 @@ pub fn read_paf_oriented(
 ) -> Result<(Vec<Alignment>, bool), PafError> {
     match read_paf_file(path, vertical, horizontal) {
         Ok(a) => Ok((a, false)),
-        Err(first @ PafError::UnknownRecords { .. }) => {
+        // Shared names (chr1 in both) fail on lengths, not names.
+        Err(first @ (PafError::UnknownRecords { .. } | PafError::LengthMismatch { .. })) => {
             match read_paf_file(path, horizontal, vertical) {
                 Ok(a) => Ok((a.iter().map(Alignment::swapped).collect(), true)),
                 Err(_) => Err(first),
@@ -285,6 +286,31 @@ q1\t1000\t10\t500\t+\tt1\t2000\t100\t590\t450\t490\t60\ttp:A:P\tcm:i:40
 q2\t500\t0\t500\t-\tt1\t2000\t1000\t1500\t480\t500\t0\ttp:A:S\tde:f:0.0123
 
 ";
+
+    #[test]
+    fn orientation_detected_with_shared_record_names() {
+        // Review 2026-10-28 #6: query chr1 is the 100-base horizontal one.
+        let d = std::env::temp_dir().join(format!("dottir_paf_orient_{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let p = d.join("a.paf");
+        std::fs::write(&p, "chr1\t100\t0\t80\t+\tchr1\t80\t0\t80\t78\t80\t60\n").unwrap();
+        let vertical = recs(&[("chr1", 80)]);
+        let horizontal = recs(&[("chr1", 100)]);
+        let (a, swapped) = read_paf_oriented(&p, &vertical, &horizontal).unwrap();
+        assert!(swapped);
+        assert_eq!((a[0].q_end, a[0].t_end), (80, 80));
+        assert_eq!(
+            (a[0].q_start, a[0].t_start, a[0].q_rec, a[0].t_rec),
+            (0, 0, 0, 0)
+        );
+        // Valid neither way: the first error is kept.
+        let other = recs(&[("chr1", 90)]);
+        assert!(matches!(
+            read_paf_oriented(&p, &other, &other),
+            Err(PafError::LengthMismatch { .. })
+        ));
+        let _ = std::fs::remove_dir_all(&d);
+    }
 
     #[test]
     fn reads_columns_and_tags_and_round_trips() {

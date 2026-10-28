@@ -100,9 +100,10 @@ impl Alignment {
 
 /// Join alignments split where the query was cut into chunks for the
 /// aligner (ADR 0008 §3). Two alignments are joined when they lie on the
-/// same record pair and strand, one ends within `tol` of a cut and the
-/// other starts within `tol` after it, and the target gap between them is
-/// within `tol` in the strand's direction. `cuts` are query-record-local
+/// same record pair and strand, one ends within `tol` before a cut and the
+/// other starts within `tol` after it (chunks do not overlap, so pieces of
+/// one alignment lie on opposite sides), and the target gap between them
+/// is within `tol` in the strand's direction. `cuts` are query-record-local
 /// positions per query record (sorted). Output is sorted.
 pub fn join_at_cuts(mut alns: Vec<Alignment>, cuts: &[Vec<u64>], tol: u64) -> Vec<Alignment> {
     sort_alignments(&mut alns);
@@ -143,7 +144,7 @@ pub fn join_at_cuts(mut alns: Vec<Alignment>, cuts: &[Vec<u64>], tol: u64) -> Ve
                 } else {
                     b.t_start as i128 - a.t_end as i128
                 };
-                a.q_end <= b.q_start + tol && gap >= -(tol as i128) && gap <= tol as i128
+                a.q_end <= c && b.q_start >= c && gap >= -(tol as i128) && gap <= tol as i128
             })
             .min_by_key(|&i| {
                 let a = &alns[i];
@@ -256,6 +257,27 @@ pub fn assign_primary(alns: &mut [Alignment], mask_level: f64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn overlapping_hits_on_one_side_of_a_cut_survive() {
+        // Review 2026-10-28 #1: these selected each other and both vanished.
+        let a = aln((9500, 9900), (5000, 5400), false);
+        let b = aln((9600, 10_000), (5100, 5500), false);
+        let out = join_at_cuts(vec![a.clone(), b.clone()], &[vec![10_000]], 2000);
+        assert_eq!(out, [a.clone(), b.clone()]);
+        // Two hits starting after the cut are not joined either.
+        let c = aln((10_000, 10_400), (5000, 5400), false);
+        let d = aln((10_100, 10_500), (5100, 5500), false);
+        let out = join_at_cuts(vec![c.clone(), d.clone()], &[vec![10_000]], 2000);
+        assert_eq!(out, [c, d]);
+        // A real split still joins, with a hit beside it kept.
+        let left = aln((8000, 10_000), (0, 2000), false);
+        let right = aln((10_000, 12_000), (2000, 4000), false);
+        let out = join_at_cuts(vec![a.clone(), left, right], &[vec![10_000]], 2000);
+        assert_eq!(out.len(), 2);
+        assert!(out.contains(&a));
+        assert!(out.iter().any(|x| x.q_start == 8000 && x.q_end == 12_000));
+    }
 
     #[test]
     fn primaries_follow_minimap2_mask_level() {

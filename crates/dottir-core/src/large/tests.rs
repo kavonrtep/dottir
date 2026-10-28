@@ -583,3 +583,28 @@ fn coverage_does_not_saturate_at_chromosome_zoom() {
     let got = coverage_bases(l.merged_coverage(None, ClassMask::ALL)[0]);
     assert!((180_000.0..220_000.0).contains(&got), "{got}");
 }
+
+#[test]
+fn session_manual_settings_do_not_satisfy_automatic_ones() {
+    // Review 2026-10-28 #7.
+    let (q, s) = planted_pair(20_000, 2000, 10, 1);
+    let input = LargeInput::pair(&q, &[], &s, &[]);
+    let auto = large_cfg(10, None);
+    let mut manual = auto.clone();
+    manual.window_size = Some(7);
+    manual.pixel_fac = 99;
+    let session = LargeSession::prepare(&input, &manual, &Control::default()).unwrap();
+    assert!(session.compatible(&manual));
+    assert!(!session.compatible(&auto));
+
+    let session = LargeSession::prepare(&input, &auto, &Control::default()).unwrap();
+    assert!(session.compatible(&auto));
+    // The resolved automatic values, given explicitly, are the same plot.
+    let mut explicit = auto.clone();
+    let p = session.compute(&auto, &Control::default()).unwrap().params;
+    explicit.window_size = Some(p.window_size);
+    explicit.pixel_fac = p.pixel_fac;
+    assert!(session.compatible(&explicit));
+    explicit.window_size = Some(p.window_size + 1);
+    assert!(!session.compatible(&explicit));
+}

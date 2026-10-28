@@ -133,7 +133,10 @@ pub fn build_fai(path: &Path) -> Result<Vec<FaiEntry>, FaidxError> {
             e.offset = start;
             e.line_bases = bases;
             e.line_bytes = n;
-        } else if bases > e.line_bases || (bases == e.line_bases && n != e.line_bytes) {
+        } else if bases > e.line_bases
+            // A full-width last line may lack its terminator.
+            || (bases == e.line_bases && n != e.line_bytes && buf.ends_with(b"\n"))
+        {
             return Err(fmt(line, "line lengths differ within the record"));
         } else if bases < e.line_bases {
             ended = true;
@@ -345,6 +348,7 @@ impl FastaIndex {
         for (span, r) in seq.records.iter_mut().zip(regions) {
             span.origin = Some(RegionOrigin {
                 record: self.entries[r.rec].name.clone(),
+                record_len: self.entries[r.rec].len,
                 range: r.range.clone(),
                 reverse: r.reverse,
             });
@@ -402,6 +406,21 @@ mod tests {
     // samtools faidx output for this file:
     // r1 10 9 4 5 / r2 6 27 6 8
     const FA: &str = ">r1 desc\nACGT\nacgt\nAC\n>r2\r\nGGGTTT\r\n";
+
+    #[test]
+    fn full_last_line_without_newline() {
+        // Review 2026-10-28 #5.
+        let d = tmp("eof");
+        let p = d.join("a.fa");
+        std::fs::write(&p, ">r\nACGT\nACGT").unwrap();
+        let idx = FastaIndex::open(&p, &d.join("cache")).unwrap();
+        assert_eq!(idx.entries[0].len, 8);
+        assert_eq!(idx.fetch(0, 2..8).unwrap(), b"GTACGT");
+        // Inconsistent widths inside a record are still rejected.
+        let bad = d.join("b.fa");
+        std::fs::write(&bad, ">r\nACGT\nACG\nACGT\n").unwrap();
+        assert!(FastaIndex::open(&bad, &d.join("cache")).is_err());
+    }
 
     #[test]
     fn index_matches_samtools_and_regions_cross_lines() {

@@ -1480,11 +1480,35 @@ impl DottirApp {
             && self.shown_large_plot().is_some_and(|lp| lp.has_coverage())
     }
 
-    fn coverage_lut(&self) -> [u8; 256] {
-        coverage_lut(
+    /// The pixel → grey mapping on screen; image exports use the same.
+    fn display_lut(&self) -> [u8; 256] {
+        display_lut(
+            self.coverage_shading(),
+            &self.greyramp,
             self.settings.large.cov_white_bp,
             self.settings.large.cov_black_bp,
         )
+    }
+
+    /// Export metadata: the version and the sensitivity behind the greys.
+    fn export_metadata(&self) -> Vec<(&'static str, String)> {
+        let mut m = vec![("dottir-gui", env!("CARGO_PKG_VERSION").to_string())];
+        if self.coverage_shading() {
+            m.push(("shading", "coverage".into()));
+            m.push((
+                "coverage-white-bp",
+                self.settings.large.cov_white_bp.to_string(),
+            ));
+            m.push((
+                "coverage-black-bp",
+                self.settings.large.cov_black_bp.to_string(),
+            ));
+        } else {
+            m.push(("shading", "score".into()));
+            m.push(("greyramp-white", self.greyramp.white.to_string()));
+            m.push(("greyramp-black", self.greyramp.black.to_string()));
+        }
+        m
     }
 
     /// Fit the coverage ramp to the shown pixels: white at the 2nd and
@@ -2062,11 +2086,7 @@ impl DottirApp {
             return;
         }
         let coverage = self.coverage_shading();
-        let lut = if coverage {
-            self.coverage_lut()
-        } else {
-            self.greyramp.lut()
-        };
+        let lut = self.display_lut();
         let (pw, ph) = (plot.width as usize, plot.height as usize);
         let fwd_view = plot.pixels.as_slice();
         let rev_view = plot.reverse_pixels.as_deref();
@@ -5116,6 +5136,16 @@ impl DottirApp {
 
 /// Greyramp over coverage codes: white below `white_bp` matching bases per
 /// pixel, black from `black_bp`, linear in log(bases) between.
+/// Score greyramp, or the coverage ramp in matching bases when large-mode
+/// pixels hold coverage codes.
+fn display_lut(coverage: bool, greyramp: &Greyramp, white_bp: f32, black_bp: f32) -> [u8; 256] {
+    if coverage {
+        coverage_lut(white_bp, black_bp)
+    } else {
+        greyramp.lut()
+    }
+}
+
 fn coverage_lut(white_bp: f32, black_bp: f32) -> [u8; 256] {
     let lo = (white_bp.max(1.0) as f64).ln();
     let hi = (black_bp.max(white_bp.max(1.0) + 1.0) as f64).ln();
@@ -6038,7 +6068,8 @@ fn save_svg(app: &mut DottirApp) {
         app.last_error = Some("nothing to save — compute a plot first".into());
         return;
     };
-    let lut = app.greyramp.lut();
+    let lut = app.display_lut();
+    let metadata = app.export_metadata();
     let pick = rfd::FileDialog::new()
         .set_title("Save SVG")
         .add_filter("SVG", &["svg"])
@@ -6085,12 +6116,11 @@ fn save_svg(app: &mut DottirApp) {
             50,
             &recs_x,
             &recs_y,
-            &[
-                ("dottir-gui", env!("CARGO_PKG_VERSION")),
-                ("greyramp-white", &app.greyramp.white.to_string()),
-                ("greyramp-black", &app.greyramp.black.to_string()),
-            ],
-            false, // mapped is already in display space (greyramp applied)
+            &metadata
+                .iter()
+                .map(|(k, v)| (*k, v.as_str()))
+                .collect::<Vec<_>>(),
+            false, // mapped is already in display space (LUT applied)
         ) {
             Ok(()) => {}
             Err(e) => app.last_error = Some(format!("SVG save failed: {e}")),
@@ -6288,13 +6318,14 @@ fn save_png(app: &mut DottirApp) {
         app.last_error = Some("nothing to save — compute a plot first".into());
         return;
     };
-    let lut = app.greyramp.lut();
+    let lut = app.display_lut();
+    let metadata = app.export_metadata();
     let pick = rfd::FileDialog::new()
         .set_title("Save PNG")
         .add_filter("PNG", &["png"])
         .save_file();
     if let Some(path) = pick {
-        // Apply the greyramp LUT before saving so the on-disk image
+        // Apply the display LUT before saving so the on-disk image
         // matches what's on screen.
         let mapped: Vec<u8> = plot.pixels.iter().map(|&v| lut[v as usize]).collect();
         let recs_x: Vec<_> = app
@@ -6356,12 +6387,11 @@ fn save_png(app: &mut DottirApp) {
             margin,
             &recs_x,
             &recs_y,
-            &[
-                ("dottir-gui", env!("CARGO_PKG_VERSION")),
-                ("greyramp-white", &app.greyramp.white.to_string()),
-                ("greyramp-black", &app.greyramp.black.to_string()),
-            ],
-            false, // mapped is already in display space (greyramp applied)
+            &metadata
+                .iter()
+                .map(|(k, v)| (*k, v.as_str()))
+                .collect::<Vec<_>>(),
+            false, // mapped is already in display space (LUT applied)
         ) {
             Ok(()) => {}
             Err(e) => app.last_error = Some(format!("PNG save failed: {e}")),
@@ -6373,6 +6403,19 @@ fn save_png(app: &mut DottirApp) {
 mod large_display_tests {
     use super::*;
     use dottir_core::large::coverage_code;
+
+    #[test]
+    fn display_lut_follows_coverage_sensitivity() {
+        // Review 2026-10-28 #4: exports used the score greyramp for
+        // coverage codes, ignoring the coverage sliders.
+        let g = Greyramp::default();
+        let a = display_lut(true, &g, 100.0, 10_000.0);
+        let b = display_lut(true, &g, 1000.0, 10_000.0);
+        assert_eq!(a, coverage_lut(100.0, 10_000.0));
+        assert_ne!(a, b, "coverage sensitivity changes the mapping");
+        assert_ne!(a, g.lut());
+        assert_eq!(display_lut(false, &g, 100.0, 10_000.0), g.lut());
+    }
 
     #[test]
     fn coverage_lut_ramps_in_log_bases() {

@@ -503,6 +503,11 @@ pub struct LargeSession {
     depth_rates: (u32, u32),
 }
 
+/// Automatic pixel factor from the Karlin expected residue score.
+fn auto_pixel_fac(exp_res: f64) -> Option<u32> {
+    (exp_res.is_finite() && exp_res > 0.0).then(|| ((0.2 * 256.0 / exp_res).round() as u32).max(1))
+}
+
 impl LargeSession {
     /// Build the index and depth tracks. Expensive: linear in input size,
     /// dominated by the depth estimate when `cfg.depth` is not `None`.
@@ -589,12 +594,11 @@ impl LargeSession {
         }
         let pixel_fac = if cfg.pixel_fac == 0 {
             let exp_res = karlin.map(|k| k.expected_residue_score).unwrap_or(0.0);
-            if !(exp_res.is_finite() && exp_res > 0.0) {
-                return Err(DottirError::InvalidConfig(format!(
+            auto_pixel_fac(exp_res).ok_or_else(|| {
+                DottirError::InvalidConfig(format!(
                     "auto pixel_fac requires positive Karlin expected_residue_score, got {exp_res:.3}"
-                )));
-            }
-            ((0.2 * 256.0 / exp_res).round() as u32).max(1)
+                ))
+            })?
         } else {
             cfg.pixel_fac
         };
@@ -684,8 +688,18 @@ impl LargeSession {
                 || self.depth_params == (cfg.two_hit_dist, cfg.max_occ, cfg.depth_sample))
             && self.matrix.name == cfg.matrix.name
             && self.matrix.scores == cfg.matrix.scores
-            && cfg.window_size.is_none_or(|w| w == self.window)
-            && (cfg.pixel_fac == 0 || cfg.pixel_fac == self.pixel_fac)
+            // Automatic values match only what this session resolved
+            // automatically, never earlier manual ones.
+            && match cfg.window_size {
+                Some(w) => w == self.window,
+                None => self.karlin.is_some_and(|k| k.window_size == self.window),
+            }
+            && match cfg.pixel_fac {
+                0 => self.karlin.is_some_and(|k| {
+                    auto_pixel_fac(k.expected_residue_score) == Some(self.pixel_fac)
+                }),
+                p => p == self.pixel_fac,
+            }
             && self.s_enc.is_none() == cfg.self_comparison
     }
 

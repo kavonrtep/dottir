@@ -9,9 +9,9 @@
 //! own names, because `-D` only skips the diagonal when query and target
 //! names and lengths agree.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
@@ -191,7 +191,7 @@ impl AlignRequest<'_> {
     pub fn cache_key(&self, aligner: &Aligner) -> String {
         let mut h = Sha256::new();
         for part in [
-            "dottir-genome-v1",
+            "dottir-genome-v2",
             &self.reference_sha256,
             &self.query_sha256,
             &aligner.name,
@@ -280,19 +280,57 @@ fn check_lengths(idx: &FastaIndex) -> Result<(), AlignerError> {
     }
 }
 
-fn run_checked(cmd: &mut Command, program: &Path) -> Result<(), AlignerError> {
-    let out = cmd.output().map_err(|source| AlignerError::Spawn {
-        program: program.to_path_buf(),
-        source,
-    })?;
-    if out.status.success() {
+/// How often a running aligner is checked for cancellation.
+const CANCEL_POLL: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Run `cmd` to completion, killing it as soon as `cancel` is set.
+fn run_checked(cmd: &mut Command, program: &Path, cancel: &AtomicBool) -> Result<(), AlignerError> {
+    let mut child = cmd
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|source| AlignerError::Spawn {
+            program: program.to_path_buf(),
+            source,
+        })?;
+    let mut stderr = child.stderr.take().expect("piped stderr");
+    let reader = std::thread::spawn(move || {
+        let mut s = String::new();
+        let _ = stderr.read_to_string(&mut s);
+        s
+    });
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if cancel.load(Ordering::Relaxed) {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = reader.join();
+            return Err(AlignerError::Cancelled);
+        }
+        std::thread::sleep(CANCEL_POLL);
+    };
+    let stderr = reader.join().unwrap_or_default();
+    if status.success() {
         return Ok(());
     }
     Err(AlignerError::Failed {
         program: program.to_path_buf(),
-        status: out.status.to_string(),
-        stderr: tail(&String::from_utf8_lossy(&out.stderr), 20),
+        status: status.to_string(),
+        stderr: tail(&stderr, 20),
     })
+}
+
+/// Kill `child` when `cancel` is set, until `done`. Reading the aligner's
+/// output blocks while it computes, so cancellation cannot wait for it.
+fn kill_on_cancel(child: &Mutex<Child>, cancel: &AtomicBool, done: &AtomicBool) {
+    while !done.load(Ordering::Relaxed) {
+        if cancel.load(Ordering::Relaxed) {
+            let _ = child.lock().unwrap().kill();
+            return;
+        }
+        std::thread::sleep(CANCEL_POLL);
+    }
 }
 
 fn tail(s: &str, n: usize) -> String {
@@ -338,13 +376,16 @@ pub fn align(
     ]);
     index_cmd.extend(["-d".to_string(), mmi.display().to_string()]);
     index_cmd.push(req.reference.path.display().to_string());
-    run_checked(
+    if let Err(e) = run_checked(
         Command::new(program)
             .args(&index_cmd[1..])
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped()),
+            .stdout(Stdio::null()),
         program,
-    )?;
+        cancel,
+    ) {
+        let _ = std::fs::remove_file(&mmi);
+        return Err(e);
+    }
 
     let q_recs = req.query.records();
     let t_recs = req.reference.records();
@@ -394,7 +435,7 @@ fn map_pieces(
     progress: &(dyn Fn(u64, u64) + Sync),
     cancel: &AtomicBool,
 ) -> Result<String, AlignerError> {
-    let mut child = Command::new(program)
+    let mut child: Child = Command::new(program)
         .args(&argv[1..])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -410,8 +451,11 @@ fn map_pieces(
     let total = pcs.len() as u64;
     let stderr_tail = Mutex::new(Vec::<String>::new());
     let feed_error = Mutex::new(None::<FaidxError>);
+    let child = Mutex::new(child);
+    let done = AtomicBool::new(false);
 
     let text = std::thread::scope(|s| {
+        s.spawn(|| kill_on_cancel(&child, cancel, &done));
         s.spawn(|| {
             for (i, p) in pcs.iter().enumerate() {
                 if cancel.load(Ordering::Relaxed) {
@@ -463,25 +507,34 @@ fn map_pieces(
                 }
             }
         });
-        let mut text = String::new();
-        for line in BufReader::new(stdout).lines() {
-            let line = line?;
-            if cancel.load(Ordering::Relaxed) {
-                let _ = child.kill();
-                return Err(AlignerError::Cancelled);
+        let read = || -> Result<String, AlignerError> {
+            let mut text = String::new();
+            for line in BufReader::new(stdout).lines() {
+                let line = line?;
+                if cancel.load(Ordering::Relaxed) {
+                    return Err(AlignerError::Cancelled);
+                }
+                if req.self_comparison {
+                    text.push_str(&line);
+                } else if let Some(l) = remap_line(&line, pcs, q_recs) {
+                    text.push_str(&l);
+                } else {
+                    continue;
+                }
+                text.push('\n');
             }
-            if req.self_comparison {
-                text.push_str(&line);
-            } else if let Some(l) = remap_line(&line, pcs, q_recs) {
-                text.push_str(&l);
-            } else {
-                continue;
-            }
-            text.push('\n');
+            Ok(text)
+        };
+        let text = read();
+        done.store(true, Ordering::Relaxed);
+        if text.is_err() {
+            // Unblock the feeder and stderr threads.
+            let _ = child.lock().unwrap().kill();
         }
-        Ok(text)
-    })?;
-    let status = child.wait()?;
+        text
+    });
+    let status = child.into_inner().unwrap().wait()?;
+    let text = text?;
     if cancel.load(Ordering::Relaxed) {
         return Err(AlignerError::Cancelled);
     }
@@ -533,5 +586,72 @@ mod tests {
             "chr1\t25\t21\t24\t+\tt\t100\t0\t3\t3\t3\t60\ttp:A:P"
         );
         assert!(remap_line("other\t5\t1\t4", &p, &r).is_none());
+    }
+
+    /// Cancel `align` with a fake aligner that runs `index_body` for `-d`
+    /// and `map_body` otherwise; returns the result and how long it took.
+    #[cfg(unix)]
+    fn cancel_with(
+        tag: &str,
+        index_body: &str,
+        map_body: &str,
+    ) -> (Result<AlignOutput, AlignerError>, f64) {
+        use std::os::unix::fs::PermissionsExt;
+        let d = std::env::temp_dir().join(format!("dottir_cancel_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let prog = d.join("fake-aligner");
+        std::fs::write(
+            &prog,
+            format!("#!/bin/sh\ncase \"$*\" in *' -d '*) {index_body} ;; *) {map_body} ;; esac\n"),
+        )
+        .unwrap();
+        std::fs::set_permissions(&prog, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let fa = d.join("a.fa");
+        std::fs::write(&fa, ">a\nACGTACGTAC\n").unwrap();
+        let idx = FastaIndex::open(&fa, &d).unwrap();
+        let req = AlignRequest {
+            reference: &idx,
+            query: &idx,
+            reference_sha256: "r".into(),
+            query_sha256: "q".into(),
+            preset: "asm20".into(),
+            extra_args: Vec::new(),
+            threads: 1,
+            chunk_size: 10_000_000,
+            self_comparison: false,
+            all_copies: false,
+        };
+        let aligner = Aligner {
+            program: prog,
+            name: "fake".into(),
+            version: "0".into(),
+        };
+        let cancel = AtomicBool::new(false);
+        let t0 = std::time::Instant::now();
+        let out = std::thread::scope(|s| {
+            s.spawn(|| {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                cancel.store(true, Ordering::Relaxed);
+            });
+            align(&aligner, &req, &d.join("cache"), false, &|_, _| {}, &cancel)
+        });
+        let secs = t0.elapsed().as_secs_f64();
+        let _ = std::fs::remove_dir_all(&d);
+        (out, secs)
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn cancel_stops_a_silent_aligner() {
+        // Review 2026-10-28 #3: cancellation waited for output that a
+        // computing aligner does not produce. `exec` so the kill reaches
+        // the sleeping process itself.
+        let (out, secs) = cancel_with("map", "touch \"$6\"", "cat > /dev/null; exec sleep 5");
+        assert!(matches!(out, Err(AlignerError::Cancelled)), "{out:?}");
+        assert!(secs < 2.0, "took {secs:.1} s");
+        let (out, secs) = cancel_with("index", "exec sleep 5", "cat > /dev/null");
+        assert!(matches!(out, Err(AlignerError::Cancelled)), "{out:?}");
+        assert!(secs < 2.0, "took {secs:.1} s");
     }
 }

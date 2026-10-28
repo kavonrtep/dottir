@@ -69,6 +69,8 @@ impl FeatureLocator<'_> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegionOrigin {
     pub record: String,
+    /// Length of the whole source record.
+    pub record_len: u64,
     pub range: std::ops::Range<u64>,
     pub reverse: bool,
 }
@@ -85,6 +87,28 @@ impl RegionOrigin {
 }
 
 impl RecordSpan {
+    /// Record-local interval `lo..hi` in source terms: record name, record
+    /// length, forward-strand interval, and whether it was reversed.
+    pub fn source_interval(&self, lo: usize, hi: usize) -> (&str, u64, u64, u64, bool) {
+        match &self.origin {
+            None => (&self.id, self.len() as u64, lo as u64, hi as u64, false),
+            Some(o) if o.reverse => (
+                &o.record,
+                o.record_len,
+                o.range.end - hi as u64,
+                o.range.end - lo as u64,
+                true,
+            ),
+            Some(o) => (
+                &o.record,
+                o.record_len,
+                o.range.start + lo as u64,
+                o.range.start + hi as u64,
+                false,
+            ),
+        }
+    }
+
     /// Length of the record (in residues).
     pub fn len(&self) -> usize {
         self.range.end - self.range.start
@@ -257,6 +281,7 @@ impl Sequence {
                 }),
                 (None, true) => Some(RegionOrigin {
                     record: r.id.clone(),
+                    record_len: r.len() as u64,
                     range: 0..r.len() as u64,
                     reverse: true,
                 }),
@@ -399,6 +424,7 @@ mod reorder_tests {
         let mut region = s.clone();
         region.records[0].origin = Some(RegionOrigin {
             record: "r".into(),
+            record_len: 200,
             range: 100..110,
             reverse: true,
         });

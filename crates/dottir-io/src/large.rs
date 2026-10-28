@@ -86,21 +86,27 @@ pub fn write_chains_paf<P: AsRef<Path>>(
         ) else {
             continue;
         };
-        let qs = c.q_start as usize - qr.range.start;
-        let qe = c.q_end as usize - qr.range.start;
-        let ss = c.s_start as usize - sr.range.start;
-        let se = c.s_end as usize - sr.range.start;
+        // Sorted or drill-down records are reported in their source
+        // records; a reversed record flips the strand.
+        let (qn, ql, qs, qe, qrev) = qr.source_interval(
+            c.q_start as usize - qr.range.start,
+            c.q_end as usize - qr.range.start,
+        );
+        let (sn, sl, ss, se, srev) = sr.source_interval(
+            c.s_start as usize - sr.range.start,
+            c.s_end as usize - sr.range.start,
+        );
         let block = (qe - qs).max(se - ss);
         writeln!(
             w,
             "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t255\ttp:A:P\tcm:i:{}\ts1:i:{}",
-            qr.id,
-            qr.len(),
+            qn,
+            ql,
             qs,
             qe,
-            if c.reverse { '-' } else { '+' },
-            sr.id,
-            sr.len(),
+            if c.reverse ^ qrev ^ srev { '-' } else { '+' },
+            sn,
+            sl,
             ss,
             se,
             (qe - qs).min(se - ss),
@@ -112,8 +118,8 @@ pub fn write_chains_paf<P: AsRef<Path>>(
     w.flush()
 }
 
-/// Write a depth track as bedGraph, averaged over `bin`-base bins (record-
-/// local coordinates; bins never span records).
+/// Write a depth track as bedGraph, averaged over `bin`-base bins (source-
+/// record coordinates; bins never span records).
 pub fn write_depth_bedgraph<P: AsRef<Path>>(
     path: P,
     depth: &DepthTrack,
@@ -128,20 +134,22 @@ pub fn write_depth_bedgraph<P: AsRef<Path>>(
         depth.method.describe()
     )?;
     for r in &seq.records {
+        let mut lines = Vec::new();
         let mut lo = r.range.start;
         while lo < r.range.end {
             let hi = (lo + bin).min(r.range.end);
             let sum: u64 = depth.depth[lo..hi].iter().map(|&d| d as u64).sum();
             let mean = sum as f64 / (hi - lo) as f64;
-            writeln!(
-                w,
-                "{}\t{}\t{}\t{:.2}",
-                r.id,
-                lo - r.range.start,
-                hi - r.range.start,
-                mean
-            )?;
+            let (name, _, s, e, _) = r.source_interval(lo - r.range.start, hi - r.range.start);
+            lines.push(format!("{name}\t{s}\t{e}\t{mean:.2}"));
             lo = hi;
+        }
+        // Reversed records run backwards in the source; bedGraph is sorted.
+        if r.origin.as_ref().is_some_and(|o| o.reverse) {
+            lines.reverse();
+        }
+        for l in lines {
+            writeln!(w, "{l}")?;
         }
     }
     w.flush()
@@ -154,6 +162,57 @@ mod tests {
 
     fn seq(text: &str) -> Sequence {
         Sequence::from_records(parse_fasta(text).unwrap(), None)
+    }
+
+    #[test]
+    fn exports_report_source_records_after_sorting() {
+        use crate::sequence::RegionOrigin;
+        use dottir_core::large::DepthMethod;
+        // Query: one 10-base record, reversed by --sort-records.
+        let q = seq(">q\nAACCGGTTAC\n").reordered(&[0], &[true]);
+        // Subject: a drill-down region, bases 100..108 of a 1000-base "s".
+        let mut s = seq(">s:101-108\nACGTACGT\n");
+        s.records[0].origin = Some(RegionOrigin {
+            record: "s".into(),
+            record_len: 1000,
+            range: 100..108,
+            reverse: false,
+        });
+        let chain = Chain {
+            reverse: false,
+            q_rec: 0,
+            s_rec: 0,
+            q_start: 0,
+            q_end: 4,
+            s_start: 2,
+            s_end: 6,
+            score: 400.0,
+            n_segments: 1,
+            n_anchors: 4,
+        };
+        let dir = std::env::temp_dir().join(format!("dottir_sorted_export_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let paf = dir.join("c.paf");
+        write_chains_paf(&paf, &[chain], &q, &s).unwrap();
+        let line = std::fs::read_to_string(&paf).unwrap();
+        let f: Vec<&str> = line.trim().split('\t').collect();
+        // Displayed 0..4 of the reversed query is source 6..10, minus strand.
+        assert_eq!(
+            &f[..9],
+            ["q", "10", "6", "10", "-", "s", "1000", "102", "106"]
+        );
+
+        let depth = DepthTrack {
+            method: DepthMethod::None,
+            depth: vec![1, 1, 1, 1, 1, 1, 1, 1, 1, 3],
+        };
+        let bg = dir.join("d.bedgraph");
+        write_depth_bedgraph(&bg, &depth, &q, 5).unwrap();
+        let text = std::fs::read_to_string(&bg).unwrap();
+        let rows: Vec<&str> = text.lines().skip(1).collect();
+        // Displayed bins 0..5 and 5..10 are source 5..10 and 0..5; sorted.
+        assert_eq!(rows, ["q\t0\t5\t1.40", "q\t5\t10\t1.00"]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

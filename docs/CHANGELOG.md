@@ -107,6 +107,28 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 * The GUI compute worker skips queued requests superseded by a newer one.
 * New `DottirError::Cancelled` variant.
 
+### Fixed
+
+Findings of `docs/reviews/since-v0.4.0.md`:
+
+* Genome mode: joining alignments split at query chunk cuts could drop
+  overlapping short hits near a cut (they chose each other as partners).
+  Only hits on opposite sides of a cut are joined now; cached runs are
+  re-aligned (cache key v2). Col-CC × *A. lyrata* gains 3 alignments.
+* `--chains-out` and `--depth-bedgraph` after `--sort-records` (or on
+  drill-down regions) reported transformed coordinates under source
+  names; they now give source-record positions, lengths and strands.
+* Cancelling an aligner run waited for its next output line, and
+  indexing could not be cancelled; both now stop within 50 ms.
+* GUI PNG/SVG export applied the score greyramp in coverage shading, so
+  the coverage sensitivity was lost; exports now use the on-screen
+  mapping and record the shading in their metadata.
+* FASTA indexing rejected a full-width last line without a newline.
+* A PAF made with the axes swapped failed to load when both assemblies
+  share record names (`chr1`) with different lengths.
+* `LargeSession::compatible` accepted automatic window size / pixel
+  factor for a session prepared with manual values.
+
 ## [0.4.0] - 2026-09-11
 
 ### Added
