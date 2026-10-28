@@ -196,6 +196,13 @@ PAF works (query on the vertical or the horizontal axis); lines for records
 that are not plotted are skipped and counted. Positions follow sorted,
 reverse-complemented and drill-down records.
 
+An alignment with a CIGAR (`cg:Z`, from `minimap2 -c`) is drawn along it:
+one line per gapless stretch, with stretches merged while the diagonal
+shifts by at most 10 bp. Without a CIGAR it is a straight line from start
+to end, which drifts off the dots across large indels (79 kb over a 2 Mb
+Col-CC × TAIR10 alignment), so prefer `-c` for long alignments. The
+panel's tooltip says how many alignments had no CIGAR.
+
 The **HSPs** panel section picks the mode:
 
 | Mode | Shows |

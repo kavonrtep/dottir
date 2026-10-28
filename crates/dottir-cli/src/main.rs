@@ -530,9 +530,10 @@ fn run_batch(args: BatchArgs) -> Result<()> {
             let set = dottir_io::hsp::load(path, &query, &subject)
                 .with_context(|| format!("reading HSPs {}", path.display()))?;
             tracing::info!(
-                "HSPs: {} alignments, {} drawn, {} for records not plotted",
+                "HSPs: {} alignments, {} drawn ({} along CIGARs), {} for records not plotted",
                 set.alignments,
-                set.hsps.len(),
+                set.placed,
+                set.with_cigar,
                 set.skipped
             );
             let hsp_mode = dottir_io::hsp::HspMode::parse(&args.hsp_mode).expect("clap-checked");

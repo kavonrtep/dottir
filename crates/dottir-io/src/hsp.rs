@@ -9,7 +9,7 @@ use std::path::Path;
 
 use dottir_core::genome::{Alignment, GenomeRecord};
 
-use crate::paf::{read_paf_subset_oriented, PafError};
+use crate::paf::{read_paf_subset_oriented, AlignmentPath, PafError};
 use crate::sequence::{RecordSpan, Sequence};
 
 /// How HSPs are shown, after C dotter's `DOTTER_HSPS_*` modes.
@@ -63,10 +63,16 @@ pub struct Hsp {
 #[derive(Debug, Clone, Default)]
 pub struct HspSet {
     pub path: std::path::PathBuf,
+    /// Segments: one per alignment, or one per gapless piece when the
+    /// PAF has CIGARs (`cg:Z`).
     pub hsps: Vec<Hsp>,
     /// PAF lines read, and those naming records not in the plot.
     pub alignments: usize,
     pub skipped: u64,
+    /// Alignments with at least one segment on the plot.
+    pub placed: usize,
+    /// Alignments drawn along their CIGAR.
+    pub with_cigar: usize,
 }
 
 /// Source records of `seq`: name and full length, first appearance first.
@@ -146,17 +152,22 @@ fn clip(
 }
 
 /// Place `alns` (query = vertical records `yr`, target = horizontal `xr`)
-/// on the plot of `x` against `y`.
+/// on the plot of `x` against `y`. An alignment with a path (`paths[i]`,
+/// from its CIGAR) is drawn as its gapless pieces, so a long alignment
+/// with indels follows its dots; without one it is a straight line from
+/// start to end.
 pub fn place(
     alns: &[Alignment],
+    paths: &[Option<AlignmentPath>],
     xr: &[GenomeRecord],
     yr: &[GenomeRecord],
     x: &Sequence,
     y: &Sequence,
+    n_placed: &mut usize,
 ) -> Vec<Hsp> {
     let (xs, ys) = (shown_by_source(x), shown_by_source(y));
     let mut out = Vec::new();
-    for a in alns {
+    for (i, a) in alns.iter().enumerate() {
         let (Some(xrecs), Some(yrecs)) = (
             xs.get(xr[a.t_rec as usize].name.as_str()),
             ys.get(yr[a.q_rec as usize].name.as_str()),
@@ -164,37 +175,45 @@ pub fn place(
             continue;
         };
         // In source coordinates: target along x, query along y.
-        let seg = if a.reverse {
-            (
+        let segs: Vec<(f64, f64, f64, f64)> = match paths.get(i).and_then(Option::as_ref) {
+            Some(p) => p
+                .iter()
+                .map(|&[q0, t0, q1, t1]| (t0 as f64, q0 as f64, t1 as f64, q1 as f64))
+                .collect(),
+            None if a.reverse => vec![(
                 a.t_end as f64,
                 a.q_start as f64,
                 a.t_start as f64,
                 a.q_end as f64,
-            )
-        } else {
-            (
+            )],
+            None => vec![(
                 a.t_start as f64,
                 a.q_start as f64,
                 a.t_end as f64,
                 a.q_end as f64,
-            )
+            )],
         };
+        let mut placed = false;
         for rx in xrecs {
             let (xl, xh, _) = shown_interval(rx);
             for ry in yrecs {
                 let (yl, yh, _) = shown_interval(ry);
-                if let Some((x0, y0, x1, y1)) = clip(seg, (xl, xh), (yl, yh)) {
-                    out.push(Hsp {
-                        x0: to_plot(rx, x0),
-                        y0: to_plot(ry, y0),
-                        x1: to_plot(rx, x1),
-                        y1: to_plot(ry, y1),
-                        identity: a.identity(),
-                        primary: a.primary,
-                    });
+                for &seg in &segs {
+                    if let Some((x0, y0, x1, y1)) = clip(seg, (xl, xh), (yl, yh)) {
+                        out.push(Hsp {
+                            x0: to_plot(rx, x0),
+                            y0: to_plot(ry, y0),
+                            x1: to_plot(rx, x1),
+                            y1: to_plot(ry, y1),
+                            identity: a.identity(),
+                            primary: a.primary,
+                        });
+                        placed = true;
+                    }
                 }
             }
         }
+        *n_placed += usize::from(placed);
     }
     out
 }
@@ -203,12 +222,16 @@ pub fn place(
 /// place it on the plot of `x` (horizontal) against `y` (vertical).
 pub fn load(path: &Path, x: &Sequence, y: &Sequence) -> Result<HspSet, PafError> {
     let (xr, yr) = (source_records(x), source_records(y));
-    let (alns, skipped, _) = read_paf_subset_oriented(path, &yr, &xr)?;
+    let (alns, skipped, _, paths) = read_paf_subset_oriented(path, &yr, &xr)?;
+    let mut placed = 0;
+    let hsps = place(&alns, &paths, &xr, &yr, x, y, &mut placed);
     Ok(HspSet {
         path: path.to_path_buf(),
-        hsps: place(&alns, &xr, &yr, x, y),
+        hsps,
         alignments: alns.len(),
         skipped,
+        placed,
+        with_cigar: paths.iter().filter(|p| p.is_some()).count(),
     })
 }
 
@@ -334,6 +357,36 @@ mod tests {
         assert_eq!(set.hsps.len(), 1);
         let h = set.hsps[0];
         assert_eq!((h.x0, h.y0, h.x1, h.y1), (10.0, 0.0, 0.0, 10.0));
+    }
+
+    #[test]
+    fn hsps_with_a_cigar_follow_it_across_indels() {
+        let x = seq(&format!(">b\n{}\n", "ACGT".repeat(10)));
+        let y = seq(&format!(">s\n{}\n", "ACG".repeat(10)));
+        let seg = |h: &Hsp| (h.x0, h.y0, h.x1, h.y1);
+        // A 20 bp deletion splits the line into its two gapless pieces.
+        let fwd = "s\t30\t0\t10\t+\tb\t40\t0\t30\t10\t30\t60\tcg:Z:5M20D5M\n";
+        let set = load(&write("cg1.paf", fwd), &x, &y).unwrap();
+        assert_eq!((set.placed, set.with_cigar), (1, 1));
+        let segs: Vec<_> = set.hsps.iter().map(seg).collect();
+        assert_eq!(segs, [(0.0, 0.0, 5.0, 5.0), (25.0, 5.0, 30.0, 10.0)]);
+        // The same PAF line written the other way round (I for D).
+        let swapped = "b\t40\t0\t30\t+\ts\t30\t0\t10\t10\t30\t60\tcg:Z:5M20I5M\n";
+        let set2 = load(&write("cg2.paf", swapped), &x, &y).unwrap();
+        assert_eq!(set2.hsps, set.hsps);
+        // Reverse strand: the query runs down from its end.
+        let rev = "s\t30\t0\t10\t-\tb\t40\t0\t30\t10\t30\t60\tcg:Z:5M20D5M\n";
+        let set3 = load(&write("cg3.paf", rev), &x, &y).unwrap();
+        let segs: Vec<_> = set3.hsps.iter().map(seg).collect();
+        assert_eq!(segs, [(0.0, 10.0, 5.0, 5.0), (25.0, 5.0, 30.0, 0.0)]);
+        // Small indels stay within one line; a CIGAR not spanning the
+        // alignment is ignored (straight line).
+        let small = "s\t30\t0\t10\t+\tb\t40\t0\t13\t10\t13\t60\tcg:Z:5M3D5M\n\
+                     s\t30\t0\t10\t+\tb\t40\t20\t30\t10\t10\t60\tcg:Z:9M\n";
+        let set4 = load(&write("cg4.paf", small), &x, &y).unwrap();
+        let segs: Vec<_> = set4.hsps.iter().map(seg).collect();
+        assert_eq!(segs, [(0.0, 0.0, 13.0, 10.0), (20.0, 0.0, 30.0, 10.0)]);
+        assert_eq!(set4.with_cigar, 1);
     }
 
     #[test]

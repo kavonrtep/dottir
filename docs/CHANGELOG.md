@@ -137,6 +137,12 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   dots), as the original Dotter. Either PAF orientation; records not
   plotted are skipped; sorted, flipped and region records are followed.
   Kept in sessions and drawn into saved images.
+  Alignments with a `cg:Z` CIGAR are drawn along it (gapless stretches,
+  ≤ 10 bp diagonal drift per line) instead of start to end, so long
+  alignments with indels stay on their dots.
+* GUI: while a computation runs, the plot is veiled and a badge in its
+  middle shows a spinner and the progress (it was only in the status
+  bar, easy to miss after panning a large plot).
 * `--export-alignment-at Q,S` (`--alignment-window`, `--alignment-format
   fasta|stockholm|text`) prints the residues around a dotplot position;
   `-o` becomes optional when only exporting (plan D5).

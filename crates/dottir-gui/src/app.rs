@@ -1298,9 +1298,10 @@ impl DottirApp {
         match dottir_io::hsp::load(&path, q, s) {
             Ok(set) => {
                 tracing::info!(
-                    "HSPs: {} alignments, {} placed, {} for other records",
+                    "HSPs: {} alignments, {} placed ({} along CIGARs), {} for other records",
                     set.alignments,
-                    set.hsps.len(),
+                    set.placed,
+                    set.with_cigar,
                     set.skipped
                 );
                 if set.hsps.is_empty() {
@@ -4371,15 +4372,25 @@ impl DottirApp {
             .file_name()
             .map_or_else(String::new, |f| f.to_string_lossy().into_owned());
         ui.label(
-            egui::RichText::new(format!("{name}: {} shown", h.hsps.len()))
+            egui::RichText::new(format!("{name}: {} shown", h.placed))
                 .size(11.0)
                 .color(Color32::from_gray(80)),
         )
         .on_hover_text(format!(
-            "{}\n{} alignments read, {} for records not plotted",
+            "{}\n{} alignments read, {} for records not plotted\n{}",
             h.path.display(),
             h.alignments,
-            h.skipped
+            h.skipped,
+            if h.with_cigar == h.alignments {
+                "Lines follow the alignments' CIGARs (cg:Z).".to_string()
+            } else {
+                format!(
+                    "{} of them without a CIGAR (cg:Z) are straight lines from start \
+                     to end, which drift off the dots across indels; minimap2 -c \
+                     writes CIGARs.",
+                    h.alignments - h.with_cigar
+                )
+            }
         ));
         let mut mode = self.hsp_mode;
         ui.horizontal_wrapped(|ui| {
@@ -4614,22 +4625,72 @@ impl DottirApp {
         }
     }
 
+    /// What the compute worker is doing, for the status bar and the
+    /// plot overlay.
+    fn progress_text(&self) -> String {
+        let (stage, f) = self.worker.progress();
+        match stage {
+            crate::compute_worker::Stage::Indexing => {
+                format!("Indexing for large mode… {:.0}%", f * 100.0)
+            }
+            crate::compute_worker::Stage::Large => {
+                format!("Large engine… {:.0}%", f * 100.0)
+            }
+            _ => "Recomputing…".to_string(),
+        }
+    }
+
+    /// While a computation runs, veil the (stale) plot and show a badge
+    /// with a spinner and the progress in its middle, so panning or
+    /// zooming a large plot visibly waits instead of looking finished.
+    fn draw_compute_overlay(&self, ui: &egui::Ui, plot_area: Rect) {
+        if !self.compute_in_flight {
+            return;
+        }
+        let painter = ui.painter().with_clip_rect(plot_area);
+        painter.rect_filled(
+            plot_area,
+            0.0,
+            Color32::from_rgba_unmultiplied(255, 255, 255, 90),
+        );
+        let font = egui::FontId::proportional(13.0);
+        let galley = painter.layout_no_wrap(self.progress_text(), font, Color32::from_gray(30));
+        let spin = 18.0;
+        let size = Vec2::new(
+            galley.size().x + spin + 30.0,
+            spin.max(galley.size().y) + 16.0,
+        );
+        let badge = Rect::from_center_size(plot_area.center(), size);
+        painter.rect(
+            badge,
+            6.0,
+            Color32::from_rgba_unmultiplied(250, 250, 250, 235),
+            egui::Stroke::new(1.0, Color32::from_gray(150)),
+        );
+        let spin_rect = Rect::from_center_size(
+            Pos2::new(badge.left() + 10.0 + spin / 2.0, badge.center().y),
+            Vec2::splat(spin),
+        );
+        egui::Spinner::new()
+            .size(spin)
+            .color(Color32::from_rgb(40, 90, 170))
+            .paint_at(ui, spin_rect);
+        painter.galley(
+            Pos2::new(
+                spin_rect.right() + 10.0,
+                badge.center().y - galley.size().y / 2.0,
+            ),
+            galley,
+            Color32::from_gray(30),
+        );
+    }
+
     fn draw_status_bar(&self, ctx: &Context) {
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 if self.compute_in_flight {
                     ui.spinner();
-                    let (stage, f) = self.worker.progress();
-                    let text = match stage {
-                        crate::compute_worker::Stage::Indexing => {
-                            format!("Indexing for large mode… {:.0}%", f * 100.0)
-                        }
-                        crate::compute_worker::Stage::Large => {
-                            format!("Large engine… {:.0}%", f * 100.0)
-                        }
-                        _ => "Recomputing…".to_string(),
-                    };
-                    ui.label(text);
+                    ui.label(self.progress_text());
                     ui.separator();
                 }
                 if let Some(err) = &self.last_error {
@@ -5405,6 +5466,8 @@ impl DottirApp {
                     );
                 }
             }
+
+            self.draw_compute_overlay(ui, plot_area);
 
             // C4: tick labels in the top / left margin bands —
             // outside the plot area so they don't overlap the image.

@@ -1,6 +1,7 @@
 //! PAF (minimap2 pairwise mapping format) reader and writer for genome
 //! mode (ADR 0008). Plain or gzipped input. Only the 12 mandatory columns
-//! and the `tp:A` / `de:f` tags are interpreted; other tags are ignored.
+//! and the `tp:A` / `de:f` tags are interpreted (plus `cg:Z` for HSP
+//! overlays, [`read_paf_subset_oriented`]); other tags are ignored.
 //!
 //! There is no noodles PAF crate; the format is 12 tab-separated columns.
 
@@ -65,7 +66,7 @@ pub fn read_paf_file(
     target: &[GenomeRecord],
     min_len: u64,
 ) -> Result<Vec<Alignment>, PafError> {
-    read_paf_impl(open_maybe_gz(path)?, query, target, true, min_len).map(|(a, _)| a)
+    read_paf_impl(open_maybe_gz(path)?, query, target, true, min_len, false).map(|(a, ..)| a)
 }
 
 /// Read a PAF for a plot with `vertical` records on the query side and
@@ -157,30 +158,114 @@ pub fn read_paf<R: BufRead>(
     query: &[GenomeRecord],
     target: &[GenomeRecord],
 ) -> Result<Vec<Alignment>, PafError> {
-    read_paf_impl(reader, query, target, true, 0).map(|(a, _)| a)
+    read_paf_impl(reader, query, target, true, 0, false).map(|(a, ..)| a)
 }
 
 /// Like [`read_paf_oriented`], but lines naming records outside the
 /// lists are skipped instead of failing (overlays on a dotplot of some of
 /// the records). Returns the alignments, the number of lines skipped, and
 /// whether the PAF was read swapped: the orientation that places more
-/// alignments wins.
+/// alignments wins. Also each alignment's [`AlignmentPath`] when it has a
+/// valid `cg:Z` CIGAR, in the returned orientation.
 pub fn read_paf_subset_oriented(
     path: &Path,
     vertical: &[GenomeRecord],
     horizontal: &[GenomeRecord],
-) -> Result<(Vec<Alignment>, u64, bool), PafError> {
+) -> Result<SubsetRead, PafError> {
     let read = |q: &[GenomeRecord], t: &[GenomeRecord]| {
-        read_paf_impl(open_maybe_gz(path)?, q, t, false, 0)
+        read_paf_impl(open_maybe_gz(path)?, q, t, false, 0, true)
+    };
+    let swap = |b: Vec<Alignment>, m, paths: Vec<Option<AlignmentPath>>| {
+        let paths = paths
+            .into_iter()
+            .map(|p| {
+                p.map(|p| {
+                    p.into_iter()
+                        .map(|[q0, t0, q1, t1]| [t0, q0, t1, q1])
+                        .collect()
+                })
+            })
+            .collect();
+        Ok((b.iter().map(Alignment::swapped).collect(), m, true, paths))
     };
     match (read(vertical, horizontal), read(horizontal, vertical)) {
-        (Ok((a, _)), Ok((b, m))) if b.len() > a.len() => {
-            Ok((b.iter().map(Alignment::swapped).collect(), m, true))
-        }
-        (Ok((a, n)), _) => Ok((a, n, false)),
-        (Err(_), Ok((b, m))) => Ok((b.iter().map(Alignment::swapped).collect(), m, true)),
+        (Ok((a, _, _)), Ok((b, m, pb))) if b.len() > a.len() => swap(b, m, pb),
+        (Ok((a, n, pa)), _) => Ok((a, n, false, pa)),
+        (Err(_), Ok((b, m, pb))) => swap(b, m, pb),
         (Err(e), Err(_)) => Err(e),
     }
+}
+
+/// Alignments, lines skipped and (when asked for) their paths.
+type PafRead = (Vec<Alignment>, u64, Vec<Option<AlignmentPath>>);
+
+/// [`read_paf_subset_oriented`]: alignments, lines skipped, read
+/// swapped, paths.
+pub type SubsetRead = (Vec<Alignment>, u64, bool, Vec<Option<AlignmentPath>>);
+
+/// Gapless pieces of an alignment from its `cg:Z` CIGAR, as
+/// `[q0, t0, q1, t1]` source positions (query descending on the reverse
+/// strand). Pieces separated by indels are merged while the diagonal
+/// drifts by at most [`PATH_TOLERANCE`] bases.
+pub type AlignmentPath = Vec<[u64; 4]>;
+
+/// Diagonal drift (bp) allowed within one piece of an [`AlignmentPath`].
+pub const PATH_TOLERANCE: u64 = 10;
+
+/// The [`AlignmentPath`] of `a` from CIGAR `cg`; `None` when the CIGAR is
+/// malformed or does not span the alignment.
+fn cigar_path(cg: &str, a: &Alignment) -> Option<AlignmentPath> {
+    let (mut qp, mut tp) = (0_u64, 0_u64);
+    let mut out: AlignmentPath = Vec::new();
+    // Current piece, in alignment-relative positions.
+    let mut piece: Option<(u64, u64, u64, u64)> = None;
+    let at = |qp: u64, tp: u64| {
+        let q = if a.reverse {
+            a.q_end - qp
+        } else {
+            a.q_start + qp
+        };
+        (q, a.t_start + tp)
+    };
+    let close = |out: &mut AlignmentPath, (q0, t0, q1, t1): (u64, u64, u64, u64)| {
+        let (a0, b0) = at(q0, t0);
+        let (a1, b1) = at(q1, t1);
+        out.push([a0, b0, a1, b1]);
+    };
+    let mut n = 0_u64;
+    for c in cg.bytes() {
+        if c.is_ascii_digit() {
+            n = n.checked_mul(10)?.checked_add(u64::from(c - b'0'))?;
+            continue;
+        }
+        match c {
+            b'M' | b'=' | b'X' => {
+                piece = match piece {
+                    Some((q0, t0, _, _)) if (qp - q0).abs_diff(tp - t0) <= PATH_TOLERANCE => {
+                        Some((q0, t0, qp + n, tp + n))
+                    }
+                    Some(p) => {
+                        close(&mut out, p);
+                        Some((qp, tp, qp + n, tp + n))
+                    }
+                    None => Some((qp, tp, qp + n, tp + n)),
+                };
+                qp += n;
+                tp += n;
+            }
+            b'I' => qp += n,
+            b'D' | b'N' => tp += n,
+            _ => return None,
+        }
+        n = 0;
+    }
+    if n != 0 || qp != a.q_end - a.q_start || tp != a.t_end - a.t_start {
+        return None;
+    }
+    if let Some(p) = piece {
+        close(&mut out, p);
+    }
+    Some(out)
 }
 
 fn read_paf_impl<R: BufRead>(
@@ -189,10 +274,12 @@ fn read_paf_impl<R: BufRead>(
     target: &[GenomeRecord],
     strict: bool,
     min_len: u64,
-) -> Result<(Vec<Alignment>, u64), PafError> {
+    keep_paths: bool,
+) -> Result<PafRead, PafError> {
     let mut qn = Names::new("query", query);
     let mut tn = Names::new("target", target);
     let mut out = Vec::new();
+    let mut paths = Vec::new();
     let mut buf = String::new();
     let mut line = 0u64;
     let mut skipped = 0u64;
@@ -236,11 +323,14 @@ fn read_paf_impl<R: BufRead>(
         }
         let mut primary = true;
         let mut divergence = None;
+        let mut cigar = None;
         for tag in &cols[12..] {
             if let Some(v) = tag.strip_prefix("tp:A:") {
                 primary = matches!(v, "P" | "I");
             } else if let Some(v) = tag.strip_prefix("de:f:") {
                 divergence = Some(v.parse().map_err(|_| bad(&format!("bad de:f tag {v:?}")))?);
+            } else if let Some(v) = tag.strip_prefix("cg:Z:").filter(|_| keep_paths) {
+                cigar = Some(v);
             }
         }
         let q = qn.resolve(line, cols[0], q_len)?;
@@ -252,7 +342,7 @@ fn read_paf_impl<R: BufRead>(
         if (q_end - q_start).max(t_end - t_start) < min_len {
             continue;
         }
-        out.push(Alignment {
+        let a = Alignment {
             q_rec,
             q_start,
             q_end,
@@ -265,7 +355,11 @@ fn read_paf_impl<R: BufRead>(
             mapq,
             primary,
             divergence,
-        });
+        };
+        if keep_paths {
+            paths.push(cigar.and_then(|cg| cigar_path(cg, &a)));
+        }
+        out.push(a);
     }
     if strict {
         qn.finish()?;
@@ -276,7 +370,7 @@ fn read_paf_impl<R: BufRead>(
     if !out.is_empty() && out.iter().all(|a| !a.primary) {
         assign_primary(&mut out, MASK_LEVEL);
     }
-    Ok((out, skipped))
+    Ok((out, skipped, paths))
 }
 
 /// Write alignments as PAF: 12 columns, `tp:A:P|S`, and `de:f` when known.
