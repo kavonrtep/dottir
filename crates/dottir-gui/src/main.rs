@@ -151,9 +151,9 @@ struct Cli {
     #[arg(long, value_name = "ARGS", allow_hyphen_values = true)]
     aligner_args: Option<String>,
 
-    /// Genome self-comparison: keep all copies of repeats (`-P`).
-    #[arg(long)]
-    self_all_copies: bool,
+    /// Genome mode: keep all copies of repeats (`-P`).
+    #[arg(long, alias = "self-all-copies")]
+    all_copies: bool,
 
     /// Reorder and reverse-complement the subject's (`vertical`) or the
     /// query's (`horizontal`) records along the other sequence after
@@ -215,7 +215,7 @@ impl Cli {
                         aligner: self.aligner,
                         preset: self.preset,
                         aligner_args: self.aligner_args.unwrap_or_default(),
-                        self_all_copies: self.self_all_copies,
+                        all_copies: self.all_copies,
                     }),
                     ..StartupConfig::default()
                 };

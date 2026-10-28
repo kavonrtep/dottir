@@ -43,7 +43,9 @@ pub struct GenomeInputs {
     pub aligner: String,
     pub preset: String,
     pub aligner_args: String,
-    pub self_all_copies: bool,
+    /// Keep every chain (`-P`).
+    #[serde(alias = "self_all_copies")]
+    pub all_copies: bool,
 }
 
 impl Default for GenomeInputs {
@@ -55,7 +57,7 @@ impl Default for GenomeInputs {
             aligner: "auto".into(),
             preset: "asm20".into(),
             aligner_args: String::new(),
-            self_all_copies: false,
+            all_copies: false,
         }
     }
 }
@@ -226,7 +228,7 @@ fn load(
                 threads: std::thread::available_parallelism().map_or(1, |n| n.get()),
                 chunk_size: 10_000_000,
                 self_comparison,
-                all_copies: inputs.self_all_copies,
+                all_copies: inputs.all_copies,
             };
             status.stage(format!(
                 "Aligning with {} {}",
@@ -248,7 +250,7 @@ fn load(
             let alns = read_paf_file(&out.paf, &y.records, &x.records)
                 .map_err(|e| format!("{}: {e}", out.paf.display()))?;
             let cached = if out.cached { ", cached" } else { "" };
-            let all = if inputs.self_all_copies { " -P" } else { "" };
+            let all = if inputs.all_copies { " -P" } else { "" };
             (
                 alns,
                 format!(
@@ -277,6 +279,8 @@ fn file_name(p: &Path) -> String {
 pub enum GenomeAction {
     /// Compute a dotplot of these regions (x = query, y = subject).
     DrillDown { x: Vec<Region>, y: Vec<Region> },
+    /// Run the aligner again with these inputs.
+    Realign(GenomeInputs),
 }
 
 /// View window in axis coordinates (bp): `x0..x1` × `y0..y1`.
@@ -1039,6 +1043,30 @@ impl GenomeView {
             thousands(d.alns.len() as u64),
             thousands(self.drawn as u64)
         )));
+        ui.separator();
+
+        if self.inputs.paf.is_none() {
+            let mut all = self.inputs.all_copies;
+            if ui
+                .checkbox(&mut all, small("Keep all copies of repeats (-P)".into()))
+                .on_hover_text(
+                    "By default the aligner reports each region's best \
+                     placement only, so repeats are mostly absent. -P keeps \
+                     every chain: transposon and duplication blocks appear \
+                     (often 10–100× more alignments). Satellite arrays stay \
+                     hidden; dot-plot a region for those. Re-runs the \
+                     aligner (cached).",
+                )
+                .changed()
+            {
+                let mut inputs = self.inputs.clone();
+                inputs.all_copies = all;
+                action = Some(GenomeAction::Realign(inputs));
+            }
+            if !all {
+                ui.label(weak("Repeats mostly hidden (best placement only)".into()));
+            }
+        }
         ui.separator();
 
         heading(ui, "Filters");

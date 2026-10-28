@@ -44,6 +44,10 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 * Genome view uses the dotplot layout: controls in a right-hand panel with
   the dotplot's compact fonts, pointer position in the status bar, shared
   menu with *Fit*, *Back* and *Save PNG* acting on the genome plot.
+* Genome mode: `--all-copies` (was `--self-all-copies`, kept as an alias)
+  now applies to pairwise comparisons too, and the GUI panel has a *Keep
+  all copies of repeats (-P)* checkbox (off by default) that re-aligns
+  while keeping filters, sort and flips.
 * **Large-sequence mode** (ADR 0007, spec §4.6): a seed-based engine for DNA
   comparisons at chromosome/genome scale (tested to 100 Mb × 100 Mb,
   multi-record).

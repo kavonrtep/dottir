@@ -76,7 +76,9 @@ down, where large mode takes over.
      plain `asm20` returns only the 4 diagonal records; `-D --dual=no`
      returns 797, including inverted repeats crossing the diagonal.
      `--self-all-copies` adds `-P` (all chains, copy against copy:
-     31 k records there) for repeat-family structure.
+     31 k records there) for repeat-family structure. Later generalised
+     to pairwise runs as `--all-copies` (off by default): Col-CC × TAIR10
+     goes from 203 to 597 k alignments.
 
 4. **Display follows D-GENIES, rendered deterministically.**
    * Each alignment is a line from (q_start, t_start) to (q_end, t_end),

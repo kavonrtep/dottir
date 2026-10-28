@@ -167,7 +167,8 @@ pub struct AlignRequest<'a> {
     pub threads: usize,
     pub chunk_size: u64,
     pub self_comparison: bool,
-    /// Self-comparison: keep all chains (`-P`).
+    /// Keep every chain (`-P`): all copies of repeats, not only the best
+    /// placement of each region.
     pub all_copies: bool,
 }
 
@@ -177,9 +178,9 @@ impl AlignRequest<'_> {
         let mut a = vec!["-x".to_string(), self.preset.clone()];
         if self.self_comparison {
             a.extend(["-D", "--dual=no"].map(String::from));
-            if self.all_copies {
-                a.push("-P".into());
-            }
+        }
+        if self.all_copies {
+            a.push("-P".into());
         }
         a.extend(self.extra_args.iter().cloned());
         a

@@ -2538,6 +2538,15 @@ impl DottirApp {
         });
         match action {
             Some(GenomeAction::DrillDown { x, y }) => self.drill_down(x, y),
+            Some(GenomeAction::Realign(inputs)) => {
+                // Keep filters, sort and flips across the re-run.
+                if let Some(g) = &self.genome {
+                    let mut keep = crate::session::SessionGenome::from_view(g, true);
+                    keep.inputs = inputs.clone();
+                    self.genome_pending = Some(keep);
+                }
+                self.start_genome_load(ctx, inputs);
+            }
             None => {}
         }
     }
@@ -2655,13 +2664,12 @@ impl DottirApp {
                                 );
                             ui.end_row();
                         });
-                    ui.add_enabled(
-                        inputs.query.is_none(),
-                        egui::Checkbox::new(
-                            &mut inputs.self_all_copies,
-                            "Self-comparison: all copies of repeats (-P)",
-                        ),
-                    );
+                    ui.checkbox(&mut inputs.all_copies, "Keep all copies of repeats (-P)")
+                        .on_hover_text(
+                            "Off: each region's best placement only, so repeats \
+                             are mostly hidden. On: every chain, often 10–100× \
+                             more alignments.",
+                        );
                     ui.weak("Results are cached; reopening the same comparison is quick.");
                 }
                 if let Some(e) = error {

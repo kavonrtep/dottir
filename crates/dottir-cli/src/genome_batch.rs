@@ -65,10 +65,10 @@ pub struct GenomeArgs {
     #[arg(long, value_name = "BP", default_value_t = 10_000_000)]
     pub chunk_size: u64,
 
-    /// Self-comparison: keep every chain (`-P`), i.e. all copies of each
-    /// repeat against each other. Can be millions of alignments.
-    #[arg(long)]
-    pub self_all_copies: bool,
+    /// Keep every chain (`-P`): all copies of repeats instead of the best
+    /// placement of each region. Can be millions of alignments.
+    #[arg(long, alias = "self-all-copies")]
+    pub all_copies: bool,
 
     /// Re-run the aligner even if a cached result exists.
     #[arg(long)]
@@ -331,7 +331,7 @@ fn run_aligner(
         threads,
         chunk_size: g.chunk_size,
         self_comparison,
-        all_copies: g.self_all_copies,
+        all_copies: g.all_copies,
     };
     let last = std::sync::Mutex::new(0u64);
     let progress = |done: u64, total: u64| {

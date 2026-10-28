@@ -38,7 +38,7 @@ read — the sequences are never loaded.
 | `--aligner-args` | — | extra arguments, e.g. `"-c"` for exact identities |
 | `--threads` | all cores | aligner threads |
 | `--chunk-size` | 10 Mb | query records go to the aligner in pieces this long |
-| `--self-all-copies` | off | self-comparison: keep every chain (`-P`) |
+| `--all-copies` | off | keep every chain (`-P`): all copies of repeats |
 | `--no-cache` | off | re-run the aligner even if a cached result exists |
 
 [mm2plus](https://github.com/at-cg/mm2-plus) is an accelerated minimap2
@@ -54,9 +54,17 @@ again. Like D-GENIES, this keeps the aligner's memory bounded (Col-CC ×
 **Self-comparison** (one input) runs with `-D --dual=no`: the trivial
 diagonal is not aligned, so duplicated regions show up as alignments in
 their own right; the plot mirrors them and draws the diagonal itself.
-`--self-all-copies` adds `-P`, which aligns every copy of every repeat
-against every other — the Col-CC centromeres alone give a million
-alignments.
+
+**Repeats.** The assembly presets report each region's best placement
+and never seed from very frequent k-mers, so the default plot is
+repeat-blind: Col-CC × TAIR10 gives 203 alignments, one clean diagonal.
+`--all-copies` (*Keep all copies of repeats* in the GUI, off by default)
+adds `-P`, keeping every chain: the same pair gives 597 k alignments in
+42 s, with the pericentromeric transposon blocks shared by all
+chromosomes. In a self-comparison the Col-CC centromeres alone give a
+million. Satellite arrays such as CEN180 stay mostly empty either way;
+dot-plot a region (below) to see them. `--self-all-copies` is accepted as
+an alias.
 
 **Cache.** Results are kept in `~/.cache/dottir/genome/` (or
 `$XDG_CACHE_HOME/dottir`, `%LOCALAPPDATA%\dottir\cache` on Windows,
@@ -139,7 +147,8 @@ The layout is the dotplot's: menu bar with the two inputs, controls on
 the right, pointer position in the status bar. *Fit* and *Back* (also in
 *View*, and *File → Save PNG*) act on the genome view. The right panel
 has the same filters as the CLI (applied instantly, no re-alignment),
-*Sort query along reference*, line width, the identity legend and exports
+*Sort query along reference*, *Keep all copies of repeats* (re-runs the
+aligner, keeping the filters), line width, the identity legend and exports
 (plot PNG, association table, query FASTA in plot order, drawn alignments
 as PAF). Dotplot-only menu items are disabled. The plot is redrawn at
 screen resolution for every view, so lines stay sharp at any zoom.
