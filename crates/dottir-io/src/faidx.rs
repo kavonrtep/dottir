@@ -1,0 +1,397 @@
+//! FASTA index (samtools `.fai`) builder and region reader, so genome
+//! mode can work with record names and lengths and read only the regions
+//! it draws (spec §4.7.8).
+//!
+//! Gzipped input (bgzip included) is decompressed once into the cache
+//! directory by [`plain_fasta`]; this avoids a BGZF dependency at the cost
+//! of disk space.
+
+use std::collections::BTreeMap;
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
+
+use dottir_core::genome::GenomeRecord;
+use sha2::{Digest, Sha256};
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum FaidxError {
+    #[error("I/O error on {path}: {source}")]
+    Io {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error("{path} is gzipped; pass it through plain_fasta() first")]
+    Gzipped { path: PathBuf },
+    #[error("{path}, line {line}: {msg}")]
+    Format {
+        path: PathBuf,
+        line: u64,
+        msg: String,
+    },
+    #[error("bad index {path}, line {line}")]
+    BadIndex { path: PathBuf, line: u64 },
+    #[error("region {name}:{start}-{end} is outside the record (length {len})")]
+    Range {
+        name: String,
+        start: u64,
+        end: u64,
+        len: u64,
+    },
+}
+
+fn io_err(path: &Path) -> impl FnOnce(std::io::Error) -> FaidxError + '_ {
+    move |source| FaidxError::Io {
+        path: path.to_path_buf(),
+        source,
+    }
+}
+
+/// One `.fai` line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FaiEntry {
+    pub name: String,
+    pub len: u64,
+    /// Byte offset of the first base.
+    pub offset: u64,
+    pub line_bases: u64,
+    /// Bytes per line, newline included.
+    pub line_bytes: u64,
+}
+
+/// Scan a plain FASTA file and build its index. Like samtools, every
+/// sequence line of a record except the last must have the same length.
+pub fn build_fai(path: &Path) -> Result<Vec<FaiEntry>, FaidxError> {
+    let mut r = BufReader::with_capacity(1 << 20, std::fs::File::open(path).map_err(io_err(path))?);
+    if r.fill_buf()
+        .map_err(io_err(path))?
+        .starts_with(&[0x1f, 0x8b])
+    {
+        return Err(FaidxError::Gzipped {
+            path: path.to_path_buf(),
+        });
+    }
+    let fmt = |line: u64, msg: &str| FaidxError::Format {
+        path: path.to_path_buf(),
+        line,
+        msg: msg.to_string(),
+    };
+    let mut out: Vec<FaiEntry> = Vec::new();
+    let mut buf = Vec::new();
+    let mut pos = 0u64;
+    let mut line = 0u64;
+    // State of the current record: a short (last) line or a blank line
+    // has been seen, so any further sequence line is an error.
+    let mut ended = false;
+    loop {
+        buf.clear();
+        let n = r.read_until(b'\n', &mut buf).map_err(io_err(path))? as u64;
+        if n == 0 {
+            break;
+        }
+        line += 1;
+        let start = pos;
+        pos += n;
+        let content = buf.strip_suffix(b"\n").unwrap_or(&buf);
+        let content = content.strip_suffix(b"\r").unwrap_or(content);
+        if let Some(header) = content.strip_prefix(b">") {
+            let name = header
+                .split(|b| b.is_ascii_whitespace())
+                .next()
+                .unwrap_or_default();
+            if name.is_empty() {
+                return Err(fmt(line, "empty record name"));
+            }
+            out.push(FaiEntry {
+                name: String::from_utf8_lossy(name).into_owned(),
+                len: 0,
+                offset: pos,
+                line_bases: 0,
+                line_bytes: 0,
+            });
+            ended = false;
+            continue;
+        }
+        let Some(e) = out.last_mut() else {
+            if content.is_empty() {
+                continue;
+            }
+            return Err(fmt(line, "sequence before the first '>' header"));
+        };
+        let bases = content.len() as u64;
+        if bases == 0 {
+            ended = true;
+            continue;
+        }
+        if ended {
+            return Err(fmt(line, "line lengths differ within the record"));
+        }
+        if e.line_bases == 0 {
+            e.offset = start;
+            e.line_bases = bases;
+            e.line_bytes = n;
+        } else if bases > e.line_bases || (bases == e.line_bases && n != e.line_bytes) {
+            return Err(fmt(line, "line lengths differ within the record"));
+        } else if bases < e.line_bases {
+            ended = true;
+        }
+        e.len += bases;
+    }
+    Ok(out)
+}
+
+/// Parse `.fai` text.
+pub fn parse_fai(text: &str, path: &Path) -> Result<Vec<FaiEntry>, FaidxError> {
+    text.lines()
+        .enumerate()
+        .filter(|(_, l)| !l.is_empty())
+        .map(|(i, l)| {
+            let bad = || FaidxError::BadIndex {
+                path: path.to_path_buf(),
+                line: i as u64 + 1,
+            };
+            let c: Vec<&str> = l.split('\t').collect();
+            if c.len() < 5 {
+                return Err(bad());
+            }
+            let n = |k: usize| c[k].parse::<u64>().map_err(|_| bad());
+            Ok(FaiEntry {
+                name: c[0].to_string(),
+                len: n(1)?,
+                offset: n(2)?,
+                line_bases: n(3)?,
+                line_bytes: n(4)?,
+            })
+        })
+        .collect()
+}
+
+/// Write `.fai` text.
+pub fn write_fai<W: Write>(mut w: W, entries: &[FaiEntry]) -> std::io::Result<()> {
+    for e in entries {
+        writeln!(
+            w,
+            "{}\t{}\t{}\t{}\t{}",
+            e.name, e.len, e.offset, e.line_bases, e.line_bytes
+        )?;
+    }
+    w.flush()
+}
+
+fn is_gzipped(path: &Path) -> Result<bool, FaidxError> {
+    let mut magic = [0u8; 2];
+    let mut f = std::fs::File::open(path).map_err(io_err(path))?;
+    let n = f.read(&mut magic).map_err(io_err(path))?;
+    Ok(n == 2 && magic == [0x1f, 0x8b])
+}
+
+/// Cache key for a file: canonical path, size and modification time.
+fn file_key(path: &Path) -> Result<String, FaidxError> {
+    let meta = std::fs::metadata(path).map_err(io_err(path))?;
+    let canon = std::fs::canonicalize(path).map_err(io_err(path))?;
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_nanos());
+    let mut h = Sha256::new();
+    h.update(canon.to_string_lossy().as_bytes());
+    h.update(meta.len().to_le_bytes());
+    h.update(mtime.to_le_bytes());
+    Ok(h.finalize()
+        .iter()
+        .take(8)
+        .map(|b| format!("{b:02x}"))
+        .collect())
+}
+
+/// A plain FASTA path for `path`: `path` itself, or for gzipped input a
+/// decompressed copy in `cache_dir` (made once, reused while the input's
+/// path, size and modification time are unchanged).
+pub fn plain_fasta(path: &Path, cache_dir: &Path) -> Result<PathBuf, FaidxError> {
+    if !is_gzipped(path)? {
+        return Ok(path.to_path_buf());
+    }
+    let stem = path
+        .file_name()
+        .map(|n| n.to_string_lossy().trim_end_matches(".gz").to_string())
+        .unwrap_or_default();
+    let dir = cache_dir.join("fasta");
+    let out = dir.join(format!("{}-{stem}", file_key(path)?));
+    if out.exists() {
+        return Ok(out);
+    }
+    std::fs::create_dir_all(&dir).map_err(io_err(&dir))?;
+    let tmp = out.with_extension(format!("tmp{}", std::process::id()));
+    {
+        let mut src = crate::paf::open_maybe_gz(path).map_err(io_err(path))?;
+        let mut dst = std::io::BufWriter::new(std::fs::File::create(&tmp).map_err(io_err(&tmp))?);
+        std::io::copy(&mut src, &mut dst).map_err(io_err(path))?;
+        dst.flush().map_err(io_err(&tmp))?;
+    }
+    std::fs::rename(&tmp, &out).map_err(io_err(&out))?;
+    Ok(out)
+}
+
+/// An indexed plain FASTA file.
+#[derive(Debug, Clone)]
+pub struct FastaIndex {
+    pub path: PathBuf,
+    pub entries: Vec<FaiEntry>,
+    by_name: BTreeMap<String, usize>,
+}
+
+impl FastaIndex {
+    /// Index a plain FASTA file: reuse `path.fai` when it is at least as
+    /// new as the FASTA, else build it and write it next to the FASTA, or
+    /// to `cache_dir` when that directory is not writable.
+    pub fn open(path: &Path, cache_dir: &Path) -> Result<Self, FaidxError> {
+        let beside = PathBuf::from(format!("{}.fai", path.display()));
+        let cached = cache_dir
+            .join("fai")
+            .join(format!("{}.fai", file_key(path)?));
+        let mtime = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+        let fasta_time = mtime(path);
+        for idx in [&beside, &cached] {
+            if mtime(idx).is_some() && mtime(idx) >= fasta_time {
+                let text = std::fs::read_to_string(idx).map_err(io_err(idx))?;
+                return Ok(Self::from_entries(path, parse_fai(&text, idx)?));
+            }
+        }
+        let entries = build_fai(path)?;
+        let write = |p: &Path| -> std::io::Result<()> {
+            if let Some(d) = p.parent() {
+                std::fs::create_dir_all(d)?;
+            }
+            write_fai(std::io::BufWriter::new(std::fs::File::create(p)?), &entries)
+        };
+        if write(&beside).is_err() {
+            write(&cached).map_err(io_err(&cached))?;
+        }
+        Ok(Self::from_entries(path, entries))
+    }
+
+    pub fn from_entries(path: &Path, entries: Vec<FaiEntry>) -> Self {
+        let by_name = entries
+            .iter()
+            .enumerate()
+            .map(|(i, e)| (e.name.clone(), i))
+            .collect();
+        Self {
+            path: path.to_path_buf(),
+            entries,
+            by_name,
+        }
+    }
+
+    /// Record names and lengths, in file order.
+    pub fn records(&self) -> Vec<GenomeRecord> {
+        self.entries
+            .iter()
+            .map(|e| GenomeRecord {
+                name: e.name.clone(),
+                len: e.len,
+            })
+            .collect()
+    }
+
+    pub fn find(&self, name: &str) -> Option<usize> {
+        self.by_name.get(name).copied()
+    }
+
+    /// Residues `range` of record `rec`, uppercased.
+    pub fn fetch(&self, rec: usize, range: std::ops::Range<u64>) -> Result<Vec<u8>, FaidxError> {
+        let e = &self.entries[rec];
+        if range.start > range.end || range.end > e.len {
+            return Err(FaidxError::Range {
+                name: e.name.clone(),
+                start: range.start,
+                end: range.end,
+                len: e.len,
+            });
+        }
+        if range.is_empty() {
+            return Ok(Vec::new());
+        }
+        let byte = |i: u64| e.offset + i / e.line_bases * e.line_bytes + i % e.line_bases;
+        let (from, to) = (byte(range.start), byte(range.end - 1) + 1);
+        let mut f = std::fs::File::open(&self.path).map_err(io_err(&self.path))?;
+        f.seek(SeekFrom::Start(from)).map_err(io_err(&self.path))?;
+        let mut raw = vec![0u8; (to - from) as usize];
+        f.read_exact(&mut raw).map_err(io_err(&self.path))?;
+        raw.retain(|b| !b.is_ascii_whitespace());
+        raw.make_ascii_uppercase();
+        Ok(raw)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmp(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("dottir-faidx-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    // samtools faidx output for this file:
+    // r1 10 9 4 5 / r2 6 27 6 8
+    const FA: &str = ">r1 desc\nACGT\nacgt\nAC\n>r2\r\nGGGTTT\r\n";
+
+    #[test]
+    fn index_matches_samtools_and_regions_cross_lines() {
+        let d = tmp("basic");
+        let p = d.join("a.fa");
+        std::fs::write(&p, FA).unwrap();
+        let idx = FastaIndex::open(&p, &d.join("cache")).unwrap();
+        let mut text = Vec::new();
+        write_fai(&mut text, &idx.entries).unwrap();
+        assert_eq!(
+            String::from_utf8(text).unwrap(),
+            "r1\t10\t9\t4\t5\nr2\t6\t27\t6\t8\n"
+        );
+        assert_eq!(idx.fetch(0, 2..9).unwrap(), b"GTACGTA");
+        assert_eq!(idx.fetch(0, 0..10).unwrap(), b"ACGTACGTAC");
+        assert_eq!(idx.fetch(1, 1..6).unwrap(), b"GGTTT");
+        assert!(idx.fetch(1, 0..7).is_err());
+        // The index was written beside the FASTA and is reused.
+        assert!(d.join("a.fa.fai").exists());
+        let again = FastaIndex::open(&p, &d.join("cache")).unwrap();
+        assert_eq!(again.entries, idx.entries);
+        assert_eq!(again.records()[0].len, 10);
+    }
+
+    #[test]
+    fn ragged_lines_are_rejected() {
+        let d = tmp("ragged");
+        let p = d.join("a.fa");
+        std::fs::write(&p, ">r\nACGT\nAC\nACGT\n").unwrap();
+        assert!(matches!(
+            build_fai(&p),
+            Err(FaidxError::Format { line: 4, .. })
+        ));
+        std::fs::write(&p, ">r\nACGT\nACGTA\n").unwrap();
+        assert!(matches!(
+            build_fai(&p),
+            Err(FaidxError::Format { line: 3, .. })
+        ));
+    }
+
+    #[test]
+    fn gzipped_input_is_decompressed_once_into_the_cache() {
+        let d = tmp("gz");
+        let p = d.join("a.fa.gz");
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        gz.write_all(FA.as_bytes()).unwrap();
+        std::fs::write(&p, gz.finish().unwrap()).unwrap();
+        assert!(matches!(build_fai(&p), Err(FaidxError::Gzipped { .. })));
+        let plain = plain_fasta(&p, &d.join("cache")).unwrap();
+        assert_ne!(plain, p);
+        assert_eq!(std::fs::read_to_string(&plain).unwrap(), FA);
+        assert_eq!(plain_fasta(&p, &d.join("cache")).unwrap(), plain);
+        let idx = FastaIndex::open(&plain, &d.join("cache")).unwrap();
+        assert_eq!(idx.fetch(1, 0..3).unwrap(), b"GGG");
+    }
+}

@@ -10,10 +10,12 @@
 //!   its own sequences after `##FASTA`.
 //! * [`png_export`] — greyscale 8-bit PNG with `tEXt` provenance chunks.
 //! * [`params`] — TOML sidecar describing the inputs and parameters.
+//! * [`paf`], [`faidx`], [`cache`] — genome mode (ADR 0008): PAF reader,
+//!   FASTA index and region reader, user cache directory.
 //!
 //! ## Future phases
 //!
-//! GFF3 (`noodles-gff`), PAF (`noodles-paf`), `.dot` binary format,
+//! GFF3 (`noodles-gff`), `.dot` binary format,
 //! and SVG/PDF export are not yet wired — they land in Phases 4-extra
 //! and 6.
 
@@ -21,10 +23,13 @@
 
 pub mod alignment;
 pub mod annotation;
+pub mod cache;
 pub mod dot_format;
+pub mod faidx;
 pub mod fasta;
 pub mod input;
 pub mod large;
+pub mod paf;
 pub mod params;
 pub mod png_export;
 pub mod sequence;

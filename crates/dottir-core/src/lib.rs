@@ -32,6 +32,7 @@ pub mod alphabet;
 pub mod antidiag;
 pub mod error;
 pub mod find_peaks;
+pub mod genome;
 pub mod karlin;
 pub mod large;
 pub mod matrix;
