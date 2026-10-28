@@ -182,8 +182,11 @@ On an 8-core desktop with synthetic, repeat-rich genomes:
 | Input | Wall time | Peak RSS |
 |-------|-----------|----------|
 | 10 Mb self | 4–7 s | 0.5 GB |
-| 100 Mb self | 2 min 14 s | 1.9 GB |
-| 100 Mb × 100 Mb | 4 min 7 s | 2.5 GB |
+| 100 Mb self | 57 s | 1.8 GB |
+| 100 Mb × 100 Mb | 1 min 22 s | 2.4 GB |
+| 600 Mb self (`--large-memory-limit-bytes` 16 GiB) | 3 min 2 s | 10.3 GB |
+
+These use the default automatic seed sampling.
 
 Run time grows with the number of seed hits, i.e. with repeat content. If
 a repeat-rich genome is slow, lower `--max-occ` or use a heavier seed.
