@@ -22,13 +22,16 @@ Each positional is a FASTA file, or a GFF3 file with an embedded
 | `-W, --window N` | Karlin/Altschul estimate | Sliding window size. |
 | `-z, --zoom N` | `1` | Computation zoom (pixels per matrix block). |
 | `-p, --pixel-fac N` | `50` | Multiplier in `min(255, score * pixel_fac / W)`. |
-| `--mode {blastn,blastp}` | `blastn` | BLAST mode. |
+| `--mode {blastn,blastp,blastx}` | `blastn` | BLAST mode. |
 | `--matrix NAME` | DNA+5/-4 or BLOSUM62 | Built-in score matrix. |
 | `--strand {forward,reverse,both}` | `both` | BLASTN strand selection. |
 | `-m, --memory-mib N` | `512` | Pixelmap memory cap, MiB. |
 | `--gff PATH` | — | Annotation overlay (GFF3/BED) applied to **both** axes. `--bed` alias. |
 | `--gff-query PATH` | — | Annotation overlay for the query (horizontal) axis. `--bed-query` alias. |
 | `--gff-subject PATH` | — | Annotation overlay for the subject (vertical) axis. `--bed-subject` alias. |
+| `--hsp-paf PATH` | — | Alignments of a PAF file drawn over the plot ([HSPs](#hsps-paf)). |
+| `--hsp-mode {line,score,greyscale,off}` | `line` | How the HSPs are drawn. |
+| `--sort-records {vertical,horizontal}` | — | Order and orient one input's records along the other ([Sorting records](./large.md#sorting-records)). |
 
 Per-axis flags override `--gff`, which in turn overrides features
 embedded in a GFF3 positional input. Format is auto-detected; both plain
@@ -153,6 +156,28 @@ children still get distinct colors. BED files use one color per file.
 annotations overlapping the crosshair residue for the query (`q:`) and
 subject (`s:`) — all of them when features nest — and frames the
 crosshair cell in each alignment row in the feature's color.
+
+## HSPs (PAF)
+
+*File → Load HSPs (PAF)…* (or `--hsp-paf`) draws the alignments of a PAF
+file — minimap2, `wfmash`, a BLAST conversion — over the dotplot, after
+the original Dotter's HSP display (spec §4.2.3). Either orientation of the
+PAF works (query on the vertical or the horizontal axis); lines for records
+that are not plotted are skipped and counted. Positions follow sorted,
+reverse-complemented and drill-down records.
+
+The **HSPs** panel section picks the mode:
+
+| Mode | Shows |
+|------|-------|
+| Off | the dots only |
+| Line | red lines over the dots |
+| Score | lines coloured by identity (< 25, < 50, < 75, ≥ 75 %, as genome mode) |
+| Grey | the HSPs only, darker for higher identity, instead of the dots |
+
+Saved PNG/SVG images include the HSPs as shown, and sessions keep the PAF
+and the mode. `dottir batch --hsp-paf FILE --hsp-mode line|score|greyscale`
+does the same for batch plots (not for BLASTX, whose columns are codons).
 
 ## Out of scope (this release)
 

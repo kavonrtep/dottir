@@ -19,6 +19,7 @@ use egui::{
 
 use crate::genome_view::{GenomeAction, GenomeInputs, GenomeLoad, GenomeView};
 use dottir_core::genome::SortAxis;
+use dottir_io::hsp::HspMode;
 
 /// Startup-time configuration assembled from CLI args, applied once
 /// by [`DottirApp::new`].
@@ -42,6 +43,9 @@ pub struct StartupConfig {
     pub genome: Option<GenomeInputs>,
     /// Sort one axis's records once the sequences are loaded.
     pub sort_records: Option<SortAxis>,
+    /// PAF drawn over the plot, and how.
+    pub hsp_paf: Option<PathBuf>,
+    pub hsp_mode: Option<HspMode>,
 }
 
 impl Default for StartupConfig {
@@ -61,6 +65,8 @@ impl Default for StartupConfig {
             annot_subject: None,
             genome: None,
             sort_records: None,
+            hsp_paf: None,
+            hsp_mode: None,
         }
     }
 }
@@ -635,6 +641,9 @@ pub struct DottirApp {
     /// The sequences before sorting, for *File order*.
     unsorted_query: Option<Sequence>,
     unsorted_subject: Option<Sequence>,
+    /// PAF alignments drawn over the plot (spec §4.2.3).
+    hsps: Option<dottir_io::hsp::HspSet>,
+    hsp_mode: HspMode,
 }
 
 /// Maximum number of history entries kept around for Back. Older
@@ -797,6 +806,8 @@ impl DottirApp {
             record_sorts: Vec::new(),
             unsorted_query: None,
             unsorted_subject: None,
+            hsps: None,
+            hsp_mode: HspMode::Line,
         };
 
         // Pre-load any sequences supplied on the command line. Errors
@@ -816,6 +827,12 @@ impl DottirApp {
         }
         if let Some(p) = startup.annot_subject {
             app.load_annotation(SeqRole::Subject, p);
+        }
+        if let Some(m) = startup.hsp_mode {
+            app.hsp_mode = m;
+        }
+        if let Some(p) = startup.hsp_paf {
+            app.load_hsps(p);
         }
         // Release the suspend. The first compute can't fire yet
         // because the canvas hasn't been measured — `pending_initial_
@@ -1158,6 +1175,10 @@ impl DottirApp {
 
     /// Fresh sequence data → reset view state and caches, then compute.
     fn sequences_changed(&mut self, detected: DetectedAlphabet) {
+        // HSPs are placed on the sequences as shown; place them again.
+        if let Some(path) = self.hsps.as_ref().map(|h| h.path.clone()) {
+            self.load_hsps(path);
+        }
         self.large_source = None;
         self.large_plot = None;
         self.view_offset = Vec2::ZERO;
@@ -1176,6 +1197,36 @@ impl DottirApp {
             // `update()`'s post-paint check.
             self.pending_initial_compute = true;
         }
+    }
+
+    /// Read a PAF and place its alignments on the plot as HSPs.
+    fn load_hsps(&mut self, path: PathBuf) {
+        let (Some(q), Some(s)) = (&self.query, &self.subject) else {
+            self.last_error = Some("load the sequences before HSPs".into());
+            return;
+        };
+        match dottir_io::hsp::load(&path, q, s) {
+            Ok(set) => {
+                tracing::info!(
+                    "HSPs: {} alignments, {} placed, {} for other records",
+                    set.alignments,
+                    set.hsps.len(),
+                    set.skipped
+                );
+                if set.hsps.is_empty() {
+                    self.last_error = Some(format!(
+                        "{}: no alignments between the plotted records",
+                        path.display()
+                    ));
+                }
+                self.hsps = Some(set);
+            }
+            Err(e) => {
+                self.hsps = None;
+                self.last_error = Some(format!("failed to load {}: {e}", path.display()));
+            }
+        }
+        self.texture_dirty = true;
     }
 
     /// Load an annotation file from disk and bind it to an axis. Errors
@@ -1507,6 +1558,10 @@ impl DottirApp {
             m.push(("shading", "score".into()));
             m.push(("greyramp-white", self.greyramp.white.to_string()));
             m.push(("greyramp-black", self.greyramp.black.to_string()));
+        }
+        if let Some(h) = self.hsps.as_ref().filter(|_| self.hsp_mode != HspMode::Off) {
+            m.push(("hsp-paf", h.path.display().to_string()));
+            m.push(("hsp-mode", self.hsp_mode.name().to_string()));
         }
         m
     }
@@ -2081,7 +2136,10 @@ impl DottirApp {
     /// The plot as shown: RGBA pixels (greyramp or coverage ramp, repeat-
     /// class colours, inverted repeats in magenta) and their size. Image
     /// exports write exactly this.
-    fn display_rgba(&self) -> Option<(Vec<u8>, usize, usize)> {
+    ///
+    /// HSPs in greyscale mode replace the dots; `hsp_lines` also draws
+    /// line modes into the pixels (exports; the canvas draws vectors).
+    fn display_rgba(&self, hsp_lines: bool) -> Option<(Vec<u8>, usize, usize)> {
         let plot = self.plot.as_ref()?;
         let coverage = self.coverage_shading();
         let lut = self.display_lut();
@@ -2166,6 +2224,24 @@ impl DottirApp {
                 }
             }
         }
+        if let Some(h) = &self.hsps {
+            if hsp_lines || self.hsp_mode == HspMode::Greyscale {
+                let (q_off, s_off) = self
+                    .current_slice
+                    .as_ref()
+                    .map_or((0, 0), |sl| (sl.q_range.start, sl.s_range.start));
+                dottir_io::hsp::draw_rgba(
+                    &mut rgba,
+                    pw,
+                    ph,
+                    &h.hsps,
+                    self.hsp_mode,
+                    q_off,
+                    s_off,
+                    plot.params.zoom as usize,
+                );
+            }
+        }
         Some((rgba, pw, ph))
     }
 
@@ -2173,7 +2249,7 @@ impl DottirApp {
         if !self.texture_dirty && self.texture.is_some() {
             return;
         }
-        let Some((rgba, pw, ph)) = self.display_rgba() else {
+        let Some((rgba, pw, ph)) = self.display_rgba(false) else {
             return;
         };
         let image = ColorImage::from_rgba_unmultiplied([pw, ph], &rgba);
@@ -2783,6 +2859,26 @@ impl DottirApp {
                             pick_and_load_annotation(self, SeqRole::Subject);
                         }
                     }
+                    if ui
+                        .add_enabled(
+                            !genome && self.query.is_some() && self.subject.is_some(),
+                            egui::Button::new("Load HSPs (PAF)…"),
+                        )
+                        .on_hover_text(
+                            "Alignments from a PAF file (minimap2, …) drawn over the \
+                             plot; records not plotted are skipped",
+                        )
+                        .clicked()
+                    {
+                        ui.close_menu();
+                        if let Some(path) = rfd::FileDialog::new()
+                            .set_title("Load HSPs")
+                            .add_filter("PAF", &["paf", "gz"])
+                            .pick_file()
+                        {
+                            self.load_hsps(path);
+                        }
+                    }
                     ui.separator();
                     if ui.button("Save PNG…").clicked() {
                         ui.close_menu();
@@ -3012,6 +3108,10 @@ impl DottirApp {
 
                 if self.large_plot.is_some() {
                     self.large_panel_ui(ui);
+                    ui.separator();
+                }
+                if self.hsps.is_some() {
+                    self.hsp_panel_ui(ui);
                     ui.separator();
                 }
 
@@ -3813,6 +3913,68 @@ impl DottirApp {
     }
 
     /// Side-panel controls for a large-engine plot: display-only.
+    fn hsp_panel_ui(&mut self, ui: &mut egui::Ui) {
+        let Some(h) = &self.hsps else {
+            return;
+        };
+        ui.label(
+            egui::RichText::new("HSPs")
+                .strong()
+                .size(13.0)
+                .color(Color32::from_gray(50)),
+        );
+        let name = h
+            .path
+            .file_name()
+            .map_or_else(String::new, |f| f.to_string_lossy().into_owned());
+        ui.label(
+            egui::RichText::new(format!("{name}: {} shown", h.hsps.len()))
+                .size(11.0)
+                .color(Color32::from_gray(80)),
+        )
+        .on_hover_text(format!(
+            "{}\n{} alignments read, {} for records not plotted",
+            h.path.display(),
+            h.alignments,
+            h.skipped
+        ));
+        let mut mode = self.hsp_mode;
+        ui.horizontal_wrapped(|ui| {
+            for (m, label, tip) in [
+                (HspMode::Off, "Off", "Hide the HSPs"),
+                (HspMode::Line, "Line", "Red lines over the dots"),
+                (HspMode::Score, "Score", "Lines coloured by identity"),
+                (
+                    HspMode::Greyscale,
+                    "Grey",
+                    "HSPs only, grey by identity, instead of the dots",
+                ),
+            ] {
+                ui.selectable_value(&mut mode, m, egui::RichText::new(label).size(11.0))
+                    .on_hover_text(tip);
+            }
+        });
+        if mode != self.hsp_mode {
+            self.hsp_mode = mode;
+            self.texture_dirty = true;
+        }
+        if mode == HspMode::Score {
+            ui.horizontal(|ui| {
+                for (k, label) in ["<25", "<50", "<75", "≥75 %"].iter().enumerate() {
+                    let [r, g, b] = dottir_io::genome_export::IDENTITY_COLOURS[k];
+                    let (rect, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
+                    ui.painter()
+                        .rect_filled(rect, 2.0, Color32::from_rgb(r, g, b));
+                    ui.label(egui::RichText::new(*label).size(10.0));
+                }
+            });
+        }
+        if ui.small_button("Remove").clicked() {
+            self.hsps = None;
+            self.texture_dirty = true;
+        }
+    }
+
     fn large_panel_ui(&mut self, ui: &mut egui::Ui) {
         ui.label(
             egui::RichText::new("Repeat classes")
@@ -4682,6 +4844,32 @@ impl DottirApp {
                         };
                         clip_painter.line_segment([m(p0), m(p1)], stroke);
                     }
+                }
+            }
+
+            // HSP overlay (line modes) as vectors; greyscale is in the
+            // texture.
+            if let (Some(h), true) = (
+                &self.hsps,
+                matches!(self.hsp_mode, HspMode::Line | HspMode::Score),
+            ) {
+                let z = plot.params.zoom.max(1) as f32;
+                let (q_off, s_off) = self
+                    .current_slice
+                    .as_ref()
+                    .map_or((0, 0), |sl| (sl.q_range.start, sl.s_range.start));
+                let to_screen = |x: f64, y: f64| {
+                    Pos2::new(
+                        plot_area.left() + (x as f32 - q_off as f32) / z / ppp - draw_offset.x,
+                        plot_area.top() + (y as f32 - s_off as f32) / z / ppp - draw_offset.y,
+                    )
+                };
+                for hsp in &h.hsps {
+                    let [r, g, b] = dottir_io::hsp::colour(self.hsp_mode, hsp.identity);
+                    clip_painter.line_segment(
+                        [to_screen(hsp.x0, hsp.y0), to_screen(hsp.x1, hsp.y1)],
+                        egui::Stroke::new(1.5, Color32::from_rgb(r, g, b)),
+                    );
                 }
             }
 
@@ -6077,7 +6265,7 @@ fn save_svg(app: &mut DottirApp) {
         app.last_error = Some("nothing to save — compute a plot first".into());
         return;
     };
-    let shown = app.display_rgba();
+    let shown = app.display_rgba(true);
     let metadata = app.export_metadata();
     let pick = rfd::FileDialog::new()
         .set_title("Save SVG")
@@ -6160,6 +6348,10 @@ fn save_session(app: &mut DottirApp) {
                 SortAxis::Horizontal => "horizontal".to_string(),
             })
             .collect(),
+        hsps: app.hsps.as_ref().map(|h| crate::session::SessionHsps {
+            paf: h.path.clone(),
+            mode: app.hsp_mode.name().to_string(),
+        }),
         plot: SessionPlot {
             mode: codec::mode_to_str(app.settings.mode).to_string(),
             matrix_name: app.settings.matrix_name.clone(),
@@ -6301,6 +6493,12 @@ fn open_session(app: &mut DottirApp, ctx: &Context) {
     app.light_theme = s.view.light_theme;
     app.align_dock_visible = s.view.align_dock_visible;
     app.settings.align_window_size = s.view.align_window_size.clamp(20, 400);
+    if let Some(h) = &s.hsps {
+        app.hsp_mode = HspMode::parse(&h.mode).unwrap_or(HspMode::Line);
+        app.load_hsps(h.paf.clone());
+    } else {
+        app.hsps = None;
+    }
     app.record_sort_queue = s
         .sorted_records
         .iter()
@@ -6327,7 +6525,7 @@ fn save_png(app: &mut DottirApp) {
         app.last_error = Some("nothing to save — compute a plot first".into());
         return;
     };
-    let shown = app.display_rgba();
+    let shown = app.display_rgba(true);
     let metadata = app.export_metadata();
     let pick = rfd::FileDialog::new()
         .set_title("Save PNG")

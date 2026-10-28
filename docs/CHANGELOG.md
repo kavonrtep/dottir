@@ -97,6 +97,12 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     where runs meet at chunk boundaries (coverage was double-counted there).
 * FASTA parsing records soft-masked (lowercase) runs
   (`FastaRecord::soft_masked`, `Sequence::soft_mask`).
+* **HSP overlays from PAF** (spec §4.2.3, plan E2/E4): *File → Load HSPs
+  (PAF)…*, `--hsp-paf` / `--hsp-mode` in `dottir-gui` and `dottir batch`.
+  Modes off / line / score (identity-coloured) / greyscale (replaces the
+  dots), as the original Dotter. Either PAF orientation; records not
+  plotted are skipped; sorted, flipped and region records are followed.
+  Kept in sessions and drawn into saved images.
 * `--export-alignment-at Q,S` (`--alignment-window`, `--alignment-format
   fasta|stockholm|text`) prints the residues around a dotplot position;
   `-o` becomes optional when only exporting (plan D5).

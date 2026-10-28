@@ -176,6 +176,18 @@ struct BatchArgs {
     #[arg(long, value_name = "PATH")]
     svg: Option<PathBuf>,
 
+    /// Draw the alignments of a PAF file over the plot (HSPs, spec
+    /// §4.2.3). Records not plotted are skipped; either orientation of
+    /// the PAF works. The PNG and SVG become RGB.
+    #[arg(long, value_name = "PAF")]
+    hsp_paf: Option<PathBuf>,
+
+    /// How `--hsp-paf` is drawn: red lines, lines coloured by identity, or
+    /// grey by identity instead of the dots.
+    #[arg(long, value_name = "MODE", default_value = "line",
+          value_parser = ["line", "score", "greyscale"], requires = "hsp_paf")]
+    hsp_mode: String,
+
     /// Also write a C-dotter compatible `.dot` binary to this path.
     /// Format 3 (matches the current C-dotter savePlot output).
     #[arg(long, value_name = "PATH")]
@@ -492,10 +504,6 @@ fn run_batch(args: BatchArgs) -> Result<()> {
     } else {
         (plot.pixels.clone(), plot.width, plot.height)
     };
-    let text_chunk_refs: Vec<(&str, &str)> = text_chunks
-        .iter()
-        .map(|(a, b)| (a.as_str(), b.as_str()))
-        .collect();
 
     // Resize the render pixelmap to the requested PNG width (preserving
     // aspect ratio). `--width 0` is the opt-out. Cap at a generous
@@ -506,6 +514,50 @@ fn run_batch(args: BatchArgs) -> Result<()> {
     if requested_w != args.width {
         tracing::warn!("PNG width {} clamped to {MAX_PNG_WIDTH}", args.width);
     }
+    // HSPs: the displayed (inverted) image in RGB with the alignments
+    // drawn in, at the pixelmap's resolution.
+    let hsp_rgb: Option<Vec<u8>> = match &args.hsp_paf {
+        None => None,
+        Some(path) => {
+            if mode == BlastMode::Blastx {
+                anyhow::bail!("--hsp-paf: not available for BLASTX (codon columns)");
+            }
+            let set = dottir_io::hsp::load(path, &query, &subject)
+                .with_context(|| format!("reading HSPs {}", path.display()))?;
+            tracing::info!(
+                "HSPs: {} alignments, {} drawn, {} for records not plotted",
+                set.alignments,
+                set.hsps.len(),
+                set.skipped
+            );
+            let hsp_mode = dottir_io::hsp::HspMode::parse(&args.hsp_mode).expect("clap-checked");
+            let mut rgba: Vec<u8> = render_pixels
+                .iter()
+                .flat_map(|&v| [255 - v, 255 - v, 255 - v, 255])
+                .collect();
+            dottir_io::hsp::draw_rgba(
+                &mut rgba,
+                render_w as usize,
+                render_h as usize,
+                &set.hsps,
+                hsp_mode,
+                0,
+                0,
+                plot.params.zoom as usize,
+            );
+            text_chunks.push(("hsp-paf".into(), path.display().to_string()));
+            text_chunks.push(("hsp-mode".into(), args.hsp_mode.clone()));
+            Some(
+                rgba.chunks_exact(4)
+                    .flat_map(|p| [p[0], p[1], p[2]])
+                    .collect(),
+            )
+        }
+    };
+    let text_chunk_refs: Vec<(&str, &str)> = text_chunks
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
     let (png_pixels, png_w, png_h) = if requested_w > 0 {
         dottir_io::text_overlay::resize_nearest(&render_pixels, render_w, render_h, requested_w)
     } else {
@@ -558,33 +610,82 @@ fn run_batch(args: BatchArgs) -> Result<()> {
     } else {
         50
     };
-    png_export::write_grayscale_png_with_axes(
-        &output,
-        png_w,
-        png_h,
-        query.len() as u32,
-        subject.len() as u32,
-        &png_pixels,
-        png_margin,
-        &axis_records_x,
-        &axis_records_y,
-        &text_chunk_refs,
-        true, // raw kernel output → invert for "white bg, dark hits"
-    )?;
-    tracing::info!("wrote {}", output.display());
-
-    if let Some(svg_path) = &args.svg {
-        dottir_io::svg_export::write_svg(
-            svg_path,
-            render_w,
-            render_h,
-            &render_pixels,
+    match &hsp_rgb {
+        None => png_export::write_grayscale_png_with_axes(
+            &output,
+            png_w,
+            png_h,
+            query.len() as u32,
+            subject.len() as u32,
+            &png_pixels,
             png_margin,
             &axis_records_x,
             &axis_records_y,
             &text_chunk_refs,
             true, // raw kernel output → invert for "white bg, dark hits"
-        )
+        )?,
+        Some(rgb) => {
+            // Resize each channel like the greyscale image.
+            let channel =
+                |c: usize| -> Vec<u8> { rgb.iter().skip(c).step_by(3).copied().collect() };
+            let resized: Vec<Vec<u8>> = (0..3)
+                .map(|c| {
+                    if png_w == render_w {
+                        channel(c)
+                    } else {
+                        dottir_io::text_overlay::resize_nearest(
+                            &channel(c),
+                            render_w,
+                            render_h,
+                            png_w,
+                        )
+                        .0
+                    }
+                })
+                .collect();
+            let rgb_png: Vec<u8> = (0..resized[0].len())
+                .flat_map(|i| [resized[0][i], resized[1][i], resized[2][i]])
+                .collect();
+            png_export::write_rgb_png_with_axes(
+                &output,
+                png_w,
+                png_h,
+                query.len() as u32,
+                subject.len() as u32,
+                &rgb_png,
+                png_margin,
+                &axis_records_x,
+                &axis_records_y,
+                &text_chunk_refs,
+            )?
+        }
+    }
+    tracing::info!("wrote {}", output.display());
+
+    if let Some(svg_path) = &args.svg {
+        match &hsp_rgb {
+            None => dottir_io::svg_export::write_svg(
+                svg_path,
+                render_w,
+                render_h,
+                &render_pixels,
+                png_margin,
+                &axis_records_x,
+                &axis_records_y,
+                &text_chunk_refs,
+                true, // raw kernel output → invert for "white bg, dark hits"
+            ),
+            Some(rgb) => dottir_io::svg_export::write_rgb_svg(
+                svg_path,
+                render_w,
+                render_h,
+                rgb,
+                png_margin,
+                &axis_records_x,
+                &axis_records_y,
+                &text_chunk_refs,
+            ),
+        }
         .context("SVG export failed")?;
         tracing::info!("wrote {}", svg_path.display());
     }

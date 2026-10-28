@@ -75,6 +75,8 @@ Large-sequence flags (`--engine`, `--seed-pattern`, `--hide-classes`,
 | `--export-alignment-at Q,S` | — | Print the residues around query position Q and subject position S (1-based, along the whole input or `record:pos`) to stdout; the window stays inside the two records. Without `-o` nothing is plotted. Not for BLASTX. |
 | `--alignment-window N` | `30` | Residues on each side of the position. |
 | `--alignment-format {fasta,stockholm,text}` | `fasta` | Format of the exported window. |
+| `--hsp-paf PATH` | — | Draw the alignments of a PAF file over the plot (HSPs); the PNG/SVG become RGB. |
+| `--hsp-mode {line,score,greyscale}` | `line` | Red lines, lines coloured by identity, or grey by identity instead of the dots. |
 
 ## Examples
 

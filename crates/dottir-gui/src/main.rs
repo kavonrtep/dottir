@@ -161,6 +161,15 @@ struct Cli {
     /// *View → Sort records*.
     #[arg(long, value_enum, value_name = "AXIS")]
     sort_records: Option<SortArg>,
+
+    /// Draw the alignments of a PAF file over the plot (HSPs). Records
+    /// not plotted are skipped; either PAF orientation works.
+    #[arg(long, value_name = "PAF")]
+    hsp_paf: Option<PathBuf>,
+
+    /// How HSPs are drawn.
+    #[arg(long, value_name = "MODE", value_parser = ["line", "score", "greyscale", "off"])]
+    hsp_mode: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, clap::ValueEnum)]
@@ -246,6 +255,11 @@ impl Cli {
             annot_query: self.annot_query.or_else(|| self.annot_self.clone()),
             annot_subject: self.annot_subject.or(self.annot_self),
             genome: None,
+            hsp_paf: self.hsp_paf,
+            hsp_mode: self
+                .hsp_mode
+                .as_deref()
+                .and_then(dottir_io::hsp::HspMode::parse),
             sort_records: self.sort_records.map(|a| match a {
                 SortArg::Vertical => dottir_core::genome::SortAxis::Vertical,
                 SortArg::Horizontal => dottir_core::genome::SortAxis::Horizontal,

@@ -33,6 +33,15 @@ pub struct Session {
     /// records along the query) or "horizontal".
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sorted_records: Vec<String>,
+    /// HSP overlay: PAF path and mode (`line`, `score`, `greyscale`, `off`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hsps: Option<SessionHsps>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionHsps {
+    pub paf: PathBuf,
+    pub mode: String,
 }
 
 /// A genome comparison and its view settings. The alignments are not
@@ -328,6 +337,10 @@ mod tests {
                 depth_sample: Some(4),
             }),
             sorted_records: vec!["vertical".into()],
+            hsps: Some(SessionHsps {
+                paf: "/tmp/a.paf".into(),
+                mode: "score".into(),
+            }),
             genome: Some(SessionGenome {
                 inputs: crate::genome_view::GenomeInputs {
                     reference: PathBuf::from("/tmp/ref.fa.gz"),
@@ -358,6 +371,7 @@ mod tests {
         assert_eq!(back.view.crosshair, s.view.crosshair);
         assert_eq!(back.genome, s.genome);
         assert_eq!(back.sorted_records, s.sorted_records);
+        assert_eq!(back.hsps, s.hsps);
         assert_eq!(
             back.large.unwrap().shown_classes,
             s.large.unwrap().shown_classes

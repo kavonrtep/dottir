@@ -146,15 +146,47 @@ impl<'a> Names<'a> {
 /// coordinates are errors. Empty lines and lines starting with `#` are
 /// skipped.
 pub fn read_paf<R: BufRead>(
-    mut reader: R,
+    reader: R,
     query: &[GenomeRecord],
     target: &[GenomeRecord],
 ) -> Result<Vec<Alignment>, PafError> {
+    read_paf_impl(reader, query, target, true).map(|(a, _)| a)
+}
+
+/// Like [`read_paf_oriented`], but lines naming records outside the
+/// lists are skipped instead of failing (overlays on a dotplot of some of
+/// the records). Returns the alignments, the number of lines skipped, and
+/// whether the PAF was read swapped: the orientation that places more
+/// alignments wins.
+pub fn read_paf_subset_oriented(
+    path: &Path,
+    vertical: &[GenomeRecord],
+    horizontal: &[GenomeRecord],
+) -> Result<(Vec<Alignment>, u64, bool), PafError> {
+    let read =
+        |q: &[GenomeRecord], t: &[GenomeRecord]| read_paf_impl(open_maybe_gz(path)?, q, t, false);
+    match (read(vertical, horizontal), read(horizontal, vertical)) {
+        (Ok((a, _)), Ok((b, m))) if b.len() > a.len() => {
+            Ok((b.iter().map(Alignment::swapped).collect(), m, true))
+        }
+        (Ok((a, n)), _) => Ok((a, n, false)),
+        (Err(_), Ok((b, m))) => Ok((b.iter().map(Alignment::swapped).collect(), m, true)),
+        (Err(e), Err(_)) => Err(e),
+    }
+}
+
+fn read_paf_impl<R: BufRead>(
+    mut reader: R,
+    query: &[GenomeRecord],
+    target: &[GenomeRecord],
+    strict: bool,
+) -> Result<(Vec<Alignment>, u64), PafError> {
     let mut qn = Names::new("query", query);
     let mut tn = Names::new("target", target);
     let mut out = Vec::new();
     let mut buf = String::new();
     let mut line = 0u64;
+    let mut skipped = 0u64;
     loop {
         buf.clear();
         if reader.read_line(&mut buf)? == 0 {
@@ -205,6 +237,7 @@ pub fn read_paf<R: BufRead>(
         let q = qn.resolve(line, cols[0], q_len)?;
         let t = tn.resolve(line, cols[5], t_len)?;
         let (Some(q_rec), Some(t_rec)) = (q, t) else {
+            skipped += 1;
             continue;
         };
         out.push(Alignment {
@@ -222,14 +255,16 @@ pub fn read_paf<R: BufRead>(
             divergence,
         });
     }
-    qn.finish()?;
-    tn.finish()?;
+    if strict {
+        qn.finish()?;
+        tn.finish()?;
+    }
     // minimap2 -P marks every chain secondary; derive the primaries it
     // would have chosen so "primary only" still means something.
     if !out.is_empty() && out.iter().all(|a| !a.primary) {
         assign_primary(&mut out, MASK_LEVEL);
     }
-    Ok(out)
+    Ok((out, skipped))
 }
 
 /// Write alignments as PAF: 12 columns, `tp:A:P|S`, and `de:f` when known.
