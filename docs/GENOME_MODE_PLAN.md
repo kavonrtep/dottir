@@ -17,7 +17,7 @@ v0.6.x.
 | G2 | Filters, ordering, rasterisation, CLI `--engine genome --paf` | ☑ PNG; SVG vector lines not done |
 | G3 | Aligner runner: detection, chunking, cache, provenance | ☑ CLI; GUI progress/cancel hooks exist, unused until G5 |
 | G4 | Exports: association table, sorted / unaligned FASTA, filtered PAF | ☑ |
-| G5 | GUI genome view and drill-down to large / exact | ☐ |
+| G5 | GUI genome view and drill-down to large / exact | ☑ view, filters, sort/flip, exports, drill-down, sessions; interactive testing on a real desktop pending |
 | G6 | Docs, book chapter, conda recipe, release | ☑ book chapter, changelog, recipe (bioconda run deps); release pending |
 
 ## Pipeline overview
@@ -85,6 +85,13 @@ Deviations from the plan below:
 * Axes: the first input is horizontal (reference, PAF target), the
   second vertical (PAF query, the one sorted). A PAF made the other way
   round is detected by its record names and swapped.
+* G5 draws the visible window at screen resolution on every view change
+  (max identity per pixel) instead of an overview raster plus vector
+  lines; hover hit-tests the alignments geometrically.
+* Drill-down builds the regions as an in-memory multi-record sequence
+  (`FastaIndex::region_sequence`, records carry their source range) and
+  uses the existing large / exact path, rather than a new region input
+  in `LargeInput`.
 * The aligner runs as one process: chunks are pieces of query records
   streamed to its stdin (no temporary FASTA), not concurrent processes,
   which would each load the reference index. Self-comparisons send whole

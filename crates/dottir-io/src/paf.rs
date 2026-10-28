@@ -61,6 +61,27 @@ pub fn read_paf_file(
     read_paf(open_maybe_gz(path)?, query, target)
 }
 
+/// Read a PAF for a plot with `vertical` records on the query side and
+/// `horizontal` ones on the target side. A PAF made the other way round
+/// (its query names unknown, but valid when swapped) is read swapped; the
+/// flag says so.
+pub fn read_paf_oriented(
+    path: &Path,
+    vertical: &[GenomeRecord],
+    horizontal: &[GenomeRecord],
+) -> Result<(Vec<Alignment>, bool), PafError> {
+    match read_paf_file(path, vertical, horizontal) {
+        Ok(a) => Ok((a, false)),
+        Err(first @ PafError::UnknownRecords { .. }) => {
+            match read_paf_file(path, horizontal, vertical) {
+                Ok(a) => Ok((a.iter().map(Alignment::swapped).collect(), true)),
+                Err(_) => Err(first),
+            }
+        }
+        Err(e) => Err(e),
+    }
+}
+
 struct Names<'a> {
     side: &'static str,
     recs: &'a [GenomeRecord],

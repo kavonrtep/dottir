@@ -24,6 +24,7 @@
 mod annotation_overlay;
 mod app;
 mod compute_worker;
+mod genome_view;
 mod session;
 
 use std::path::PathBuf;
@@ -32,6 +33,7 @@ use anyhow::Result;
 use app::{DottirApp, StartupConfig};
 use clap::Parser;
 use dottir_core::{BlastMode, Strand};
+use genome_view::GenomeInputs;
 
 /// Mirror the original `dotter [options] <horizontal_sequence>
 /// [<vertical_sequence>]` CLI where it makes sense for the GUI.
@@ -123,6 +125,34 @@ struct Cli {
     /// Per-axis flags override this.
     #[arg(long = "gff", visible_alias = "bed", value_name = "PATH")]
     annot_self: Option<PathBuf>,
+
+    /// Open QUERY and SUBJECT as a genome comparison (ADR 0008): QUERY
+    /// is the reference (horizontal), SUBJECT the assembly drawn against
+    /// it (omit for a self-comparison). Alignments come from an aligner
+    /// or from `--paf`.
+    #[arg(long)]
+    genome: bool,
+
+    /// Genome comparison from this PAF (implies `--genome`).
+    #[arg(long, value_name = "FILE")]
+    paf: Option<PathBuf>,
+
+    /// Genome mode aligner: `auto` (mm2plus, else minimap2), a name on
+    /// PATH, or a path.
+    #[arg(long, value_name = "NAME|PATH", default_value = "auto")]
+    aligner: String,
+
+    /// Genome mode minimap2 preset (`-x`).
+    #[arg(long, value_name = "PRESET", default_value = "asm20")]
+    preset: String,
+
+    /// Extra aligner arguments, space-separated.
+    #[arg(long, value_name = "ARGS", allow_hyphen_values = true)]
+    aligner_args: Option<String>,
+
+    /// Genome self-comparison: keep all copies of repeats (`-P`).
+    #[arg(long)]
+    self_all_copies: bool,
 }
 
 #[derive(Copy, Clone, Debug, clap::ValueEnum)]
@@ -161,6 +191,22 @@ impl StrandArg {
 
 impl Cli {
     fn into_startup(self) -> StartupConfig {
+        if self.genome || self.paf.is_some() {
+            if let Some(reference) = self.query.clone() {
+                return StartupConfig {
+                    genome: Some(GenomeInputs {
+                        reference,
+                        query: self.subject,
+                        paf: self.paf,
+                        aligner: self.aligner,
+                        preset: self.preset,
+                        aligner_args: self.aligner_args.unwrap_or_default(),
+                        self_all_copies: self.self_all_copies,
+                    }),
+                    ..StartupConfig::default()
+                };
+            }
+        }
         let mode = self.mode.to_core();
         // One positional → self-comparison (subject mirrors query).
         // Two positionals → pairwise as given.
@@ -185,6 +231,7 @@ impl Cli {
             // `--gff`/`--bed` applies to both axes; per-axis flags win.
             annot_query: self.annot_query.or_else(|| self.annot_self.clone()),
             annot_subject: self.annot_subject.or(self.annot_self),
+            genome: None,
         }
     }
 }

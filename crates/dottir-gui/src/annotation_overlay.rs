@@ -265,6 +265,7 @@ mod tests {
                 id: id.to_string(),
                 description: None,
                 range: off..off + *len,
+                origin: None,
             });
             off += *len;
         }

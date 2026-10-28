@@ -27,6 +27,12 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     (10¹⁷) when an aligner is installed.
   - Inputs are indexed (samtools-compatible `.fai`) and never loaded;
     gzipped FASTA is decompressed once into the user cache.
+  - `dottir-gui --genome` / `--paf` and *File → Open genome comparison*:
+    background alignment with progress and cancel; zoom, pan, hover
+    details, display-only filters, sorting, per-record flips, exports;
+    drill-down of the view (or a record pair) into the large / exact
+    dotplot, with positions reported in the original records; sessions
+    store the comparison.
 * **Large-sequence mode** (ADR 0007, spec §4.6): a seed-based engine for DNA
   comparisons at chromosome/genome scale (tested to 100 Mb × 100 Mb,
   multi-record).

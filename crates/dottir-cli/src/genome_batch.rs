@@ -8,16 +8,15 @@ use std::sync::atomic::AtomicBool;
 
 use anyhow::{bail, Context, Result};
 use dottir_core::genome::alignment::sort_alignments;
-use dottir_core::genome::layout::DEFAULT_SMALL_FRACTION;
 use dottir_core::genome::order::Placement;
 use dottir_core::genome::{
-    filter, rasterize, sort_query, Alignment, AxisLayout, FilterConfig, GenomeRecord, RasterConfig,
+    arrange, rasterize, Alignment, Arranged, AxisLayout, FilterConfig, GenomeRecord, RasterConfig,
     GENOME_FORMAT_VERSION,
 };
 use dottir_io::aligner::{align, AlignRequest, Aligner};
 use dottir_io::faidx::{plain_fasta, FastaIndex};
 use dottir_io::genome_export::{write_association, write_fasta_records};
-use dottir_io::paf::{read_paf_file, write_paf, PafError};
+use dottir_io::paf::{read_paf_file, read_paf_oriented, write_paf};
 use dottir_io::params::{
     sha256_file, DottirInfo, GenomeParamsInfo, HostInfo, InputInfo, ParamsSidecar, PlotParamsInfo,
 };
@@ -225,20 +224,15 @@ fn open_assembly(path: &Path, cache: &Path) -> Result<Assembly> {
     })
 }
 
-/// Read the PAF with its query on the vertical axis; if its names say it
-/// was made the other way round, swap query and target.
+/// Read the PAF with its query on the vertical axis, swapping a PAF made
+/// the other way round.
 fn read_oriented(paf: &Path, x: &[GenomeRecord], y: &[GenomeRecord]) -> Result<Vec<Alignment>> {
-    match read_paf_file(paf, y, x) {
-        Ok(a) => Ok(a),
-        Err(first @ PafError::UnknownRecords { .. }) => match read_paf_file(paf, x, y) {
-            Ok(a) => {
-                tracing::info!("PAF query names match the first input; swapping axes");
-                Ok(a.iter().map(Alignment::swapped).collect())
-            }
-            Err(_) => Err(first).with_context(|| format!("reading {}", paf.display())),
-        },
-        Err(e) => Err(e).with_context(|| format!("reading {}", paf.display())),
+    let (alns, swapped) =
+        read_paf_oriented(paf, y, x).with_context(|| format!("reading {}", paf.display()))?;
+    if swapped {
+        tracing::info!("PAF query names match the first input; swapping axes");
     }
+    Ok(alns)
 }
 
 fn create(path: &Path) -> Result<std::io::BufWriter<std::fs::File>> {
@@ -417,7 +411,13 @@ pub fn run(args: &BatchArgs) -> Result<()> {
         primary_only: g.primary_only,
         remove_noise: g.remove_noise,
     };
-    let (keep, noise) = filter::keep_mask(&alns, &cfg);
+    let Arranged {
+        keep,
+        noise,
+        x: x_layout,
+        y: y_layout,
+        placements,
+    } = arrange(&alns, &x.records, &y.records, &cfg, g.sort_query, &[]);
     let drawn: Vec<&Alignment> = alns
         .iter()
         .zip(&keep)
@@ -430,37 +430,14 @@ pub fn run(args: &BatchArgs) -> Result<()> {
         drawn.len(),
         noise.map_or(String::new(), |t| format!(" (noise below {t:.0} bp)"))
     );
-
-    let x_layout = AxisLayout::new(&x.records, None, &[], DEFAULT_SMALL_FRACTION);
-    let (y_layout, placements) = if g.sort_query {
-        // D-GENIES sorts on noise-filtered alignments.
-        let (sort_keep, _) = filter::keep_mask(
-            &alns,
-            &FilterConfig {
-                remove_noise: true,
-                ..cfg.clone()
-            },
-        );
-        let used: Vec<&Alignment> = alns
-            .iter()
-            .zip(&sort_keep)
-            .filter(|(_, &k)| k)
-            .map(|(a, _)| a)
-            .collect();
-        let o = sort_query(&used, &y.records, &x.records, &x_layout);
+    if g.sort_query {
         tracing::info!(
             "sorted {} records, {} reversed, {} without alignments",
-            o.order.len(),
-            o.flips.iter().filter(|&&f| f).count(),
-            o.placements.iter().filter(|p| p.is_none()).count()
+            y_layout.segments.len(),
+            y_layout.segments.iter().filter(|s| s.reverse).count(),
+            placements.iter().filter(|p| p.is_none()).count()
         );
-        let l = AxisLayout::new(&y.records, Some(&o.order), &o.flips, DEFAULT_SMALL_FRACTION);
-        (l, o.placements)
-    } else {
-        let placements = sort_query(&drawn, &y.records, &x.records, &x_layout).placements;
-        let l = AxisLayout::new(&y.records, None, &[], DEFAULT_SMALL_FRACTION);
-        (l, placements)
-    };
+    }
     write_exports(g, &x, &y, &y_layout, &placements, &alns, &drawn)?;
 
     let max_px = u64::from(args.auto_zoom.unwrap_or(DEFAULT_PLOT_PX).max(1));

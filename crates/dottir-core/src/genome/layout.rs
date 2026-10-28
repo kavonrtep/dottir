@@ -118,6 +118,31 @@ impl AxisLayout {
         let off = x - s.start;
         Some((s, if s.reverse { s.len - 1 - off } else { off }))
     }
+
+    /// The record pieces under axis range `range`, in axis order: record,
+    /// record-local range (forward coordinates), drawn reversed.
+    pub fn regions(&self, range: std::ops::Range<u64>) -> Vec<(u32, std::ops::Range<u64>, bool)> {
+        let first = self
+            .segments
+            .partition_point(|s| s.start + s.len <= range.start);
+        self.segments[first..]
+            .iter()
+            .take_while(|s| s.start < range.end)
+            .filter_map(|s| {
+                let a = range.start.max(s.start) - s.start;
+                let b = range.end.min(s.start + s.len) - s.start;
+                if a >= b {
+                    return None;
+                }
+                let local = if s.reverse {
+                    s.len - b..s.len - a
+                } else {
+                    a..b
+                };
+                Some((s.rec, local, s.reverse))
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -132,6 +157,23 @@ mod tests {
                 len,
             })
             .collect()
+    }
+
+    #[test]
+    fn regions_map_axis_ranges_back_to_records() {
+        // r1 (50) is drawn first and reversed, then r0 (100), r2 (30).
+        let l = AxisLayout::new(
+            &recs(&[100, 50, 30]),
+            Some(&[1, 0, 2]),
+            &[false, true, false],
+            0.0,
+        );
+        assert_eq!(l.regions(10..60), vec![(1, 0..40, true), (0, 0..10, false)]);
+        assert_eq!(l.regions(0..180).len(), 3);
+        assert_eq!(l.regions(155..170), vec![(2, 5..20, false)]);
+        assert!(l.regions(180..200).is_empty());
+        // Axis 10 is r1 position 39 (reversed); the region's last base.
+        assert_eq!(l.locate(10).map(|(s, p)| (s.rec, p)), Some((1, 39)));
     }
 
     #[test]

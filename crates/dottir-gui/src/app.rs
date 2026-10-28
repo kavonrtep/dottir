@@ -11,10 +11,13 @@ use dottir_core::{
     extract_ridges_from_pixels, snap_zoom_to_period_divisor, BlastMode, DotPlot, PlotConfig, Ridge,
     RidgeDirection, RidgeParams, ScoreMatrix, Strand, Triangle,
 };
+use dottir_io::faidx::Region;
 use dottir_io::{DetectedAlphabet, Sequence};
 use egui::{
     Color32, ColorImage, Context, Pos2, Rect, Sense, Slider, TextureHandle, TextureOptions, Vec2,
 };
+
+use crate::genome_view::{GenomeAction, GenomeInputs, GenomeLoad, GenomeView};
 
 /// Startup-time configuration assembled from CLI args, applied once
 /// by [`DottirApp::new`].
@@ -34,6 +37,8 @@ pub struct StartupConfig {
     pub annot_query: Option<PathBuf>,
     /// Annotation file (GFF3/BED) to bind to the subject axis on startup.
     pub annot_subject: Option<PathBuf>,
+    /// Open a genome comparison (ADR 0008) instead of a dotplot.
+    pub genome: Option<GenomeInputs>,
 }
 
 impl Default for StartupConfig {
@@ -51,6 +56,7 @@ impl Default for StartupConfig {
             memory_limit_bytes: 512 * 1024 * 1024,
             annot_query: None,
             annot_subject: None,
+            genome: None,
         }
     }
 }
@@ -604,6 +610,18 @@ pub struct DottirApp {
     /// Window size resolved by the large engine; reused by exact-engine
     /// detail views so both engines draw the same features.
     locked_window: Option<u32>,
+    /// Genome comparison (ADR 0008), once loaded.
+    genome: Option<GenomeView>,
+    /// Show the genome view rather than the dotplot.
+    genome_active: bool,
+    /// Indexing / alignment in progress.
+    genome_load: Option<GenomeLoad>,
+    /// The "Open genome comparison" dialog, with its last error.
+    genome_dialog: Option<(GenomeInputs, Option<String>)>,
+    /// View settings to apply once a session's genome comparison loads.
+    genome_pending: Option<crate::session::SessionGenome>,
+    /// Keep showing the dotplot when that load finishes.
+    genome_reopen_dotplot: bool,
 }
 
 /// Maximum number of history entries kept around for Back. Older
@@ -755,6 +773,12 @@ impl DottirApp {
             large_plot: None,
             axis_profile: None,
             locked_window: None,
+            genome: None,
+            genome_active: false,
+            genome_load: None,
+            genome_dialog: None,
+            genome_pending: None,
+            genome_reopen_dotplot: false,
         };
 
         // Pre-load any sequences supplied on the command line. Errors
@@ -783,7 +807,82 @@ impl DottirApp {
         if app.query.is_some() && app.subject.is_some() {
             app.pending_initial_compute = true;
         }
+        if let Some(inputs) = startup.genome {
+            app.start_genome_load(&cc.egui_ctx, inputs);
+        }
         app
+    }
+
+    fn start_genome_load(&mut self, ctx: &Context, inputs: GenomeInputs) {
+        let ctx = ctx.clone();
+        self.genome_dialog = None;
+        self.genome_load = Some(GenomeLoad::start(inputs, move || ctx.request_repaint()));
+    }
+
+    fn poll_genome_load(&mut self) {
+        let Some(result) = self.genome_load.as_ref().and_then(GenomeLoad::poll) else {
+            return;
+        };
+        let load = self.genome_load.take().expect("polled above");
+        match result {
+            Ok(data) => {
+                tracing::info!(
+                    "genome comparison: {} alignments ({})",
+                    data.alns.len(),
+                    data.source
+                );
+                let mut view = GenomeView::new(data, load.inputs);
+                if let Some(p) = self.genome_pending.take() {
+                    p.apply(&mut view);
+                }
+                self.genome = Some(view);
+                self.genome_active = !std::mem::take(&mut self.genome_reopen_dotplot);
+            }
+            Err(e) => {
+                self.genome_pending = None;
+                if e != "cancelled" {
+                    self.genome_dialog = Some((load.inputs, Some(e)));
+                }
+            }
+        }
+    }
+
+    /// Dotplot of genome regions: x regions on the query (horizontal)
+    /// axis, y regions on the subject axis.
+    fn drill_down(&mut self, x: Vec<Region>, y: Vec<Region>) {
+        let Some(g) = &mut self.genome else {
+            return;
+        };
+        let same = g.data.self_comparison && x == y;
+        let seqs = g
+            .data
+            .x
+            .index
+            .region_sequence(&x)
+            .and_then(|q| Ok((q, g.data.y.index.region_sequence(&y)?)));
+        match seqs {
+            Ok((q, s)) => {
+                tracing::info!(
+                    "genome drill-down: {} bp ({} regions) × {} bp ({} regions)",
+                    q.len(),
+                    q.records.len(),
+                    s.len(),
+                    s.records.len()
+                );
+                g.message = None;
+                self.genome_active = false;
+                self.query = Some(q);
+                self.subject = Some(s);
+                self.query_annot = None;
+                self.subject_annot = None;
+                self.settings.self_comparison = same;
+                self.history.clear();
+                self.last_error = None;
+                let detected = self.query.as_ref().map(Sequence::detect_alphabet);
+                self.sequences_changed(detected.unwrap_or(DetectedAlphabet::Dna));
+            }
+            Err(e) => g.message = Some(format!("Reading regions failed: {e}")),
+        }
     }
 
     /// Load a sequence input and bind it to an axis. The path may be a
@@ -822,29 +921,33 @@ impl DottirApp {
                 if let Some(set) = embedded {
                     self.set_annotation(role, set);
                 }
-                // Fresh sequence data → reset view state and caches.
-                self.large_source = None;
-                self.large_plot = None;
-                self.view_offset = Vec2::ZERO;
-                self.crosshair = None;
-                self.current_slice = None;
-                self.target_slice = None;
-                self.invalidate_caches();
-                self.maybe_switch_mode_from_alphabet(detected);
-                if self.maybe_apply_auto_zoom() {
-                    self.pending_initial_compute = false;
-                    self.recompute();
-                } else {
-                    // We don't yet know the canvas size (no paint has
-                    // happened) — defer the first compute until the
-                    // first frame measures `plot_area`. See
-                    // `update()`'s post-paint check.
-                    self.pending_initial_compute = true;
-                }
+                self.sequences_changed(detected);
             }
             Err(e) => {
                 self.last_error = Some(format!("failed to load {}: {e}", path.display()));
             }
+        }
+    }
+
+    /// Fresh sequence data → reset view state and caches, then compute.
+    fn sequences_changed(&mut self, detected: DetectedAlphabet) {
+        self.large_source = None;
+        self.large_plot = None;
+        self.view_offset = Vec2::ZERO;
+        self.crosshair = None;
+        self.current_slice = None;
+        self.target_slice = None;
+        self.invalidate_caches();
+        self.maybe_switch_mode_from_alphabet(detected);
+        if self.maybe_apply_auto_zoom() {
+            self.pending_initial_compute = false;
+            self.recompute();
+        } else {
+            // We don't yet know the canvas size (no paint has
+            // happened) — defer the first compute until the
+            // first frame measures `plot_area`. See
+            // `update()`'s post-paint check.
+            self.pending_initial_compute = true;
         }
     }
 
@@ -1898,6 +2001,12 @@ impl eframe::App for DottirApp {
         // Drain any completed background-compute results before any
         // panel reads `self.plot`. Stale results are discarded inside.
         self.poll_compute_results();
+        self.poll_genome_load();
+        self.draw_genome_windows(ctx);
+        if self.genome_active && self.genome.is_some() {
+            self.update_genome(ctx);
+            return;
+        }
 
         // Esc → Back (history pop). Backspace also; both are dotter-
         // classic for "step out".
@@ -2162,6 +2271,262 @@ impl DottirApp {
         self.crosshair = Some((q_residue as u32, s_residue as u32));
     }
 
+    /// A frame of the genome view: menu, side panel, plot.
+    fn update_genome(&mut self, ctx: &Context) {
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape) || i.key_pressed(egui::Key::Backspace)) {
+            if let Some(g) = &mut self.genome {
+                g.back();
+            }
+        }
+        egui::TopBottomPanel::top("genome-menu").show(ctx, |ui| {
+            egui::menu::bar(ui, |ui| {
+                ui.menu_button("File", |ui| {
+                    if ui.button("Open genome comparison…").clicked() {
+                        ui.close_menu();
+                        self.open_genome_dialog();
+                    }
+                    if ui.button("Open sequences (dotplot)…").clicked() {
+                        ui.close_menu();
+                        self.genome_active = false;
+                        pick_and_load(self, SeqRole::Query);
+                    }
+                    ui.separator();
+                    if ui.button("Save session…").clicked() {
+                        ui.close_menu();
+                        save_session(self);
+                    }
+                    if ui.button("Open session…").clicked() {
+                        ui.close_menu();
+                        open_session(self, ctx);
+                    }
+                    ui.separator();
+                    if ui.button("Quit").clicked() {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                });
+                ui.menu_button("View", |ui| {
+                    if ui.button("Fit (double-click)").clicked() {
+                        ui.close_menu();
+                        if let Some(g) = &mut self.genome {
+                            g.fit();
+                        }
+                    }
+                    if ui.button("Back (Esc)").clicked() {
+                        ui.close_menu();
+                        if let Some(g) = &mut self.genome {
+                            g.back();
+                        }
+                    }
+                    if ui
+                        .add_enabled(self.query.is_some(), egui::Button::new("Dot-plot view"))
+                        .clicked()
+                    {
+                        ui.close_menu();
+                        self.genome_active = false;
+                    }
+                    ui.separator();
+                    let theme_label = if self.light_theme {
+                        "Switch to dark theme"
+                    } else {
+                        "Switch to light theme"
+                    };
+                    if ui.button(theme_label).clicked() {
+                        self.light_theme = !self.light_theme;
+                        ctx.set_visuals(if self.light_theme {
+                            egui::Visuals::light()
+                        } else {
+                            egui::Visuals::dark()
+                        });
+                    }
+                    ui.separator();
+                    ui.menu_button("Mouse…", |ui| {
+                        for (keys, desc) in [
+                            ("Wheel", "zoom at the pointer"),
+                            ("L-drag", "pan"),
+                            ("Shift/M-drag", "zoom into rectangle"),
+                            ("Double-click", "fit"),
+                            ("R-click", "dot-plot a region, flip a record"),
+                            ("Esc/Bsp", "back"),
+                        ] {
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new(format!("{keys:<13}"))
+                                        .font(egui::FontId::monospace(11.0)),
+                                );
+                                ui.label(desc);
+                            });
+                        }
+                    });
+                });
+            });
+        });
+        let Some(g) = &mut self.genome else {
+            return;
+        };
+        let mut action = None;
+        egui::SidePanel::left("genome-panel")
+            .resizable(true)
+            .default_width(250.0)
+            .show(ctx, |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    action = g.panel_ui(ui);
+                });
+            });
+        egui::CentralPanel::default().show(ctx, |ui| {
+            if let Some(a) = g.canvas_ui(ui) {
+                action = Some(a);
+            }
+        });
+        match action {
+            Some(GenomeAction::DrillDown { x, y }) => self.drill_down(x, y),
+            None => {}
+        }
+    }
+
+    fn open_genome_dialog(&mut self) {
+        let inputs = self
+            .genome
+            .as_ref()
+            .map(|g| g.inputs.clone())
+            .unwrap_or_default();
+        self.genome_dialog = Some((inputs, None));
+    }
+
+    /// The open dialog and the progress window, in either view.
+    fn draw_genome_windows(&mut self, ctx: &Context) {
+        if let Some(load) = &self.genome_load {
+            let (stage, frac, elapsed) = load.status();
+            egui::Window::new("Genome comparison")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+                .show(ctx, |ui| {
+                    ui.label(&stage);
+                    match frac {
+                        Some(f) => ui.add(egui::ProgressBar::new(f).show_percentage()),
+                        None => ui.add(egui::ProgressBar::new(0.0).animate(true)),
+                    };
+                    ui.label(format!("{:.0} s", elapsed.as_secs_f32()));
+                    if ui.button("Cancel").clicked() {
+                        load.cancel();
+                    }
+                });
+            // The elapsed time keeps moving.
+            ctx.request_repaint_after(std::time::Duration::from_millis(500));
+            return;
+        }
+        let Some((inputs, error)) = &mut self.genome_dialog else {
+            return;
+        };
+        let mut open = true;
+        let mut run = false;
+        egui::Window::new("Open genome comparison")
+            .collapsible(false)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                let pick =
+                    |ui: &mut egui::Ui, label: &str, path: &mut Option<PathBuf>, fasta: bool| {
+                        ui.label(label);
+                        ui.horizontal(|ui| {
+                            if ui.button("Choose…").clicked() {
+                                let d = if fasta {
+                                    rfd::FileDialog::new()
+                                        .add_filter("FASTA", &["fa", "fasta", "fna", "fas", "gz"])
+                                } else {
+                                    rfd::FileDialog::new().add_filter("PAF", &["paf", "gz"])
+                                };
+                                if let Some(p) = d.add_filter("All files", &["*"]).pick_file() {
+                                    *path = Some(p);
+                                }
+                            }
+                            if path.is_some() && ui.button("Clear").clicked() {
+                                *path = None;
+                            }
+                            let text = path
+                                .as_ref()
+                                .and_then(|p| p.file_name())
+                                .map_or("—".to_string(), |f| f.to_string_lossy().into_owned());
+                            ui.add(egui::Label::new(text).truncate());
+                        });
+                    };
+                let mut reference =
+                    (!inputs.reference.as_os_str().is_empty()).then(|| inputs.reference.clone());
+                pick(ui, "Reference (horizontal axis)", &mut reference, true);
+                inputs.reference = reference.unwrap_or_default();
+                pick(
+                    ui,
+                    "Query (vertical axis; none = self-comparison)",
+                    &mut inputs.query,
+                    true,
+                );
+                ui.separator();
+                let mut use_paf = inputs.paf.is_some();
+                ui.horizontal(|ui| {
+                    ui.radio_value(&mut use_paf, false, "Run an aligner");
+                    ui.radio_value(&mut use_paf, true, "Read a PAF file");
+                });
+                if use_paf {
+                    let mut paf = inputs.paf.clone().filter(|p| !p.as_os_str().is_empty());
+                    pick(ui, "PAF (query = vertical axis)", &mut paf, false);
+                    // An empty path keeps the choice until a file is picked.
+                    inputs.paf = Some(paf.unwrap_or_default());
+                } else {
+                    inputs.paf = None;
+                    egui::Grid::new("genome-aligner")
+                        .num_columns(2)
+                        .show(ui, |ui| {
+                            ui.label("Aligner");
+                            ui.text_edit_singleline(&mut inputs.aligner).on_hover_text(
+                                "auto (mm2plus, else minimap2), a name on PATH, or a path",
+                            );
+                            ui.end_row();
+                            ui.label("Preset");
+                            egui::ComboBox::from_id_salt("genome-preset")
+                                .selected_text(inputs.preset.clone())
+                                .show_ui(ui, |ui| {
+                                    for p in ["asm5", "asm10", "asm20"] {
+                                        ui.selectable_value(&mut inputs.preset, p.to_string(), p);
+                                    }
+                                });
+                            ui.end_row();
+                            ui.label("Extra arguments");
+                            ui.text_edit_singleline(&mut inputs.aligner_args)
+                                .on_hover_text(
+                                    "e.g. -c for exact identities (several times slower)",
+                                );
+                            ui.end_row();
+                        });
+                    ui.add_enabled(
+                        inputs.query.is_none(),
+                        egui::Checkbox::new(
+                            &mut inputs.self_all_copies,
+                            "Self-comparison: all copies of repeats (-P)",
+                        ),
+                    );
+                    ui.weak("Results are cached; reopening the same comparison is quick.");
+                }
+                if let Some(e) = error {
+                    ui.separator();
+                    ui.colored_label(Color32::from_rgb(200, 40, 40), e.as_str());
+                }
+                ui.separator();
+                let ready = !inputs.reference.as_os_str().is_empty()
+                    && inputs
+                        .paf
+                        .as_ref()
+                        .is_none_or(|p| !p.as_os_str().is_empty());
+                if ui.add_enabled(ready, egui::Button::new("Open")).clicked() {
+                    run = true;
+                }
+            });
+        if run {
+            let inputs = inputs.clone();
+            self.start_genome_load(ctx, inputs);
+        } else if !open {
+            self.genome_dialog = None;
+        }
+    }
+
     fn draw_menu(&mut self, ctx: &Context) {
         egui::TopBottomPanel::top("menu").show(ctx, |ui| {
             // Denser menu bar: smaller text, tighter horizontal
@@ -2171,6 +2536,10 @@ impl DottirApp {
             ui.style_mut().spacing.button_padding = Vec2::new(4.0, 2.0);
             egui::menu::bar(ui, |ui| {
                 ui.menu_button("File", |ui| {
+                    if ui.button("Open genome comparison…").clicked() {
+                        ui.close_menu();
+                        self.open_genome_dialog();
+                    }
                     if ui.button("Open query sequence (FASTA/GFF3)…").clicked() {
                         ui.close_menu();
                         pick_and_load(self, SeqRole::Query);
@@ -2226,7 +2595,7 @@ impl DottirApp {
                     }
                     if ui.button("Open session…").clicked() {
                         ui.close_menu();
-                        open_session(self);
+                        open_session(self, ctx);
                     }
                     ui.separator();
                     if ui.button("Quit").clicked() {
@@ -2234,6 +2603,10 @@ impl DottirApp {
                     }
                 });
                 ui.menu_button("View", |ui| {
+                    if self.genome.is_some() && ui.button("Genome view").clicked() {
+                        ui.close_menu();
+                        self.genome_active = true;
+                    }
                     if ui.button("Fit (reset to canonical zoom)").clicked() {
                         self.action_fit();
                     }
@@ -5339,6 +5712,11 @@ fn format_seq_label(name: &str, seq: Option<&Sequence>) -> String {
         .and_then(|p| p.file_name())
         .map(|f| f.to_string_lossy().into_owned())
         .unwrap_or_else(|| "(in-memory)".into());
+    if let [r] = seq.records.as_slice() {
+        if r.origin.is_some() {
+            return format!("{name}: {fname} {} ({} bp)", r.id, seq.len());
+        }
+    }
     if seq.records.len() <= 1 {
         format!("{name}: {fname} ({} bp)", seq.len())
     } else {
@@ -5363,11 +5741,21 @@ fn format_coord(seq: Option<&Sequence>, coord: usize) -> String {
     let Some(seq) = seq else {
         return format!("{one_indexed}");
     };
-    if seq.records.len() <= 1 {
+    let region = seq.records.first().is_some_and(|r| r.origin.is_some());
+    if seq.records.len() <= 1 && !region {
         return format!("{one_indexed}");
     }
     match seq.record_at(coord) {
-        Some((rec, pos)) => format!("{}:{}", rec.id, pos + 1),
+        Some((rec, pos)) => match &rec.origin {
+            // Genome-mode drill-down: report the source record's position.
+            Some(o) => format!(
+                "{}:{}{}",
+                o.record,
+                o.source_pos(pos) + 1,
+                if o.reverse { " (−)" } else { "" }
+            ),
+            None => format!("{}:{}", rec.id, pos + 1),
+        },
         None => format!("{one_indexed}"),
     }
 }
@@ -5474,10 +5862,17 @@ fn save_session(app: &mut DottirApp) {
     use crate::session::{
         codec, Session, SessionGreyramp, SessionPlot, SessionView, SESSION_VERSION,
     };
+    // A genome drill-down's regions are not files of their own; the
+    // genome section reopens the comparison instead.
+    let file = |s: &Option<Sequence>| {
+        s.as_ref()
+            .filter(|s| s.records.iter().all(|r| r.origin.is_none()))
+            .and_then(|s| s.source_path.clone())
+    };
     let session = Session {
         version: SESSION_VERSION,
-        query: app.query.as_ref().and_then(|s| s.source_path.clone()),
-        subject: app.subject.as_ref().and_then(|s| s.source_path.clone()),
+        query: file(&app.query),
+        subject: file(&app.subject),
         plot: SessionPlot {
             mode: codec::mode_to_str(app.settings.mode).to_string(),
             matrix_name: app.settings.matrix_name.clone(),
@@ -5512,6 +5907,10 @@ fn save_session(app: &mut DottirApp) {
             align_window_size: app.settings.align_window_size,
         },
         large: Some(app.settings.large.to_session()),
+        genome: app
+            .genome
+            .as_ref()
+            .map(|g| crate::session::SessionGenome::from_view(g, app.genome_active)),
     };
     let pick = rfd::FileDialog::new()
         .set_title("Save dottir session")
@@ -5526,7 +5925,7 @@ fn save_session(app: &mut DottirApp) {
     }
 }
 
-fn open_session(app: &mut DottirApp) {
+fn open_session(app: &mut DottirApp, ctx: &Context) {
     use crate::session::{codec, Session};
     let pick = rfd::FileDialog::new()
         .set_title("Open dottir session")
@@ -5615,6 +6014,15 @@ fn open_session(app: &mut DottirApp) {
     app.light_theme = s.view.light_theme;
     app.align_dock_visible = s.view.align_dock_visible;
     app.settings.align_window_size = s.view.align_window_size.clamp(20, 400);
+    app.genome_active = false;
+    if let Some(g) = s.genome {
+        let inputs = g.inputs.clone();
+        let active = g.active;
+        app.genome_pending = Some(g);
+        app.start_genome_load(ctx, inputs);
+        // The dotplot stays shown when that is what was saved.
+        app.genome_reopen_dotplot = !active && app.query.is_some();
+    }
     tracing::info!("loaded session {}", path.display());
 }
 

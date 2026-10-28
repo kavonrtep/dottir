@@ -8,6 +8,7 @@
 //! * [`filter`] — length / identity / primary filters, D-GENIES noise;
 //! * [`order`] — query record sorting and orientation (D-GENIES);
 //! * [`layout`] — record order and orientation → axis coordinates;
+//! * [`arrange`] — filters + sorting + layouts for one plot;
 //! * [`raster`] — order-independent rasterisation.
 //!
 //! Filters, sorting and the small-record mix blocks follow D-GENIES
@@ -18,12 +19,14 @@
 pub const GENOME_FORMAT_VERSION: u32 = 1;
 
 pub mod alignment;
+pub mod arrange;
 pub mod filter;
 pub mod layout;
 pub mod order;
 pub mod raster;
 
 pub use alignment::{Alignment, GenomeRecord};
+pub use arrange::{arrange, Arranged};
 pub use filter::FilterConfig;
 pub use layout::{AxisLayout, AxisSegment};
 pub use order::{sort_query, QueryOrder};

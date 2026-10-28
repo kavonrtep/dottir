@@ -11,6 +11,9 @@ use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use dottir_core::genome::GenomeRecord;
+
+use crate::fasta::FastaRecord;
+use crate::sequence::{RegionOrigin, Sequence};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -233,6 +236,14 @@ pub fn plain_fasta(path: &Path, cache_dir: &Path) -> Result<PathBuf, FaidxError>
     Ok(out)
 }
 
+/// A region of an indexed record: `range` is 0-based, end-exclusive.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Region {
+    pub rec: usize,
+    pub range: std::ops::Range<u64>,
+    pub reverse: bool,
+}
+
 /// An indexed plain FASTA file.
 #[derive(Debug, Clone)]
 pub struct FastaIndex {
@@ -297,6 +308,48 @@ impl FastaIndex {
 
     pub fn find(&self, name: &str) -> Option<usize> {
         self.by_name.get(name).copied()
+    }
+
+    /// The given regions as one multi-record [`Sequence`], reverse-
+    /// complemented where asked, soft-masking kept. Records are named
+    /// `name:start-end` (1-based) and carry their [`RegionOrigin`].
+    pub fn region_sequence(&self, regions: &[Region]) -> Result<Sequence, FaidxError> {
+        let mut records = Vec::with_capacity(regions.len());
+        for r in regions {
+            let mut raw = self.fetch_raw(r.rec, r.range.clone())?;
+            if r.reverse {
+                raw.reverse();
+                for b in &mut raw {
+                    *b = crate::genome_export::complement(*b);
+                }
+            }
+            let mut soft_masked: Vec<std::ops::Range<usize>> = Vec::new();
+            for (i, b) in raw.iter_mut().enumerate() {
+                if b.is_ascii_lowercase() {
+                    match soft_masked.last_mut() {
+                        Some(m) if m.end == i => m.end += 1,
+                        _ => soft_masked.push(i..i + 1),
+                    }
+                    b.make_ascii_uppercase();
+                }
+            }
+            let name = &self.entries[r.rec].name;
+            records.push(FastaRecord {
+                id: format!("{name}:{}-{}", r.range.start + 1, r.range.end),
+                description: r.reverse.then(|| "reverse complement".to_string()),
+                sequence: raw,
+                soft_masked,
+            });
+        }
+        let mut seq = Sequence::from_records(records, Some(self.path.clone()));
+        for (span, r) in seq.records.iter_mut().zip(regions) {
+            span.origin = Some(RegionOrigin {
+                record: self.entries[r.rec].name.clone(),
+                range: r.range.clone(),
+                reverse: r.reverse,
+            });
+        }
+        Ok(seq)
     }
 
     /// Residues `range` of record `rec`, uppercased.
@@ -371,6 +424,43 @@ mod tests {
         let again = FastaIndex::open(&p, &d.join("cache")).unwrap();
         assert_eq!(again.entries, idx.entries);
         assert_eq!(again.records()[0].len, 10);
+    }
+
+    #[test]
+    fn region_sequence_reverse_complements_and_keeps_soft_masking() {
+        let d = tmp("region");
+        let p = d.join("a.fa");
+        std::fs::write(&p, FA).unwrap();
+        let idx = FastaIndex::open(&p, &d.join("cache")).unwrap();
+        let seq = idx
+            .region_sequence(&[
+                Region {
+                    rec: 0,
+                    range: 2..7,
+                    reverse: false,
+                },
+                Region {
+                    rec: 0,
+                    range: 2..7,
+                    reverse: true,
+                },
+                Region {
+                    rec: 1,
+                    range: 0..3,
+                    reverse: false,
+                },
+            ])
+            .unwrap();
+        // r1[2..7] = GTacg; its reverse complement = cgtAC.
+        assert_eq!(seq.seq, b"GTACGCGTACGGG");
+        assert_eq!(seq.soft_mask, vec![2..5, 5..8]);
+        let ids: Vec<&str> = seq.records.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, ["r1:3-7", "r1:3-7", "r2:1-3"]);
+        let o = seq.records[1].origin.as_ref().unwrap();
+        assert_eq!((o.record.as_str(), o.reverse), ("r1", true));
+        // Region position 0 of the reversed record is source base 6.
+        assert_eq!((o.source_pos(0), o.source_pos(4)), (6, 2));
+        assert_eq!(seq.records[0].origin.as_ref().unwrap().source_pos(1), 3);
     }
 
     #[test]

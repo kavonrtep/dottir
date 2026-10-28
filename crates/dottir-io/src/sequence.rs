@@ -22,6 +22,29 @@ pub struct RecordSpan {
     /// Range in the concatenated [`Sequence::seq`] buffer where this
     /// record's residues live. End-exclusive, like all other ranges.
     pub range: std::ops::Range<usize>,
+    /// Set when the record is a region of a larger one (genome-mode
+    /// drill-down), so positions can be reported in its coordinates.
+    pub origin: Option<RegionOrigin>,
+}
+
+/// Where a region record came from: `range` (0-based, end-exclusive) of
+/// record `record`, reverse-complemented if `reverse`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegionOrigin {
+    pub record: String,
+    pub range: std::ops::Range<u64>,
+    pub reverse: bool,
+}
+
+impl RegionOrigin {
+    /// 0-based position in the source record of region position `pos`.
+    pub fn source_pos(&self, pos: usize) -> u64 {
+        if self.reverse {
+            self.range.end - 1 - pos as u64
+        } else {
+            self.range.start + pos as u64
+        }
+    }
 }
 
 impl RecordSpan {
@@ -78,6 +101,7 @@ impl Sequence {
                 id: r.id,
                 description: r.description,
                 range: offset..offset + len,
+                origin: None,
             });
             offset += len;
         }

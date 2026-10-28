@@ -156,3 +156,9 @@ These were called out in the spec but aren't shipped yet — see the
 
 * PAF / HSP alignment overlays.
 * Sub-dotter spawn from a rubber-band selection.
+
+## Genome comparisons
+
+For whole assemblies, `dottir-gui REF.fa ASM.fa --genome` (or *File → Open
+genome comparison…*) opens the alignment-based genome view; regions can be
+dot-plotted from there. See [Genome comparisons](./genome.md#in-the-gui).

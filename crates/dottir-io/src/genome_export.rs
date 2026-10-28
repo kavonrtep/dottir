@@ -167,7 +167,7 @@ pub fn write_genome_png(
 }
 
 /// Complement of an IUPAC nucleotide code, preserving case.
-fn complement(b: u8) -> u8 {
+pub(crate) fn complement(b: u8) -> u8 {
     let c = match b.to_ascii_uppercase() {
         b'A' => b'T',
         b'T' | b'U' => b'A',

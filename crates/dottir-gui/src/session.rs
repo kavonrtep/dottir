@@ -26,6 +26,68 @@ pub struct Session {
     /// Large-sequence mode settings (ADR 0007). Absent in older sessions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub large: Option<SessionLarge>,
+    /// Genome comparison (ADR 0008). Absent in older sessions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub genome: Option<SessionGenome>,
+}
+
+/// A genome comparison and its view settings. The alignments are not
+/// stored: re-opening runs the aligner again (from its cache) or reads
+/// the PAF.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionGenome {
+    pub inputs: crate::genome_view::GenomeInputs,
+    /// Whether the genome view (rather than the dotplot) was shown.
+    pub active: bool,
+    pub min_aln_len: u64,
+    pub min_identity: f64,
+    pub primary_only: bool,
+    pub remove_noise: bool,
+    pub sort_query: bool,
+    /// Vertical records flipped by hand, by name.
+    pub flipped: Vec<String>,
+    pub line_width: u32,
+    pub drill_limit_mb: f64,
+}
+
+impl SessionGenome {
+    pub fn from_view(v: &crate::genome_view::GenomeView, active: bool) -> Self {
+        Self {
+            inputs: v.inputs.clone(),
+            active,
+            min_aln_len: v.filter.min_len,
+            min_identity: v.filter.min_identity,
+            primary_only: v.filter.primary_only,
+            remove_noise: v.filter.remove_noise,
+            sort_query: v.sort,
+            flipped: v
+                .flips
+                .iter()
+                .zip(&v.data.y.records)
+                .filter(|(&f, _)| f)
+                .map(|(_, r)| r.name.clone())
+                .collect(),
+            line_width: v.line_width,
+            drill_limit_mb: v.drill_limit_mb,
+        }
+    }
+
+    /// Restore the view settings; unknown record names are ignored.
+    pub fn apply(&self, v: &mut crate::genome_view::GenomeView) {
+        v.filter.min_len = self.min_aln_len;
+        v.filter.min_identity = self.min_identity.clamp(0.0, 1.0);
+        v.filter.primary_only = self.primary_only;
+        v.filter.remove_noise = self.remove_noise;
+        v.sort = self.sort_query;
+        v.line_width = self.line_width.clamp(1, 5);
+        v.drill_limit_mb = self.drill_limit_mb.max(1.0);
+        for name in &self.flipped {
+            if let Some(i) = v.data.y.index.find(name) {
+                v.flips[i] = true;
+            }
+        }
+        v.rearrange();
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -261,6 +323,23 @@ mod tests {
                 seed_sample: Some(0),
                 depth_sample: Some(4),
             }),
+            genome: Some(SessionGenome {
+                inputs: crate::genome_view::GenomeInputs {
+                    reference: PathBuf::from("/tmp/ref.fa.gz"),
+                    query: None,
+                    paf: Some(PathBuf::from("/tmp/a.paf")),
+                    ..Default::default()
+                },
+                active: true,
+                min_aln_len: 2000,
+                min_identity: 0.5,
+                primary_only: true,
+                remove_noise: false,
+                sort_query: false,
+                flipped: vec!["ctg2".into()],
+                line_width: 2,
+                drill_limit_mb: 150.0,
+            }),
         }
     }
 
@@ -272,6 +351,7 @@ mod tests {
         assert_eq!(back.version, s.version);
         assert_eq!(back.plot.matrix_name, s.plot.matrix_name);
         assert_eq!(back.view.crosshair, s.view.crosshair);
+        assert_eq!(back.genome, s.genome);
         assert_eq!(
             back.large.unwrap().shown_classes,
             s.large.unwrap().shown_classes

@@ -820,11 +820,13 @@ mod tests {
                 id: "a".into(),
                 description: None,
                 range: 0..10,
+                origin: None,
             },
             RecordSpan {
                 id: "b".into(),
                 description: None,
                 range: 10..20,
+                origin: None,
             },
         ];
         let mut pixels = vec![0_u8; 20 * 20];
@@ -861,6 +863,7 @@ mod tests {
             id: "a".into(),
             description: None,
             range: 0..10,
+            origin: None,
         }];
         assert!(downsample_record_tiles_max(&[0; 10], 20, 20, 5, &records, &records).is_none());
     }

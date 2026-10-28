@@ -121,6 +121,44 @@ dottir batch reference.fa contigs.fa --engine genome --sort-query \
 The params sidecar has a `[genome]` section with the aligner, its version
 and arguments (or the PAF path), the PAF's SHA-256, filters and sort state.
 
+## In the GUI
+
+```sh
+dottir-gui reference.fa assembly.fa --genome          # run an aligner
+dottir-gui reference.fa assembly.fa --paf aln.paf     # or read a PAF
+```
+
+or *File → Open genome comparison…*. Indexing and alignment run in the
+background with a progress bar and *Cancel*; cached results open at once.
+
+The side panel has the same filters as the CLI (applied instantly, no
+re-alignment), *Sort query along reference*, line width, the identity
+legend and exports (plot PNG, association table, query FASTA in plot
+order, drawn alignments as PAF). The plot is redrawn at screen resolution
+for every view, so lines stay sharp at any zoom.
+
+| Mouse | |
+|-------|-|
+| Wheel | zoom at the pointer |
+| Drag | pan |
+| Shift-drag or middle-drag | zoom into a rectangle |
+| Double-click | fit |
+| Hover | alignment coordinates, strand, length, identity |
+| Right-click | dot-plot the view or the record pair under the pointer; flip a query record |
+| Esc / Backspace | back |
+
+**Drill-down.** *Dot-plot this view* (enabled once both axes show at most
+150 Mb, adjustable) reads the visible regions from the FASTA indexes and
+opens them in the usual dotplot, where the large and exact engines take
+over — with the repeats the aligner skipped. Regions keep the orientation
+shown in the genome view (flipped records are reverse-complemented), and
+the status bar reports positions in the original records. Repeat classes
+there are computed from the regions alone. *View → Genome view* returns.
+
+Sessions store the comparison (inputs, PAF or aligner settings), filters,
+sorting and flips; re-opening a session re-runs the aligner from its
+cache.
+
 ## Performance
 
 8-thread laptop, *Arabidopsis* assemblies (Col-CC 142 Mb, 5 chromosomes;
@@ -139,5 +177,5 @@ reference is indexed whole, the other is streamed in chunks.
 * DNA only. Records of 2³¹ bp or more cannot be aligned (minimap2).
 * No aligner is packaged for Windows; use `--paf` with alignments made
   elsewhere, or `--aligner PATH`.
-* Zooming from a genome plot into the large and exact engines is planned
-  for the GUI.
+* Drill-down repeat classes are region-local (a genome-wide depth track
+  costs more than the alignment itself and is not computed).
