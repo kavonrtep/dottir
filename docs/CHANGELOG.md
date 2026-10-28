@@ -97,6 +97,10 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     where runs meet at chunk boundaries (coverage was double-counted there).
 * FASTA parsing records soft-masked (lowercase) runs
   (`FastaRecord::soft_masked`, `Sequence::soft_mask`).
+* **PDF export** (spec §4.4.2, plan D3): *File → Save PDF…* and
+  `dottir batch --pdf PATH` — one page with the plot and its axes, colours
+  and HSPs as shown, metadata in the document information. Written
+  directly (one Flate image), no new dependency.
 * **Selections** (plan D4, G2): a right-button drag selects a rectangle
   with *Zoom to selection*, *Open in new window* and *Copy coordinates
   (BEDPE)*. The new window is `dottir-gui --query-region/--subject-region

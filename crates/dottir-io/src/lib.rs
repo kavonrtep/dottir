@@ -34,6 +34,7 @@ pub mod input;
 pub mod large;
 pub mod paf;
 pub mod params;
+pub mod pdf_export;
 pub mod png_export;
 pub mod sequence;
 pub mod svg_export;

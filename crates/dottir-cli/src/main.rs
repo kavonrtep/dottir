@@ -176,6 +176,11 @@ struct BatchArgs {
     #[arg(long, value_name = "PATH")]
     svg: Option<PathBuf>,
 
+    /// Also write a one-page PDF of the plot (the PNG image with axes, at
+    /// the pixelmap's resolution).
+    #[arg(long, value_name = "PATH")]
+    pdf: Option<PathBuf>,
+
     /// Draw the alignments of a PAF file over the plot (HSPs, spec
     /// §4.2.3). Records not plotted are skipped; either orientation of
     /// the PAF works. The PNG and SVG become RGB.
@@ -688,6 +693,44 @@ fn run_batch(args: BatchArgs) -> Result<()> {
         }
         .context("SVG export failed")?;
         tracing::info!("wrote {}", svg_path.display());
+    }
+
+    if let Some(pdf_path) = &args.pdf {
+        use dottir_io::pdf_export::{write_pdf, PdfPixels};
+        use dottir_io::text_overlay::{
+            compose_image_with_axes, compose_rgb_image_with_axes, inverted,
+        };
+        let (qlen, slen) = (query.len() as u32, subject.len() as u32);
+        match &hsp_rgb {
+            None => {
+                let (img, w, h) = compose_image_with_axes(
+                    &inverted(&render_pixels),
+                    render_w,
+                    render_h,
+                    qlen,
+                    slen,
+                    png_margin,
+                    &axis_records_x,
+                    &axis_records_y,
+                );
+                write_pdf(pdf_path, w, h, PdfPixels::Grey(&img), &text_chunk_refs)
+            }
+            Some(rgb) => {
+                let (img, w, h) = compose_rgb_image_with_axes(
+                    rgb,
+                    render_w,
+                    render_h,
+                    qlen,
+                    slen,
+                    png_margin,
+                    &axis_records_x,
+                    &axis_records_y,
+                );
+                write_pdf(pdf_path, w, h, PdfPixels::Rgb(&img), &text_chunk_refs)
+            }
+        }
+        .with_context(|| format!("writing {}", pdf_path.display()))?;
+        tracing::info!("wrote {}", pdf_path.display());
     }
 
     if let (Some(_), Some(_)) = (&args.dot, &large_info) {

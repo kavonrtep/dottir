@@ -3120,6 +3120,14 @@ impl DottirApp {
                         ui.close_menu();
                         save_svg(self);
                     }
+                    if ui
+                        .add_enabled(!genome, egui::Button::new("Save PDF…"))
+                        .on_disabled_hover_text("Not yet available for genome plots")
+                        .clicked()
+                    {
+                        ui.close_menu();
+                        save_pdf(self);
+                    }
                     ui.separator();
                     if ui.button("Save session…").clicked() {
                         ui.close_menu();
@@ -6889,15 +6897,29 @@ fn open_session(app: &mut DottirApp, ctx: &Context) {
 }
 
 fn save_png(app: &mut DottirApp) {
+    save_raster(app, false);
+}
+
+fn save_pdf(app: &mut DottirApp) {
+    save_raster(app, true);
+}
+
+/// The plot as shown, with axes, to a PNG or a one-page PDF.
+fn save_raster(app: &mut DottirApp, pdf: bool) {
     let Some(plot) = &app.plot else {
         app.last_error = Some("nothing to save — compute a plot first".into());
         return;
     };
     let shown = app.display_rgba(true);
     let metadata = app.export_metadata();
+    let (title, kind, ext) = if pdf {
+        ("Save PDF", "PDF", "pdf")
+    } else {
+        ("Save PNG", "PNG", "png")
+    };
     let pick = rfd::FileDialog::new()
-        .set_title("Save PNG")
-        .add_filter("PNG", &["png"])
+        .set_title(title)
+        .add_filter(kind, &[ext])
         .save_file();
     if let Some(path) = pick {
         let Some((rgba, _, _)) = shown else {
@@ -6955,17 +6977,30 @@ fn save_png(app: &mut DottirApp) {
             .unwrap_or(plot.height);
         let meta: Vec<(&str, &str)> = metadata.iter().map(|(k, v)| (*k, v.as_str())).collect();
         let (w, h) = (plot.width, plot.height);
-        let written = match &pixels {
-            ExportPixels::Grey(g) => dottir_io::png_export::write_grayscale_png_with_axes(
+        use dottir_io::pdf_export::{write_pdf, PdfPixels};
+        use dottir_io::text_overlay::{compose_image_with_axes, compose_rgb_image_with_axes};
+        let written = match (&pixels, pdf) {
+            (ExportPixels::Grey(g), false) => dottir_io::png_export::write_grayscale_png_with_axes(
                 &path, w, h, qlen, slen, g, margin, &recs_x, &recs_y, &meta, false,
-            ),
-            ExportPixels::Rgb(c) => dottir_io::png_export::write_rgb_png_with_axes(
+            )
+            .map_err(|e| e.to_string()),
+            (ExportPixels::Rgb(c), false) => dottir_io::png_export::write_rgb_png_with_axes(
                 &path, w, h, qlen, slen, c, margin, &recs_x, &recs_y, &meta,
-            ),
+            )
+            .map_err(|e| e.to_string()),
+            (ExportPixels::Grey(g), true) => {
+                let (img, tw, th) =
+                    compose_image_with_axes(g, w, h, qlen, slen, margin, &recs_x, &recs_y);
+                write_pdf(&path, tw, th, PdfPixels::Grey(&img), &meta).map_err(|e| e.to_string())
+            }
+            (ExportPixels::Rgb(c), true) => {
+                let (img, tw, th) =
+                    compose_rgb_image_with_axes(c, w, h, qlen, slen, margin, &recs_x, &recs_y);
+                write_pdf(&path, tw, th, PdfPixels::Rgb(&img), &meta).map_err(|e| e.to_string())
+            }
         };
-        match written {
-            Ok(()) => {}
-            Err(e) => app.last_error = Some(format!("PNG save failed: {e}")),
+        if let Err(e) = written {
+            app.last_error = Some(format!("{kind} save failed: {e}"));
         }
     }
 }

@@ -72,6 +72,8 @@ Large-sequence flags (`--engine`, `--seed-pattern`, `--hide-classes`,
 | `--memory-limit-bytes N` | `512 MiB` | Refuse pixelmaps bigger than this. |
 | `--auto-zoom MAX_DIM` | off | Auto-pick `--zoom` so the larger output dim is ≤ this. |
 | `--no-sidecar` | off | Skip the `.params.toml` sidecar. |
+| `--svg PATH` | — | Also write an SVG (the image embedded, axes as text). |
+| `--pdf PATH` | — | Also write a one-page PDF: the image with its axes at the pixelmap's resolution; the PNG metadata goes into the document information. |
 | `--export-alignment-at Q,S` | — | Print the residues around query position Q and subject position S (1-based, along the whole input or `record:pos`) to stdout; the window stays inside the two records. Without `-o` nothing is plotted. Not for BLASTX. |
 | `--alignment-window N` | `30` | Residues on each side of the position. |
 | `--alignment-format {fasta,stockholm,text}` | `fasta` | Format of the exported window. |
