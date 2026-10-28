@@ -8,7 +8,7 @@ use clap::ValueEnum;
 
 use dottir_core::large::{
     seed::DEFAULT_PATTERN, ChainConfig, ClassMask, ClassThresholds, Control, DepthMethod,
-    LargeConfig, LargeInput, LargeSession, RepeatClass, SpacedSeed,
+    LargeConfig, LargeInput, LargeSession, RepeatClass, Shade, SpacedSeed,
 };
 use dottir_core::{BlastMode, DotPlot, PlotConfig};
 use dottir_io::params::LargeParamsInfo;
@@ -264,6 +264,7 @@ pub fn run(
         .transpose()?;
 
     let lcfg = LargeConfig {
+        coverage: false,
         matrix: cfg.matrix.clone(),
         window_size: cfg.window_size,
         zoom: cfg.zoom,
@@ -406,7 +407,7 @@ pub fn run(
         chains: args.chains_out.as_ref().map(|_| lp.chains.len()),
     };
     Ok(LargeOutcome {
-        plot: lp.to_dot_plot(shown, false),
+        plot: lp.to_dot_plot(shown, false, Shade::Score),
         info,
     })
 }

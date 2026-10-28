@@ -47,6 +47,16 @@ pub struct SessionLarge {
     pub colour_by_class: bool,
     pub show_chains: bool,
     pub chain_min_score: f32,
+    // Added after the first large-mode sessions; absent = default.
+    /// "coverage" / "score".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shade: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coverage_ramp_bp: Option<[f32; 2]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coverage_auto: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub axis_tracks: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -239,6 +249,10 @@ mod tests {
                 colour_by_class: true,
                 show_chains: true,
                 chain_min_score: 1000.0,
+                shade: Some("coverage".into()),
+                coverage_ramp_bp: Some([50.0, 3000.0]),
+                coverage_auto: Some(false),
+                axis_tracks: Some(true),
             }),
         }
     }

@@ -42,7 +42,7 @@ pub(crate) mod score;
 pub mod seed;
 
 use std::ops::Range;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
 pub use chain::{chain_segments, Chain, ChainConfig};
 pub use depth::{compute_depth, ClassThresholds, DepthMethod, DepthTrack, RepeatClass};
@@ -98,6 +98,9 @@ pub struct LargeConfig {
     pub chain: Option<ChainConfig>,
     /// Compute only this sub-view; `None` = whole plot.
     pub viewport: Option<Viewport>,
+    /// Also count matching bases per pixel ([`LargePlot::coverage`]).
+    /// Costs 4 bytes per pixel and channel while computing.
+    pub coverage: bool,
 }
 
 impl Default for LargeConfig {
@@ -120,6 +123,7 @@ impl Default for LargeConfig {
             classes: ClassThresholds::default(),
             chain: None,
             viewport: None,
+            coverage: false,
         }
     }
 }
@@ -264,6 +268,42 @@ pub struct LargeParams {
     pub format_version: u32,
 }
 
+/// Copy-number summary of the bases under one pixel column (query) or
+/// row (subject).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DepthBin {
+    /// Median copy number; 1 = unique.
+    pub median: u16,
+    pub max: u16,
+    /// Share of bases in each [`RepeatClass`], scaled to 0–255.
+    pub class_frac: [u8; RepeatClass::COUNT],
+}
+
+/// Coverage values are stored as `round(16 · log2(1 + bases))`, saturating
+/// at 255 (≈ 63 kb per pixel): 16 steps per doubling.
+pub fn coverage_code(bases: f64) -> u8 {
+    if bases <= 0.0 {
+        return 0;
+    }
+    ((1.0 + bases).log2() * 16.0).round().min(255.0) as u8
+}
+
+/// Inverse of [`coverage_code`].
+pub fn coverage_bases(code: u8) -> f64 {
+    (code as f64 / 16.0).exp2() - 1.0
+}
+
+/// How [`LargePlot::to_dot_plot`] fills the pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Shade {
+    /// Best window score, as in the exact engine.
+    #[default]
+    Score,
+    /// Matching bases per pixel, as [`coverage_code`]s. Falls back to
+    /// `Score` when coverage was not computed.
+    Coverage,
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct LargeStats {
     pub raw_hits: u64,
@@ -289,6 +329,13 @@ pub struct LargePlot {
     pub q_capped: Vec<u32>,
     /// Per pixel row: subject positions whose seed exceeds `max_occ`.
     pub s_capped: Vec<u32>,
+    /// Same layout as `channels`: [`coverage_code`] of the number of
+    /// diagonal cells with a positive window score in the pixel. Empty
+    /// unless [`LargeConfig::coverage`] was set.
+    pub coverage: Vec<Vec<u8>>,
+    /// Copy-number profile per pixel column / row.
+    pub q_depth_bins: Vec<DepthBin>,
+    pub s_depth_bins: Vec<DepthBin>,
     /// Diagonal runs (kept only when chaining is enabled).
     pub segments: Vec<Segment>,
     pub chains: Vec<Chain>,
@@ -324,16 +371,53 @@ impl LargePlot {
         out
     }
 
+    pub fn has_coverage(&self) -> bool {
+        self.coverage.iter().any(|c| !c.is_empty())
+    }
+
+    /// Coverage of the selected classes on one strand or both, summed in
+    /// bases and re-encoded with [`coverage_code`].
+    pub fn merged_coverage(&self, reverse: Option<bool>, classes: ClassMask) -> Vec<u8> {
+        let n = self.width as usize * self.height as usize;
+        let strands: &[bool] = match reverse {
+            Some(false) => &[false],
+            Some(true) => &[true],
+            None => &[false, true],
+        };
+        let chans: Vec<&[u8]> = strands
+            .iter()
+            .flat_map(|&r| {
+                classes.classes().into_iter().map(move |c| {
+                    self.coverage
+                        .get(r as usize * RepeatClass::COUNT + c.index())
+                        .map_or(&[][..], |v| v.as_slice())
+                })
+            })
+            .filter(|c| !c.is_empty())
+            .collect();
+        match chans.as_slice() {
+            [] => vec![0; n],
+            [one] => one.to_vec(),
+            _ => {
+                let decode: Vec<f64> = (0..=255u8).map(coverage_bases).collect();
+                (0..n)
+                    .map(|i| coverage_code(chans.iter().map(|c| decode[c[i] as usize]).sum()))
+                    .collect()
+            }
+        }
+    }
+
     /// Present the selected classes as a [`DotPlot`], so the existing
     /// renderers and exporters can consume it.
-    pub fn to_dot_plot(&self, classes: ClassMask, separate_strands: bool) -> DotPlot {
+    pub fn to_dot_plot(&self, classes: ClassMask, separate_strands: bool, shade: Shade) -> DotPlot {
+        let merged = |r: Option<bool>| match shade {
+            Shade::Coverage if self.has_coverage() => self.merged_coverage(r, classes),
+            _ => self.merged(r, classes),
+        };
         let (pixels, reverse_pixels) = if separate_strands {
-            (
-                self.merged(Some(false), classes),
-                Some(self.merged(Some(true), classes)),
-            )
+            (merged(Some(false)), Some(merged(Some(true))))
         } else {
-            (self.merged(None, classes), None)
+            (merged(None), None)
         };
         DotPlot {
             width: self.width,
@@ -611,7 +695,10 @@ impl LargeSession {
         let do_rev = matches!(cfg.strand, Strand::Reverse | Strand::Both);
         let n_strands = do_fwd as u64 + do_rev as u64;
         let per_channel = width as u64 * height as u64;
-        let channel_bytes = per_channel * n_strands * RepeatClass::COUNT as u64;
+        let channel_bytes = per_channel
+            * n_strands
+            * RepeatClass::COUNT as u64
+            * if cfg.coverage { 1 + 4 } else { 1 };
         let requested = channel_bytes + self.bytes();
         if requested > cfg.memory_limit_bytes {
             return Err(DottirError::OutOfMemory {
@@ -693,6 +780,23 @@ impl LargeSession {
             stats: LargeStats,
         }
 
+        let cov_bufs: Vec<Vec<AtomicU32>> = if cfg.coverage {
+            [do_fwd, do_rev]
+                .into_iter()
+                .flat_map(|on| {
+                    (0..RepeatClass::COUNT).map(move |_| {
+                        if on {
+                            (0..per_channel).map(|_| AtomicU32::new(0)).collect()
+                        } else {
+                            Vec::new()
+                        }
+                    })
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
         let (outs, s_capped) = {
             let fwd_views: Vec<_> = fwd_maps.iter_mut().map(|m| m.view_mut()).collect();
             let rev_views: Vec<_> = rev_maps.iter_mut().map(|m| m.view_mut()).collect();
@@ -704,6 +808,7 @@ impl LargeSession {
                 height: height as usize,
                 fwd: &fwd_views,
                 rev: &rev_views,
+                coverage: cfg.coverage.then_some(cov_bufs.as_slice()),
             };
             let work = |core: &Range<usize>| -> ChunkOut {
                 if ctl.cancelled() {
@@ -777,8 +882,20 @@ impl LargeSession {
                 channels.extend(maps.into_iter().map(PixelMap::into_vec));
             }
         }
+        let mut coverage: Vec<Vec<u8>> = cov_bufs
+            .into_iter()
+            .map(|b| {
+                b.into_iter()
+                    .map(|n| coverage_code(n.into_inner() as f64))
+                    .collect()
+            })
+            .collect();
         if lower_only {
-            for ch in channels.iter_mut().filter(|c| !c.is_empty()) {
+            for ch in channels
+                .iter_mut()
+                .chain(coverage.iter_mut())
+                .filter(|c| !c.is_empty())
+            {
                 mirror_self_comparison(
                     ch,
                     width as usize,
@@ -794,6 +911,9 @@ impl LargeSession {
             None => vec![],
         };
 
+        let q_depth_bins = depth_bins(&self.q_depth.depth, &q_view, zoom, cfg.classes);
+        let s_depth_bins = depth_bins(&s_depth.depth, &s_view, zoom, cfg.classes);
+
         Ok(LargePlot {
             width,
             height,
@@ -803,6 +923,9 @@ impl LargeSession {
             channels,
             q_capped,
             s_capped,
+            coverage,
+            q_depth_bins,
+            s_depth_bins,
             segments,
             chains,
             params: LargeParams {
@@ -983,6 +1106,43 @@ fn run_to_segment(run: &hits::Run, qlen: usize, span: usize) -> Segment {
 }
 
 /// One-shot convenience: [`LargeSession::prepare`] then
+/// Summarise `depth[view]` per `zoom`-base bin. Depth 0 (never seen
+/// repeating) counts as one copy.
+fn depth_bins(
+    depth: &[u16],
+    view: &Range<usize>,
+    zoom: usize,
+    classes: ClassThresholds,
+) -> Vec<DepthBin> {
+    let bin = |lo: usize| {
+        let hi = (lo + zoom).min(view.end);
+        let mut v: Vec<u16> = depth[lo..hi].iter().map(|&d| d.max(1)).collect();
+        let mut counts = [0usize; RepeatClass::COUNT];
+        for &d in &v {
+            counts[classes.classify(d).index()] += 1;
+        }
+        let n = v.len();
+        let mid = n / 2;
+        let median = *v.select_nth_unstable(mid).1;
+        let max = v.iter().copied().max().unwrap_or(1);
+        DepthBin {
+            median,
+            max,
+            class_frac: counts.map(|c| ((c * 255 + n / 2) / n) as u8),
+        }
+    };
+    let starts: Vec<usize> = view.clone().step_by(zoom).collect();
+    #[cfg(feature = "rayon")]
+    {
+        use rayon::prelude::*;
+        starts.into_par_iter().map(bin).collect()
+    }
+    #[cfg(not(feature = "rayon"))]
+    {
+        starts.into_iter().map(bin).collect()
+    }
+}
+
 /// [`LargeSession::compute`].
 pub fn compute_large_dotplot(
     input: &LargeInput<'_>,

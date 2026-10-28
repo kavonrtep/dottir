@@ -4,8 +4,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use dottir_core::large::{
-    ChainConfig, ClassMask, ClassThresholds, DepthMethod, LargeConfig, LargePlot, RepeatClass,
-    SpacedSeed, Viewport,
+    coverage_bases, ChainConfig, ClassMask, ClassThresholds, DepthBin, DepthMethod, LargeConfig,
+    LargePlot, RepeatClass, Shade, SpacedSeed, Viewport,
 };
 use dottir_core::{
     extract_ridges_from_pixels, snap_zoom_to_period_divisor, BlastMode, DotPlot, PlotConfig, Ridge,
@@ -160,6 +160,14 @@ struct LargeSettings {
     colour_by_class: bool,
     show_chains: bool,
     chain_min_score: f32,
+    /// What the pixel darkness means in large mode.
+    shade: Shade,
+    /// Coverage ramp in matching bases per pixel: white below, black at.
+    cov_white_bp: f32,
+    cov_black_bp: f32,
+    /// Re-fit the coverage ramp to each new plot.
+    cov_auto: bool,
+    show_axis_tracks: bool,
 }
 
 impl Default for LargeSettings {
@@ -179,9 +187,17 @@ impl Default for LargeSettings {
             colour_by_class: true,
             show_chains: false,
             chain_min_score: 1000.0,
+            shade: Shade::Coverage,
+            cov_white_bp: 50.0,
+            cov_black_bp: 3000.0,
+            cov_auto: true,
+            show_axis_tracks: true,
         }
     }
 }
+
+/// Height (top) / width (left) of the copy-number + capped-seed strip.
+const AXIS_TRACK: f32 = 16.0;
 
 impl LargeSettings {
     fn to_session(&self) -> crate::session::SessionLarge {
@@ -219,6 +235,16 @@ impl LargeSettings {
             colour_by_class: self.colour_by_class,
             show_chains: self.show_chains,
             chain_min_score: self.chain_min_score,
+            shade: Some(
+                match self.shade {
+                    Shade::Coverage => "coverage",
+                    Shade::Score => "score",
+                }
+                .into(),
+            ),
+            coverage_ramp_bp: Some([self.cov_white_bp, self.cov_black_bp]),
+            coverage_auto: Some(self.cov_auto),
+            axis_tracks: Some(self.show_axis_tracks),
         }
     }
 
@@ -263,6 +289,17 @@ impl LargeSettings {
             colour_by_class: s.colour_by_class,
             show_chains: s.show_chains,
             chain_min_score: s.chain_min_score,
+            shade: match s.shade.as_deref() {
+                Some("score") => Shade::Score,
+                Some(_) => Shade::Coverage,
+                None => d.shade,
+            },
+            cov_white_bp: s.coverage_ramp_bp.map_or(d.cov_white_bp, |r| r[0].max(1.0)),
+            cov_black_bp: s
+                .coverage_ramp_bp
+                .map_or(d.cov_black_bp, |r| r[1].max(r[0].max(1.0) * 2.0)),
+            cov_auto: s.coverage_auto.unwrap_or(d.cov_auto),
+            show_axis_tracks: s.axis_tracks.unwrap_or(d.show_axis_tracks),
         }
     }
 
@@ -1073,13 +1110,81 @@ impl DottirApp {
     /// display-only change (class toggles, strand colouring).
     fn rederive_large_plot(&mut self) {
         if let Some(lp) = &self.large_plot {
-            let mut plot = lp.to_dot_plot(self.settings.large.classes, self.separate_strands());
+            let mut plot = lp.to_dot_plot(
+                self.settings.large.classes,
+                self.separate_strands(),
+                self.settings.large.shade,
+            );
             if let Some(old) = &self.plot {
                 plot.params = old.params;
             }
             self.plot = Some(plot);
             self.texture_dirty = true;
             self.refresh_ridges();
+        }
+    }
+
+    /// The large plot behind the current pixelmap, if it is one.
+    fn shown_large_plot(&self) -> Option<&LargePlot> {
+        let (lp, plot) = (self.large_plot.as_ref()?, self.plot.as_ref()?);
+        (lp.width == plot.width && lp.height == plot.height).then_some(lp)
+    }
+
+    fn coverage_shading(&self) -> bool {
+        self.settings.large.shade == Shade::Coverage
+            && self.shown_large_plot().is_some_and(|lp| lp.has_coverage())
+    }
+
+    fn coverage_lut(&self) -> [u8; 256] {
+        coverage_lut(
+            self.settings.large.cov_white_bp,
+            self.settings.large.cov_black_bp,
+        )
+    }
+
+    /// Fit the coverage ramp to the shown pixels: white at the 2nd and
+    /// black at the 95th percentile of the lit ones.
+    fn auto_coverage_ramp(&mut self) {
+        let Some(lp) = self.shown_large_plot() else {
+            return;
+        };
+        if !lp.has_coverage() {
+            return;
+        }
+        let mut hist = [0u64; 256];
+        for c in lp.merged_coverage(None, self.settings.large.classes) {
+            hist[c as usize] += 1;
+        }
+        let lit: u64 = hist[1..].iter().sum();
+        if lit == 0 {
+            return;
+        }
+        let pct = |p: f64| {
+            let target = (lit as f64 * p).ceil() as u64;
+            let mut acc = 0;
+            for (code, &n) in hist.iter().enumerate().skip(1) {
+                acc += n;
+                if acc >= target {
+                    return coverage_bases(code as u8) as f32;
+                }
+            }
+            coverage_bases(255) as f32
+        };
+        // Whole bases: the sliders are integer and would otherwise report
+        // the rounding as a user edit (which turns auto-fit off).
+        let w = pct(0.02).max(1.0).round();
+        let b = pct(0.95).max(w * 2.0).round();
+        self.settings.large.cov_white_bp = w;
+        self.settings.large.cov_black_bp = b;
+        self.texture_dirty = true;
+    }
+
+    /// Margin reserved for the axis tracks.
+    fn axis_track_width(&self) -> f32 {
+        if self.settings.large.show_axis_tracks && self.large_plot.is_some() {
+            AXIS_TRACK
+        } else {
+            0.0
         }
     }
 
@@ -1303,7 +1408,11 @@ impl DottirApp {
         };
         if let Some((mut plot, large)) = self.cache_get(&target_slice, target_zoom) {
             if let Some(lp) = &large {
-                plot = lp.to_dot_plot(self.settings.large.classes, self.separate_strands());
+                plot = lp.to_dot_plot(
+                    self.settings.large.classes,
+                    self.separate_strands(),
+                    self.settings.large.shade,
+                );
             }
             self.large_plot = large;
             tracing::info!(
@@ -1318,6 +1427,9 @@ impl DottirApp {
             self.texture_dirty = true;
             self.last_error = None;
             self.refresh_ridges();
+            if self.settings.large.cov_auto {
+                self.auto_coverage_ramp();
+            }
             if let Some(off) = self.pending_view_offset_after_compute.take() {
                 self.view_offset = off;
             }
@@ -1442,6 +1554,7 @@ impl DottirApp {
             triangle: self.settings.triangle,
             disable_mirror: false,
             memory_limit_bytes: ls.memory_limit_bytes,
+            coverage: true,
             seed,
             two_hit_dist: ls.two_hit_dist,
             max_occ: ls.max_occ,
@@ -1474,6 +1587,7 @@ impl DottirApp {
                 config,
                 classes: ls.classes,
                 separate_strands: self.separate_strands(),
+                shade: ls.shade,
             }),
         });
         self.compute_in_flight = true;
@@ -1561,6 +1675,9 @@ impl DottirApp {
                     self.texture_dirty = true;
                     self.last_error = None;
                     self.refresh_ridges();
+                    if self.settings.large.cov_auto {
+                        self.auto_coverage_ramp();
+                    }
                     // Pin the canvas size that the new compute was
                     // targeting (latest available measurement). The
                     // resize-retarget detector compares future paints
@@ -1597,7 +1714,12 @@ impl DottirApp {
         if !self.texture_dirty && self.texture.is_some() {
             return;
         }
-        let lut = self.greyramp.lut();
+        let coverage = self.coverage_shading();
+        let lut = if coverage {
+            self.coverage_lut()
+        } else {
+            self.greyramp.lut()
+        };
         let (pw, ph) = (plot.width as usize, plot.height as usize);
         let fwd_view = plot.pixels.as_slice();
         let rev_view = plot.reverse_pixels.as_deref();
@@ -1618,10 +1740,15 @@ impl DottirApp {
             let channels: Vec<(Color32, [&[u8]; 2])> = shown
                 .iter()
                 .map(|&c| {
-                    (
-                        CLASS_COLOURS[c.index()],
-                        [lp.channel(false, c), lp.channel(true, c)],
-                    )
+                    let ch = |r: bool| {
+                        let i = r as usize * RepeatClass::COUNT + c.index();
+                        if coverage {
+                            lp.coverage[i].as_slice()
+                        } else {
+                            lp.channels[i].as_slice()
+                        }
+                    };
+                    (CLASS_COLOURS[c.index()], [ch(false), ch(true)])
                 })
                 .collect();
             for i in 0..pw * ph {
@@ -2176,72 +2303,75 @@ impl DottirApp {
                     ui.separator();
                 }
 
-                // ── Greyramp ──
-                ui.label(
-                    egui::RichText::new("Greyramp")
-                        .strong()
-                        .size(13.0)
-                        .color(Color32::from_gray(50)),
-                );
-                let small = egui::RichText::new("White").size(11.0);
-                ui.label(small);
-                if ui
-                    .add(
-                        Slider::new(&mut self.greyramp.white, 0..=255)
-                            .clamping(egui::SliderClamping::Always),
-                    )
-                    .changed()
-                {
-                    self.texture_dirty = true;
-                    // Ridge threshold tracks greyramp.white, so the
-                    // overlay's "lit" definition follows the raster's
-                    // noise floor.
-                    self.refresh_ridges();
-                }
-                ui.label(egui::RichText::new("Black").size(11.0));
-                if ui
-                    .add(
-                        Slider::new(&mut self.greyramp.black, 0..=255)
-                            .clamping(egui::SliderClamping::Always),
-                    )
-                    .changed()
-                {
-                    self.texture_dirty = true;
-                }
-                ui.horizontal(|ui| {
-                    if ui.small_button("Swap").clicked() {
-                        self.greyramp.swap = !self.greyramp.swap;
+                // ── Greyramp ── (replaced by the coverage ramp in the
+                // large-mode panel when shading by coverage)
+                if !self.coverage_shading() {
+                    ui.label(
+                        egui::RichText::new("Greyramp")
+                            .strong()
+                            .size(13.0)
+                            .color(Color32::from_gray(50)),
+                    );
+                    let small = egui::RichText::new("White").size(11.0);
+                    ui.label(small);
+                    if ui
+                        .add(
+                            Slider::new(&mut self.greyramp.white, 0..=255)
+                                .clamping(egui::SliderClamping::Always),
+                        )
+                        .changed()
+                    {
                         self.texture_dirty = true;
-                    }
-                    if ui.small_button("Reset").clicked() {
-                        self.greyramp = Greyramp::default();
-                        self.texture_dirty = true;
+                        // Ridge threshold tracks greyramp.white, so the
+                        // overlay's "lit" definition follows the raster's
+                        // noise floor.
                         self.refresh_ridges();
                     }
-                });
-                ui.add_space(2.0);
-                ui.label(egui::RichText::new("LUT").size(10.0));
-                let lut = self.greyramp.lut();
-                let (rect, _) =
-                    ui.allocate_exact_size(Vec2::new(ui.available_width(), 20.0), Sense::hover());
-                let painter = ui.painter();
-                for (x, &g) in lut.iter().enumerate() {
-                    let xp = rect.left() + (x as f32 / 256.0) * rect.width();
-                    let xw = (rect.width() / 256.0).max(1.0);
-                    painter.rect_filled(
-                        Rect::from_min_max(
-                            Pos2::new(xp, rect.top()),
-                            Pos2::new(xp + xw, rect.bottom()),
-                        ),
-                        0.0,
-                        Color32::from_gray(g),
-                    );
+                    ui.label(egui::RichText::new("Black").size(11.0));
+                    if ui
+                        .add(
+                            Slider::new(&mut self.greyramp.black, 0..=255)
+                                .clamping(egui::SliderClamping::Always),
+                        )
+                        .changed()
+                    {
+                        self.texture_dirty = true;
+                    }
+                    ui.horizontal(|ui| {
+                        if ui.small_button("Swap").clicked() {
+                            self.greyramp.swap = !self.greyramp.swap;
+                            self.texture_dirty = true;
+                        }
+                        if ui.small_button("Reset").clicked() {
+                            self.greyramp = Greyramp::default();
+                            self.texture_dirty = true;
+                            self.refresh_ridges();
+                        }
+                    });
+                    ui.add_space(2.0);
+                    ui.label(egui::RichText::new("LUT").size(10.0));
+                    let lut = self.greyramp.lut();
+                    let (rect, _) = ui
+                        .allocate_exact_size(Vec2::new(ui.available_width(), 20.0), Sense::hover());
+                    let painter = ui.painter();
+                    for (x, &g) in lut.iter().enumerate() {
+                        let xp = rect.left() + (x as f32 / 256.0) * rect.width();
+                        let xw = (rect.width() / 256.0).max(1.0);
+                        painter.rect_filled(
+                            Rect::from_min_max(
+                                Pos2::new(xp, rect.top()),
+                                Pos2::new(xp + xw, rect.bottom()),
+                            ),
+                            0.0,
+                            Color32::from_gray(g),
+                        );
+                    }
+                    painter.rect_stroke(rect, 0.0, egui::Stroke::new(1.0, Color32::from_gray(120)));
+                    ui.add_space(6.0);
+                    ui.separator();
                 }
-                painter.rect_stroke(rect, 0.0, egui::Stroke::new(1.0, Color32::from_gray(120)));
 
                 // ── Vector overlays ──
-                ui.add_space(6.0);
-                ui.separator();
                 if ui
                     .checkbox(&mut self.settings.show_ridge_overlay, "Show vector ridges")
                     .changed()
@@ -2996,6 +3126,87 @@ impl DottirApp {
         redraw |= ui
             .checkbox(&mut ls.colour_by_class, "Colour by class")
             .changed();
+
+        // ── Sensitivity ──
+        let mut refit = false;
+        let mut retexture = false;
+        ui.add_space(4.0);
+        ui.label(
+            egui::RichText::new("Sensitivity")
+                .strong()
+                .size(13.0)
+                .color(Color32::from_gray(50)),
+        );
+        ui.horizontal(|ui| {
+            let before = ls.shade;
+            ui.selectable_value(&mut ls.shade, Shade::Coverage, "Matching bp")
+                .on_hover_text(
+                    "Darkness = bases of similarity inside the pixel. \
+                     Sensitive at any zoom: at overview scale the best \
+                     window score is maximal almost everywhere.",
+                );
+            ui.selectable_value(&mut ls.shade, Shade::Score, "Window score")
+                .on_hover_text("Darkness = best window score, as in Dotter (greyramp below).");
+            if ls.shade != before {
+                redraw = true;
+                refit = ls.shade == Shade::Coverage && ls.cov_auto;
+            }
+        });
+        if ls.shade == Shade::Coverage {
+            let has_cov = self.large_plot.as_ref().is_some_and(|lp| lp.has_coverage());
+            if !has_cov {
+                ui.label(
+                    egui::RichText::new("This view has no coverage; recompute to use it.")
+                        .size(11.0)
+                        .color(Color32::from_rgb(160, 80, 0)),
+                );
+            }
+            let white = ui
+                .add(
+                    Slider::new(&mut ls.cov_white_bp, 1.0..=100_000.0)
+                        .logarithmic(true)
+                        .integer()
+                        .text("bp: white below"),
+                )
+                .on_hover_text("Pixels with less matching sequence than this are hidden.");
+            let black = ui
+                .add(
+                    Slider::new(&mut ls.cov_black_bp, 2.0..=200_000.0)
+                        .logarithmic(true)
+                        .integer()
+                        .text("bp: black at"),
+                )
+                .on_hover_text("Pixels with at least this much matching sequence are black.");
+            if white.changed() || black.changed() {
+                if white.changed() && ls.cov_black_bp <= ls.cov_white_bp {
+                    ls.cov_black_bp = ls.cov_white_bp * 2.0;
+                }
+                if black.changed() && ls.cov_white_bp >= ls.cov_black_bp {
+                    ls.cov_white_bp = (ls.cov_black_bp / 2.0).max(1.0);
+                }
+                ls.cov_auto = false;
+                retexture = true;
+            }
+            ui.horizontal(|ui| {
+                if ui
+                    .checkbox(&mut ls.cov_auto, "Auto-fit each view")
+                    .on_hover_text("White at the 2nd, black at the 95th percentile of lit pixels.")
+                    .changed()
+                    && ls.cov_auto
+                {
+                    refit = true;
+                }
+                if ui.small_button("Fit now").clicked() {
+                    refit = true;
+                }
+            });
+        }
+        ui.checkbox(&mut ls.show_axis_tracks, "Repeat tracks on axes")
+            .on_hover_text(
+                "Share of low/mid/high-copy bases per pixel column/row, and seeds \
+                 skipped by the max-occ cap (red). Hover for copy numbers.",
+            );
+        ui.add_space(4.0);
         ui.checkbox(&mut ls.show_chains, "Show synteny chains")
             .on_hover_text("Co-linear chains of unique/low-copy runs (not alignments).");
         if ls.show_chains {
@@ -3033,6 +3244,12 @@ impl DottirApp {
         }
         if redraw {
             self.rederive_large_plot();
+        }
+        if refit {
+            self.auto_coverage_ramp();
+        }
+        if retexture {
+            self.texture_dirty = true;
         }
     }
 
@@ -3300,8 +3517,9 @@ impl DottirApp {
                 .as_ref()
                 .map(|s| s.records.len() > 1)
                 .unwrap_or(false);
-            let top_margin: f32 = if multi_q { 44.0 } else { 24.0 };
-            let left_margin: f32 = if multi_s { 70.0 } else { 56.0 };
+            let track = self.axis_track_width();
+            let top_margin: f32 = if multi_q { 44.0 } else { 24.0 } + track;
+            let left_margin: f32 = if multi_s { 70.0 } else { 56.0 } + track;
             let approx_plot_w = (avail.x - left_margin).max(1.0);
             let approx_plot_h = (avail.y - top_margin).max(1.0);
             let new_area = (approx_plot_w, approx_plot_h);
@@ -3725,6 +3943,11 @@ impl DottirApp {
             // C4: tick labels in the top / left margin bands —
             // outside the plot area so they don't overlap the image.
             self.draw_axis_labels(ui, rect, plot_area, plot, draw_offset, ppp);
+            if let Some(tip) =
+                self.draw_axis_tracks(ui, plot_area, draw_offset, ppp, response.hover_pos())
+            {
+                response.clone().on_hover_text_at_pointer(tip);
+            }
 
             // Crosshair overlay + coord label — clipped to the plot
             // area so the lines never run into the axis margin. The
@@ -3823,6 +4046,110 @@ impl DottirApp {
     /// Tick spacing is picked so each adjacent label is at least
     /// `MIN_LABEL_SPACING_PX` apart in screen space, and the value
     /// step is a "nice" power-of-10 multiple (`1, 2, 5 × 10^k`).
+    /// Large mode: repeat-content strips just outside the top (query) and
+    /// left (subject) plot edges. Each pixel column/row shows the share of
+    /// low/mid/high-copy bases as a stacked bar growing away from the
+    /// plot, and a red mark at the outer edge where seeds were capped.
+    /// Returns the tooltip for a hovered bin.
+    fn draw_axis_tracks(
+        &self,
+        ui: &egui::Ui,
+        plot_area: Rect,
+        draw_offset: Vec2,
+        ppp: f32,
+        hover: Option<Pos2>,
+    ) -> Option<String> {
+        if self.axis_track_width() == 0.0 {
+            return None;
+        }
+        let lp = self.shown_large_plot()?;
+        let painter = ui.painter();
+        let zoom = lp.zoom as usize;
+        let bar = AXIS_TRACK - 5.0;
+        let texel = 1.0 / ppp;
+        let mut tip = None;
+
+        // `along` = position along the axis of bin i; `away` = distance
+        // from the plot edge. Returns the screen rect for (along, away).
+        for query_axis in [true, false] {
+            let (bins, capped, origin) = if query_axis {
+                (&lp.q_depth_bins, &lp.q_capped, lp.origin_q)
+            } else {
+                (&lp.s_depth_bins, &lp.s_capped, lp.origin_s)
+            };
+            let (edge, lo, hi, off) = if query_axis {
+                (
+                    plot_area.top(),
+                    plot_area.left(),
+                    plot_area.right(),
+                    draw_offset.x,
+                )
+            } else {
+                (
+                    plot_area.left(),
+                    plot_area.top(),
+                    plot_area.bottom(),
+                    draw_offset.y,
+                )
+            };
+            let cell = |i: usize, from: f32, to: f32| {
+                let a0 = lo + i as f32 * texel - off;
+                let (a0, a1) = (a0.max(lo), (a0 + texel).min(hi));
+                let (d0, d1) = (edge - to, edge - from);
+                if query_axis {
+                    Rect::from_min_max(Pos2::new(a0, d0), Pos2::new(a1, d1))
+                } else {
+                    Rect::from_min_max(Pos2::new(d0, a0), Pos2::new(d1, a1))
+                }
+            };
+            let first = ((off * ppp).floor().max(0.0)) as usize;
+            let last = (((off + (hi - lo)) * ppp).ceil() as usize).min(bins.len());
+            for (i, b) in bins.iter().enumerate().take(last).skip(first) {
+                let mut from = 1.0;
+                for c in [RepeatClass::Low, RepeatClass::Mid, RepeatClass::High] {
+                    let h = b.class_frac[c.index()] as f32 / 255.0 * bar;
+                    if h > 0.0 {
+                        painter.rect_filled(cell(i, from, from + h), 0.0, CLASS_COLOURS[c.index()]);
+                        from += h;
+                    }
+                }
+                if let Some(&n) = capped.get(i).filter(|&&n| n > 0) {
+                    let a = (n as f32 / zoom as f32 * 4.0).clamp(0.3, 1.0);
+                    painter.rect_filled(
+                        cell(i, AXIS_TRACK - 3.0, AXIS_TRACK),
+                        0.0,
+                        Color32::from_rgba_unmultiplied(220, 0, 0, (a * 255.0) as u8),
+                    );
+                }
+            }
+            if let Some(p) = hover {
+                let band = cell(0, 0.0, AXIS_TRACK);
+                let (along, inside) = if query_axis {
+                    (
+                        p.x,
+                        p.y >= band.top() && p.y < edge && p.x >= lo && p.x < hi,
+                    )
+                } else {
+                    (
+                        p.y,
+                        p.x >= band.left() && p.x < edge && p.y >= lo && p.y < hi,
+                    )
+                };
+                let i = ((along - lo + off) * ppp).floor() as usize;
+                if let (true, Some(b)) = (inside, bins.get(i)) {
+                    tip = Some(depth_bin_text(
+                        if query_axis { "Query" } else { "Subject" },
+                        origin + i * zoom,
+                        zoom,
+                        b,
+                        capped.get(i).copied().unwrap_or(0),
+                    ));
+                }
+            }
+        }
+        tip
+    }
+
     fn draw_axis_labels(
         &self,
         ui: &mut egui::Ui,
@@ -3863,7 +4190,8 @@ impl DottirApp {
         // Top axis (query) — labels above the plot, in the top
         // margin band (outer.top()..plot_area.top()).
         let top_margin_y = outer.top();
-        let tick_baseline_y = plot_area.top();
+        let track = self.axis_track_width();
+        let tick_baseline_y = plot_area.top() - track;
         let label_y = tick_baseline_y - 16.0; // text top
         let span_x = seq_q_hi.saturating_sub(seq_q_lo) as f32;
         // Pixels-per-residue is now expressed against *logical*
@@ -3929,7 +4257,7 @@ impl DottirApp {
 
         // Left axis (subject) — labels in the left margin
         // (outer.left()..plot_area.left()).
-        let tick_baseline_x = plot_area.left();
+        let tick_baseline_x = plot_area.left() - track;
         let label_x = tick_baseline_x - 8.0; // text right edge
         let span_y = seq_s_hi.saturating_sub(seq_s_lo) as f32;
         let step_y = nice_tick_step(span_y as f64, MIN_LABEL_SPACING_PX / pixels_per_residue_x);
@@ -4051,6 +4379,45 @@ impl DottirApp {
             }
         }
     }
+}
+
+/// Greyramp over coverage codes: white below `white_bp` matching bases per
+/// pixel, black from `black_bp`, linear in log(bases) between.
+fn coverage_lut(white_bp: f32, black_bp: f32) -> [u8; 256] {
+    let lo = (white_bp.max(1.0) as f64).ln();
+    let hi = (black_bp.max(white_bp.max(1.0) + 1.0) as f64).ln();
+    let mut lut = [255u8; 256];
+    for (code, slot) in lut.iter_mut().enumerate().skip(1) {
+        let b = coverage_bases(code as u8).max(1.0).ln();
+        if b >= lo {
+            let t = ((b - lo) / (hi - lo)).clamp(0.0, 1.0);
+            *slot = (255.0 * (1.0 - t)).round() as u8;
+        }
+    }
+    lut
+}
+
+fn depth_bin_text(axis: &str, start: usize, zoom: usize, b: &DepthBin, capped: u32) -> String {
+    let pct = |c: RepeatClass| b.class_frac[c.index()] as f32 / 2.55;
+    let max = if b.max == u16::MAX {
+        "≥ max-occ".to_string()
+    } else {
+        b.max.to_string()
+    };
+    let mut t = format!(
+        "{axis} {}–{}\ncopies: median {}, max {max}\nunique {:.0}% · low {:.0}% · mid {:.0}% · high {:.0}%",
+        format_thousands(start),
+        format_thousands(start + zoom),
+        b.median,
+        pct(RepeatClass::Unique),
+        pct(RepeatClass::Low),
+        pct(RepeatClass::Mid),
+        pct(RepeatClass::High),
+    );
+    if capped > 0 {
+        t.push_str(&format!("\n{capped} positions with capped seeds"));
+    }
+    t
 }
 
 /// Truncate a record name to fit roughly within `max_px` of
@@ -5194,5 +5561,37 @@ fn save_png(app: &mut DottirApp) {
             Ok(()) => {}
             Err(e) => app.last_error = Some(format!("PNG save failed: {e}")),
         }
+    }
+}
+
+#[cfg(test)]
+mod large_display_tests {
+    use super::*;
+    use dottir_core::large::coverage_code;
+
+    #[test]
+    fn coverage_lut_ramps_in_log_bases() {
+        let lut = coverage_lut(100.0, 10_000.0);
+        assert_eq!(lut[0], 255, "empty pixels stay white");
+        assert_eq!(lut[coverage_code(50.0) as usize], 255);
+        assert_eq!(lut[coverage_code(20_000.0) as usize], 0);
+        // 1 kb is half-way between 100 bp and 10 kb on a log scale.
+        let mid = lut[coverage_code(1000.0) as usize];
+        assert!((120..=135).contains(&mid), "{mid}");
+        assert!(lut[1..].windows(2).all(|w| w[0] >= w[1]), "monotone");
+    }
+
+    #[test]
+    fn depth_bin_tooltip_names_copies_and_cap() {
+        let b = DepthBin {
+            median: 7,
+            max: u16::MAX,
+            class_frac: [0, 51, 153, 51],
+        };
+        let t = depth_bin_text("Query", 12_000, 1000, &b, 3);
+        assert!(t.contains("Query 12,000–13,000"), "{t}");
+        assert!(t.contains("median 7, max ≥ max-occ"), "{t}");
+        assert!(t.contains("mid 60%"), "{t}");
+        assert!(t.contains("3 positions with capped seeds"), "{t}");
     }
 }

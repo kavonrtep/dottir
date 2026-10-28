@@ -86,6 +86,34 @@ In the GUI the side panel shows the four classes with checkboxes, the
 **Colour by class** (black / blue / orange / red) and **Show synteny
 chains** with a minimum-score slider. These are display-only changes.
 
+### Sensitivity
+
+At overview zoom a pixel covers thousands of bases on each axis, so the
+best window score inside it is almost always the maximum and the Dotter
+greyramp has nothing to work with. The GUI therefore shades large-engine
+plots by **matching bp**: the number of diagonal bases with a positive
+window score inside the pixel (Gepard-like density). Two sliders set the
+ramp, in bases per pixel and on a log scale:
+
+* **white below** — less matching sequence than this is hidden; raise it
+  to drop short, old repeat fragments;
+* **black at** — this much or more is drawn black.
+
+**Auto-fit each view** (on by default) sets white at the 2nd and black at
+the 95th percentile of the lit pixels whenever a new view arrives; moving a
+slider turns it off. **Window score** switches back to Dotter shading with
+the usual greyramp, which is the right choice once zoomed in to a few
+bases per pixel.
+
+### Axis tracks
+
+With **Repeat tracks on axes**, a strip along the top (query) and left
+(subject) edge shows, per pixel column/row, the share of low (blue), mid
+(orange) and high-copy (red) bases as a bar growing away from the plot.
+A red mark on the outer edge flags seeds skipped by `--max-occ`. Hovering
+the strip shows the coordinates, median and maximum copy number, class
+percentages and the number of capped positions.
+
 ## Chains
 
 `--chains-out FILE.paf` writes one PAF line per chain: record-local

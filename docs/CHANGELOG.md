@@ -32,6 +32,13 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     once and reused; progress is shown in the status bar and superseded jobs
     are cancelled. Side panel: class toggles and presets, colour by class,
     synteny-chain overlay. Settings are saved in sessions.
+  - GUI sensitivity for large plots: shade by **matching bp per pixel**
+    (new optional coverage channel, `LargeConfig::coverage`) with
+    white/black sliders in bases and per-view auto-fit; Dotter score
+    shading remains selectable.
+  - GUI repeat tracks along both axes: per-column/row class composition
+    (`LargePlot::{q,s}_depth_bins`) and capped-seed marks, with a hover
+    tooltip giving copy numbers.
   - Synthetic benchmark generator:
     `cargo run --release -p dottir-cli --example simulate_genome`.
 * FASTA parsing records soft-masked (lowercase) runs

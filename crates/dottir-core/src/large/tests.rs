@@ -158,8 +158,9 @@ fn random_sequences_stay_nearly_blank() {
 fn viewport_equals_crop_of_full_plot() {
     let (q, s) = planted_pair(20_000, 3000, 15, 11);
     let zoom = 5;
-    let full = large(&q, &s, &large_cfg(zoom, Some(20)));
     let mut cfg = large_cfg(zoom, Some(20));
+    cfg.coverage = true;
+    let full = large(&q, &s, &cfg);
     cfg.viewport = Some(Viewport {
         q: 4000..12_003,
         s: 1500..13_000,
@@ -171,12 +172,19 @@ fn viewport_equals_crop_of_full_plot() {
     for strand in [false, true] {
         let fm = full.merged(Some(strand), ClassMask::ALL);
         let vm = v.merged(Some(strand), ClassMask::ALL);
+        let fc = full.merged_coverage(Some(strand), ClassMask::ALL);
+        let vc = v.merged_coverage(Some(strand), ClassMask::ALL);
         for y in 0..v.height as usize {
             for x in 0..vw {
                 assert_eq!(
                     vm[y * vw + x],
                     fm[(y + y0) * fw + x + x0],
                     "strand {strand} pixel ({x},{y})"
+                );
+                assert_eq!(
+                    vc[y * vw + x],
+                    fc[(y + y0) * fw + x + x0],
+                    "coverage, strand {strand} pixel ({x},{y})"
                 );
             }
         }
@@ -189,6 +197,7 @@ fn deterministic_across_thread_counts() {
     let (q, s) = planted_pair(200_000, 5000, 15, 5);
     let mut cfg = large_cfg(40, None);
     cfg.chain = Some(ChainConfig::default());
+    cfg.coverage = true;
     let run = |threads| {
         rayon::ThreadPoolBuilder::new()
             .num_threads(threads)
@@ -202,6 +211,7 @@ fn deterministic_across_thread_counts() {
     assert_eq!(a.segments, b.segments);
     assert_eq!(a.chains, b.chains);
     assert_eq!(a.q_capped, b.q_capped);
+    assert_eq!(a.coverage, b.coverage);
 }
 
 #[test]
@@ -400,3 +410,71 @@ fn golden_channels_hash() {
 }
 
 const GOLDEN: u64 = 0x7f156c95cbc4c727;
+
+#[test]
+fn coverage_code_round_trips_within_three_percent() {
+    assert_eq!(coverage_code(0.0), 0);
+    assert_eq!(coverage_code(1e12), 255);
+    for b in [1.0, 7.0, 100.0, 1234.0, 40_000.0] {
+        let back = coverage_bases(coverage_code(b));
+        assert!((back - b).abs() / b < 0.03, "{b} -> {back}");
+    }
+}
+
+#[test]
+fn coverage_measures_matching_bases_not_score() {
+    // A 3 kb forward copy at 5 % divergence: at zoom 100 every scored
+    // pixel saturates in score, but coverage adds up to the copy length.
+    let (q, s) = planted_pair(40_000, 3000, 5, 21);
+    let mut cfg = large_cfg(100, Some(20));
+    cfg.coverage = true;
+    cfg.strand = Strand::Forward;
+    let l = large(&q, &s, &cfg);
+    let w = l.width as usize;
+    // Query copy at 10_000.., subject copy at 5_000..; pixel box with a
+    // one-pixel margin.
+    let mut total = 0.0;
+    for (i, &c) in l.coverage[RepeatClass::Unique.index()].iter().enumerate() {
+        let (x, y) = (i % w, i / w);
+        if (99..131).contains(&x) && (49..81).contains(&y) {
+            total += coverage_bases(c);
+        }
+    }
+    assert!((2700.0..3600.0).contains(&total), "covered {total} bases");
+    // Without coverage the plot carries none, and Shade::Coverage falls
+    // back to scores.
+    let plain = large(&q, &s, &large_cfg(100, Some(20)));
+    assert!(!plain.has_coverage());
+    assert_eq!(
+        plain
+            .to_dot_plot(ClassMask::ALL, false, Shade::Coverage)
+            .pixels,
+        plain.merged(None, ClassMask::ALL)
+    );
+}
+
+#[test]
+fn depth_bins_follow_the_depth_track() {
+    // Five exact copies of a 2 kb unit in 50 kb of random sequence.
+    let unit = lcg_dna(2000, 3);
+    let mut q = lcg_dna(50_000, 4);
+    for k in 0..5 {
+        let at = 5000 + k * 9000;
+        q.splice(at..at + 2000, unit.iter().copied());
+    }
+    let mut cfg = large_cfg(1000, None);
+    cfg.self_comparison = true;
+    cfg.depth = DepthMethod::Kmer { k: 15 };
+    let l = compute_large_dotplot(&LargeInput::self_comparison(&q, &[]), &cfg).unwrap();
+    assert_eq!(l.q_depth_bins.len(), l.width as usize);
+    assert_eq!(l.q_depth_bins, l.s_depth_bins);
+    let mid = RepeatClass::Mid.index();
+    // Bin 5 lies inside the first copy, bin 2 in unique sequence.
+    assert_eq!(l.q_depth_bins[5].median, 5);
+    assert_eq!(l.q_depth_bins[5].class_frac[mid], 255);
+    assert_eq!(l.q_depth_bins[2].median, 1);
+    assert_eq!(
+        l.q_depth_bins[2].class_frac[RepeatClass::Unique.index()],
+        255
+    );
+}

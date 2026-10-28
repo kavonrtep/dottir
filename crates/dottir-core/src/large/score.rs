@@ -7,6 +7,8 @@
 //! rule and scaling, so every pixel written here is `<=` the exact engine's
 //! pixel and equal to the exact value of each scored cell.
 
+use std::sync::atomic::{AtomicU32, Ordering};
+
 use super::depth::{ClassThresholds, RepeatClass};
 use super::hits::Run;
 use crate::antidiag::keep_dot;
@@ -61,6 +63,49 @@ pub(crate) struct Canvas<'a> {
     /// `views[class]` for the strand being scored.
     pub fwd: &'a [PixelView<'a>],
     pub rev: &'a [PixelView<'a>],
+    /// Coverage counters `[strand * COUNT + class][pixel]`, when requested.
+    pub coverage: Option<&'a [Vec<AtomicU32>]>,
+}
+
+/// Batches coverage increments: consecutive cells of a diagonal usually
+/// land in the same pixel, so the atomic add happens once per pixel
+/// crossing rather than once per cell.
+struct CovAcc<'a> {
+    buf: Option<&'a [Vec<AtomicU32>]>,
+    channel: usize,
+    pixel: usize,
+    n: u32,
+}
+
+impl<'a> CovAcc<'a> {
+    fn new(buf: Option<&'a [Vec<AtomicU32>]>) -> Self {
+        Self {
+            buf,
+            channel: 0,
+            pixel: 0,
+            n: 0,
+        }
+    }
+
+    #[inline]
+    fn add(&mut self, channel: usize, pixel: usize) {
+        if self.buf.is_none() {
+            return;
+        }
+        if self.n > 0 && (channel, pixel) == (self.channel, self.pixel) {
+            self.n += 1;
+            return;
+        }
+        self.flush();
+        (self.channel, self.pixel, self.n) = (channel, pixel, 1);
+    }
+
+    fn flush(&mut self) {
+        if let (Some(buf), true) = (self.buf, self.n > 0) {
+            buf[self.channel][self.pixel].fetch_add(self.n, Ordering::Relaxed);
+            self.n = 0;
+        }
+    }
 }
 
 pub(crate) struct ScoreCtx<'a> {
@@ -141,14 +186,16 @@ fn score_forward(
 
     let mut sum: i32 = (0..w).map(|k| t.fwd(s[at(lo) - k], q[lo - k])).sum();
     let mut cells = 0u64;
+    let mut cov = CovAcc::new(canvas.coverage);
     let mut qi = lo;
     loop {
         let si = at(qi);
         if sum > 0 {
-            emit(ctx, canvas, sum, qi, si, false);
+            emit(ctx, canvas, &mut cov, sum, qi, si, false);
         }
         cells += 1;
         if qi == hi {
+            cov.flush();
             break;
         }
         qi += 1;
@@ -198,14 +245,16 @@ fn score_reverse(
 
     let mut sum: i32 = (0..w).map(|k| t.rev(s[at(lo) + k], q[lo - k])).sum();
     let mut cells = 0u64;
+    let mut cov = CovAcc::new(canvas.coverage);
     let mut qi = lo;
     loop {
         let si = at(qi);
         if sum > 0 {
-            emit(ctx, canvas, sum, qi, si, true);
+            emit(ctx, canvas, &mut cov, sum, qi, si, true);
         }
         cells += 1;
         if qi == hi {
+            cov.flush();
             break;
         }
         qi += 1;
@@ -216,9 +265,19 @@ fn score_reverse(
 }
 
 /// Mirror of `sliding::emit_pixel`, offset by the canvas origin and routed
-/// to the class channel of the cell.
+/// to the class channel of the cell. Coverage counts every positive cell
+/// of the pixel, including those the anti-diagonal rule drops from the
+/// score channels: it measures similarity, not line drawing.
 #[inline]
-fn emit(ctx: &ScoreCtx<'_>, canvas: &Canvas<'_>, score: i32, qi: usize, si: usize, reverse: bool) {
+fn emit(
+    ctx: &ScoreCtx<'_>,
+    canvas: &Canvas<'_>,
+    cov: &mut CovAcc<'_>,
+    score: i32,
+    qi: usize,
+    si: usize,
+    reverse: bool,
+) {
     let win2 = ctx.window / 2;
     let zoom = canvas.zoom;
     let qc = qi - win2;
@@ -233,15 +292,19 @@ fn emit(ctx: &ScoreCtx<'_>, canvas: &Canvas<'_>, score: i32, qi: usize, si: usiz
     if x >= canvas.width || y >= canvas.height {
         return;
     }
+    let class: RepeatClass = ctx
+        .thresholds
+        .classify(ctx.q_depth[qc].max(ctx.s_depth[sc]));
+    cov.add(
+        reverse as usize * RepeatClass::COUNT + class.index(),
+        y * canvas.width + x,
+    );
     let q_local = (qc - x_abs * zoom) as u32;
     let s_local = (sc - y_abs * zoom) as u32;
     if !keep_dot(zoom as u32, q_local, s_local, reverse) {
         return;
     }
     let scaled = (score as i64 * ctx.pixel_fac as i64 / ctx.window as i64).clamp(0, 255) as u8;
-    let class: RepeatClass = ctx
-        .thresholds
-        .classify(ctx.q_depth[qc].max(ctx.s_depth[sc]));
     let views = if reverse { canvas.rev } else { canvas.fwd };
     views[class.index()].max_merge(x, y, scaled);
 }

@@ -18,7 +18,9 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use std::sync::{mpsc, Arc};
 use std::thread;
 
-use dottir_core::large::{ClassMask, Control, LargeConfig, LargeInput, LargePlot, LargeSession};
+use dottir_core::large::{
+    ClassMask, Control, LargeConfig, LargeInput, LargePlot, LargeSession, Shade,
+};
 use dottir_core::{compute_dotplot, DotPlot, DottirError, PlotConfig};
 
 /// Inputs of the large engine, shared with the worker without copying
@@ -41,6 +43,7 @@ pub struct LargeJob {
     pub config: LargeConfig,
     pub classes: ClassMask,
     pub separate_strands: bool,
+    pub shade: Shade,
 }
 
 /// A single computation job.
@@ -252,7 +255,7 @@ fn run_large(
     };
     match s.compute(&job.config, &ctl) {
         Ok(lp) => {
-            let plot = lp.to_dot_plot(job.classes, job.separate_strands);
+            let plot = lp.to_dot_plot(job.classes, job.separate_strands, job.shade);
             (Ok(plot), Some(lp))
         }
         Err(e) => (Err(e), None),
@@ -377,6 +380,7 @@ mod tests {
                     config: config.clone(),
                     classes: ClassMask::ALL,
                     separate_strands: false,
+                    shade: Shade::Score,
                 }),
             });
             let mut got = None;
