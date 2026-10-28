@@ -1792,6 +1792,23 @@ impl DottirApp {
         }
     }
 
+    /// Axis span of an image export: the first residue shown on each axis
+    /// and the residues covered (the zoomed-in slice, or everything).
+    fn export_axes(&self) -> ((u32, u32), u32, u32) {
+        let (qlen, slen) = (
+            self.query.as_ref().map_or(0, |q| q.len()),
+            self.subject.as_ref().map_or(0, |s| s.len()),
+        );
+        match &self.current_slice {
+            Some(sl) => (
+                (sl.q_range.start as u32, sl.s_range.start as u32),
+                sl.q_range.end.min(qlen).saturating_sub(sl.q_range.start) as u32,
+                sl.s_range.end.min(slen).saturating_sub(sl.s_range.start) as u32,
+            ),
+            None => ((0, 0), qlen as u32, slen as u32),
+        }
+    }
+
     /// Synteny chains as shown (toggle, min score, mirror), as SVG lines
     /// in the current slice's pixelmap pixels.
     fn shown_chain_lines(&self) -> Vec<dottir_io::svg_export::SvgLine> {
@@ -6758,42 +6775,25 @@ fn save_svg(app: &mut DottirApp) {
             .unwrap_or_default();
         let meta: Vec<(&str, &str)> = metadata.iter().map(|(k, v)| (*k, v.as_str())).collect();
         let (w, h) = (plot.width, plot.height);
-        let qlen = app.query.as_ref().map_or(w, |q| q.len() as u32);
-        let slen = app.subject.as_ref().map_or(h, |s| s.len() as u32);
-        let written = match &pixels {
-            ExportPixels::Grey(g) if chain_lines.is_empty() => dottir_io::svg_export::write_svg(
-                &path, w, h, qlen, slen, g, 50, &recs_x, &recs_y, &meta, false,
-            ),
-            ExportPixels::Grey(g) => {
-                let rgb: Vec<u8> = g.iter().flat_map(|&v| [v, v, v]).collect();
-                dottir_io::svg_export::write_rgb_svg_with_lines(
-                    &path,
-                    w,
-                    h,
-                    qlen,
-                    slen,
-                    &rgb,
-                    50,
-                    &recs_x,
-                    &recs_y,
-                    &meta,
-                    &chain_lines,
-                )
-            }
-            ExportPixels::Rgb(c) => dottir_io::svg_export::write_rgb_svg_with_lines(
-                &path,
-                w,
-                h,
-                qlen,
-                slen,
-                c,
-                50,
-                &recs_x,
-                &recs_y,
-                &meta,
-                &chain_lines,
-            ),
+        let (origin, qlen, slen) = app.export_axes();
+        let rgb = match pixels {
+            ExportPixels::Grey(g) => g.iter().flat_map(|&v| [v, v, v]).collect(),
+            ExportPixels::Rgb(c) => c,
         };
+        let written = dottir_io::svg_export::write_rgb_svg_with_lines(
+            &path,
+            w,
+            h,
+            origin,
+            qlen,
+            slen,
+            &rgb,
+            50,
+            &recs_x,
+            &recs_y,
+            &meta,
+            &chain_lines,
+        );
         match written {
             Ok(()) => {}
             Err(e) => app.last_error = Some(format!("SVG save failed: {e}")),
@@ -7065,38 +7065,34 @@ fn save_raster(app: &mut DottirApp, pdf: bool) {
         } else {
             50
         };
-        let qlen = app
-            .query
-            .as_ref()
-            .map(|q| q.len() as u32)
-            .unwrap_or(plot.width);
-        let slen = app
-            .subject
-            .as_ref()
-            .map(|s| s.len() as u32)
-            .unwrap_or(plot.height);
+        let (origin, qlen, slen) = app.export_axes();
         let meta: Vec<(&str, &str)> = metadata.iter().map(|(k, v)| (*k, v.as_str())).collect();
         let (w, h) = (plot.width, plot.height);
         use dottir_io::pdf_export::{write_pdf, PdfPixels};
-        use dottir_io::text_overlay::{compose_image_with_axes, compose_rgb_image_with_axes};
-        let written = match (&pixels, pdf) {
-            (ExportPixels::Grey(g), false) => dottir_io::png_export::write_grayscale_png_with_axes(
-                &path, w, h, qlen, slen, g, margin, &recs_x, &recs_y, &meta, false,
-            )
-            .map_err(|e| e.to_string()),
-            (ExportPixels::Rgb(c), false) => dottir_io::png_export::write_rgb_png_with_axes(
-                &path, w, h, qlen, slen, c, margin, &recs_x, &recs_y, &meta,
-            )
-            .map_err(|e| e.to_string()),
-            (ExportPixels::Grey(g), true) => {
-                let (img, tw, th) =
-                    compose_image_with_axes(g, w, h, qlen, slen, margin, &recs_x, &recs_y);
-                write_pdf(&path, tw, th, PdfPixels::Grey(&img), &meta).map_err(|e| e.to_string())
+        use dottir_io::text_overlay::{compose_image_with_axes_at, compose_rgb_image_with_axes_at};
+        let written = match &pixels {
+            ExportPixels::Grey(g) => {
+                let (img, tw, th) = compose_image_with_axes_at(
+                    g, w, h, origin, qlen, slen, margin, &recs_x, &recs_y,
+                );
+                if pdf {
+                    write_pdf(&path, tw, th, PdfPixels::Grey(&img), &meta)
+                        .map_err(|e| e.to_string())
+                } else {
+                    dottir_io::png_export::write_grayscale_png(&path, tw, th, &img, &meta)
+                        .map_err(|e| e.to_string())
+                }
             }
-            (ExportPixels::Rgb(c), true) => {
-                let (img, tw, th) =
-                    compose_rgb_image_with_axes(c, w, h, qlen, slen, margin, &recs_x, &recs_y);
-                write_pdf(&path, tw, th, PdfPixels::Rgb(&img), &meta).map_err(|e| e.to_string())
+            ExportPixels::Rgb(c) => {
+                let (img, tw, th) = compose_rgb_image_with_axes_at(
+                    c, w, h, origin, qlen, slen, margin, &recs_x, &recs_y,
+                );
+                if pdf {
+                    write_pdf(&path, tw, th, PdfPixels::Rgb(&img), &meta).map_err(|e| e.to_string())
+                } else {
+                    dottir_io::png_export::write_rgb_png(&path, tw, th, &img, &meta)
+                        .map_err(|e| e.to_string())
+                }
             }
         };
         if let Err(e) = written {

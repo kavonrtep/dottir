@@ -703,6 +703,7 @@ fn run_batch(args: BatchArgs) -> Result<()> {
                 svg_path,
                 render_w,
                 render_h,
+                (0, 0),
                 query.len() as u32,
                 subject.len() as u32,
                 rgb,

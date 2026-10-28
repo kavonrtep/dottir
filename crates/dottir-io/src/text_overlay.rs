@@ -276,6 +276,26 @@ impl AxisRecord {
     }
 }
 
+/// Records as seen from an axis starting at `origin` and `len` long:
+/// clipped to it and shifted to start at 0.
+pub fn records_from(records: &[AxisRecord], origin: u32, len: u32) -> Vec<AxisRecord> {
+    let end = origin.saturating_add(len);
+    records
+        .iter()
+        .filter(|r| r.end > origin && r.start < end)
+        .map(|r| AxisRecord {
+            name: r.name.clone(),
+            start: r.start.max(origin) - origin,
+            end: r.end.min(end) - origin,
+        })
+        .collect()
+}
+
+/// The first multiple of `step` at or after `origin`.
+fn first_tick(origin: u64, step: u64) -> u64 {
+    origin.div_ceil(step.max(1)) * step.max(1)
+}
+
 /// As [`compose_image_with_axes`] for RGB pixels (`plot_w × plot_h × 3`
 /// bytes); returns an RGB canvas. Axes and labels are the greyscale ones;
 /// anything they draw inside the plot area stays on top of the pixels.
@@ -290,11 +310,40 @@ pub fn compose_rgb_image_with_axes(
     axis_records_x: &[AxisRecord],
     axis_records_y: &[AxisRecord],
 ) -> (Vec<u8>, u32, u32) {
+    compose_rgb_image_with_axes_at(
+        rgb,
+        plot_w,
+        plot_h,
+        (0, 0),
+        coord_w,
+        coord_h,
+        margin,
+        axis_records_x,
+        axis_records_y,
+    )
+}
+
+/// As [`compose_rgb_image_with_axes`] for a plot of residues
+/// `origin.0..origin.0 + coord_w` × `origin.1..origin.1 + coord_h` (a
+/// zoomed-in slice); `axis_records_*` are in whole-sequence coordinates.
+#[allow(clippy::too_many_arguments)]
+pub fn compose_rgb_image_with_axes_at(
+    rgb: &[u8],
+    plot_w: u32,
+    plot_h: u32,
+    origin: (u32, u32),
+    coord_w: u32,
+    coord_h: u32,
+    margin: u32,
+    axis_records_x: &[AxisRecord],
+    axis_records_y: &[AxisRecord],
+) -> (Vec<u8>, u32, u32) {
     let white = vec![255_u8; plot_w as usize * plot_h as usize];
-    let (grey, total_w, total_h) = compose_image_with_axes(
+    let (grey, total_w, total_h) = compose_image_with_axes_at(
         &white,
         plot_w,
         plot_h,
+        origin,
         coord_w,
         coord_h,
         margin,
@@ -342,6 +391,36 @@ pub fn compose_image_with_axes(
     axis_records_x: &[AxisRecord],
     axis_records_y: &[AxisRecord],
 ) -> (Vec<u8>, u32, u32) {
+    compose_image_with_axes_at(
+        pixels,
+        plot_w,
+        plot_h,
+        (0, 0),
+        coord_w,
+        coord_h,
+        margin,
+        axis_records_x,
+        axis_records_y,
+    )
+}
+
+/// As [`compose_image_with_axes`] for a plot starting at residue
+/// `origin` on each axis (see [`compose_rgb_image_with_axes_at`]).
+#[allow(clippy::too_many_arguments)]
+pub fn compose_image_with_axes_at(
+    pixels: &[u8],
+    plot_w: u32,
+    plot_h: u32,
+    origin: (u32, u32),
+    coord_w: u32,
+    coord_h: u32,
+    margin: u32,
+    axis_records_x: &[AxisRecord],
+    axis_records_y: &[AxisRecord],
+) -> (Vec<u8>, u32, u32) {
+    let axis_records_x = &records_from(axis_records_x, origin.0, coord_w);
+    let axis_records_y = &records_from(axis_records_y, origin.1, coord_h);
+    let (ox, oy) = (u64::from(origin.0), u64::from(origin.1));
     let total_w = plot_w + 2 * margin;
     let total_h = plot_h + 2 * margin;
     let mut canvas = vec![255_u8; (total_w as usize) * (total_h as usize)];
@@ -388,9 +467,9 @@ pub fn compose_image_with_axes(
     // paint on top.
     let minor_step_x = step_x / 5;
     if minor_step_x >= 1 {
-        let mut t = 0_u64;
-        while t <= coord_w_safe as u64 {
-            let x = m + (t as f64 * px_per_coord_x).round() as usize;
+        let mut t = first_tick(ox, minor_step_x);
+        while t <= ox + coord_w_safe as u64 {
+            let x = m + ((t - ox) as f64 * px_per_coord_x).round() as usize;
             if x >= stride_out {
                 break;
             }
@@ -405,9 +484,9 @@ pub fn compose_image_with_axes(
             t = t.saturating_add(minor_step_x);
         }
     }
-    let mut t = 0_u64;
-    while t <= coord_w_safe as u64 {
-        let x = m + (t as f64 * px_per_coord_x).round() as usize;
+    let mut t = first_tick(ox, step_x);
+    while t <= ox + coord_w_safe as u64 {
+        let x = m + ((t - ox) as f64 * px_per_coord_x).round() as usize;
         if x >= stride_out {
             break;
         }
@@ -438,9 +517,9 @@ pub fn compose_image_with_axes(
     let step_y = nice_tick_step(coord_h_safe as u64, min_coord_step_y);
     let minor_step_y = step_y / 5;
     if minor_step_y >= 1 {
-        let mut t = 0_u64;
-        while t <= coord_h_safe as u64 {
-            let y = m + (t as f64 * px_per_coord_y).round() as usize;
+        let mut t = first_tick(oy, minor_step_y);
+        while t <= oy + coord_h_safe as u64 {
+            let y = m + ((t - oy) as f64 * px_per_coord_y).round() as usize;
             if y >= total_h as usize {
                 break;
             }
@@ -455,9 +534,9 @@ pub fn compose_image_with_axes(
             t = t.saturating_add(minor_step_y);
         }
     }
-    let mut t = 0_u64;
-    while t <= coord_h_safe as u64 {
-        let y = m + (t as f64 * px_per_coord_y).round() as usize;
+    let mut t = first_tick(oy, step_y);
+    while t <= oy + coord_h_safe as u64 {
+        let y = m + ((t - oy) as f64 * px_per_coord_y).round() as usize;
         if y >= total_h as usize {
             break;
         }

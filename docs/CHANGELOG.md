@@ -135,6 +135,10 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+* GUI image exports after zooming in (rectangle zoom, wheel past the
+  slice) labelled the slice's image as if it started at residue 0 and
+  spanned the whole sequence; axes and record names now show the slice
+  (`compose_*_with_axes_at`, `write_rgb_svg_with_lines` take an origin).
 * SVG exports at zoom > 1 labelled the axes in pixelmap pixels and dropped
   the names of records beyond the pixel width; ticks and names are now in
   residues (`write_svg` / `write_rgb_svg` take the coordinate size, like the

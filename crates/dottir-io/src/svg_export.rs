@@ -74,6 +74,7 @@ pub fn write_svg<P: AsRef<Path>>(
         path.as_ref(),
         width,
         height,
+        (0, 0),
         coord_w,
         coord_h,
         &png_buf,
@@ -113,6 +114,7 @@ pub fn write_rgb_svg<P: AsRef<Path>>(
         path,
         width,
         height,
+        (0, 0),
         coord_w,
         coord_h,
         rgb,
@@ -125,12 +127,15 @@ pub fn write_rgb_svg<P: AsRef<Path>>(
 }
 
 /// As [`write_rgb_svg`], with `lines` drawn as vectors over the image
-/// (e.g. synteny chains).
+/// (e.g. synteny chains), for a plot starting at residue `origin` on each
+/// axis (a zoomed-in slice; `axis_records_*` stay in whole-sequence
+/// coordinates).
 #[allow(clippy::too_many_arguments)]
 pub fn write_rgb_svg_with_lines<P: AsRef<Path>>(
     path: P,
     width: u32,
     height: u32,
+    origin: (u32, u32),
     coord_w: u32,
     coord_h: u32,
     rgb: &[u8],
@@ -152,6 +157,7 @@ pub fn write_rgb_svg_with_lines<P: AsRef<Path>>(
         path.as_ref(),
         width,
         height,
+        origin,
         coord_w,
         coord_h,
         &png_buf,
@@ -187,6 +193,7 @@ fn write_svg_document(
     path: &Path,
     width: u32,
     height: u32,
+    origin: (u32, u32),
     coord_w: u32,
     coord_h: u32,
     png_buf: &[u8],
@@ -197,6 +204,11 @@ fn write_svg_document(
     lines: &[SvgLine],
 ) -> Result<(), SvgError> {
     let png_b64 = base64::engine::general_purpose::STANDARD.encode(png_buf);
+    let axis_records_x = &crate::text_overlay::records_from(axis_records_x, origin.0, coord_w);
+    let axis_records_y = &crate::text_overlay::records_from(axis_records_y, origin.1, coord_h);
+    let (ox, oy) = (u64::from(origin.0), u64::from(origin.1));
+    // First multiple of `step` at or after `o`.
+    let first = |o: u64, step: u64| o.div_ceil(step.max(1)) * step.max(1);
 
     let total_w = width + 2 * margin;
     let total_h = height + 2 * margin;
@@ -276,9 +288,9 @@ fn write_svg_document(
     let step_x = nice_step(coord_w as u64);
     let minor_step_x = step_x / 5;
     if minor_step_x >= 1 {
-        let mut t = 0u64;
-        while t <= coord_w as u64 {
-            let x = margin as f64 + t as f64 * fx;
+        let mut t = first(ox, minor_step_x);
+        while t <= ox + coord_w as u64 {
+            let x = margin as f64 + (t - ox) as f64 * fx;
             writeln!(
                 w,
                 "  <line x1=\"{x:.2}\" y1=\"{}\" x2=\"{x:.2}\" y2=\"{}\" stroke=\"#444\" stroke-width=\"1\"/>",
@@ -288,9 +300,9 @@ fn write_svg_document(
             t += minor_step_x;
         }
     }
-    let mut t = 0u64;
-    while t <= coord_w as u64 {
-        let x = margin as f64 + t as f64 * fx;
+    let mut t = first(ox, step_x);
+    while t <= ox + coord_w as u64 {
+        let x = margin as f64 + (t - ox) as f64 * fx;
         writeln!(
             w,
             "  <line x1=\"{x:.2}\" y1=\"{}\" x2=\"{x:.2}\" y2=\"{}\" stroke=\"#444\" stroke-width=\"1\"/>",
@@ -310,9 +322,9 @@ fn write_svg_document(
     let step_y = nice_step(coord_h as u64);
     let minor_step_y = step_y / 5;
     if minor_step_y >= 1 {
-        let mut t = 0u64;
-        while t <= coord_h as u64 {
-            let y = margin as f64 + t as f64 * fy;
+        let mut t = first(oy, minor_step_y);
+        while t <= oy + coord_h as u64 {
+            let y = margin as f64 + (t - oy) as f64 * fy;
             writeln!(
                 w,
                 "  <line x1=\"{}\" y1=\"{y:.2}\" x2=\"{}\" y2=\"{y:.2}\" stroke=\"#444\" stroke-width=\"1\"/>",
@@ -322,9 +334,9 @@ fn write_svg_document(
             t += minor_step_y;
         }
     }
-    let mut t = 0u64;
-    while t <= coord_h as u64 {
-        let y = margin as f64 + t as f64 * fy;
+    let mut t = first(oy, step_y);
+    while t <= oy + coord_h as u64 {
+        let y = margin as f64 + (t - oy) as f64 * fy;
         writeln!(
             w,
             "  <line x1=\"{}\" y1=\"{y:.2}\" x2=\"{}\" y2=\"{y:.2}\" stroke=\"#444\" stroke-width=\"1\"/>",
@@ -519,6 +531,45 @@ mod tests {
         assert!(s.contains(">second</text>"));
         // Tick 400 sits at pixel 40 (+ margin).
         assert!(s.contains(r#"<text x="80.00""#));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn a_zoomed_slice_is_labelled_from_its_start() {
+        let path =
+            std::env::temp_dir().join(format!("dottir_svg_slice_{}.svg", std::process::id()));
+        let recs = [
+            crate::text_overlay::AxisRecord::new("a", 0, 5000),
+            crate::text_overlay::AxisRecord::new("b", 5000, 9000),
+        ];
+        // Residues 4500..5500 on x at zoom 10.
+        write_rgb_svg_with_lines(
+            &path,
+            100,
+            100,
+            (4500, 0),
+            1000,
+            1000,
+            &[255; 30_000],
+            40,
+            &recs,
+            &[],
+            &[],
+            &[],
+        )
+        .unwrap();
+        let s = std::fs::read_to_string(&path).unwrap();
+        let labels: Vec<&str> = s
+            .split("</text>")
+            .filter_map(|t| t.rsplit('>').next())
+            .collect();
+        // First x tick at 4600, 10 px into the plot; b's name is shown.
+        assert!(
+            s.contains(r#"<text x="50.00" y="30" text-anchor="middle""#),
+            "{s}"
+        );
+        assert!(labels.contains(&"4.6k"), "{labels:?}");
+        assert!(labels.contains(&"b"));
         std::fs::remove_file(&path).ok();
     }
 
