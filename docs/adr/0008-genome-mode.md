@@ -68,12 +68,24 @@ down, where large mode takes over.
      argument list. Reopening a comparison does not re-align.
    * The default preset is `asm20` (diverged genomes allowed);
      `--preset asm5|asm10|asm20` and `--aligner-args` pass through.
+   * Self-comparison runs with `-D --dual=no`: `-D` drops the trivial
+     diagonal so repeat copies become primary alignments, `--dual=no`
+     aligns each record pair once, and off-diagonal records are mirrored
+     across the diagonal when drawn; the diagonal itself is drawn
+     synthetically. On the 10 Mb synthetic genome (750 planted copies)
+     plain `asm20` returns only the 4 diagonal records; `-D --dual=no`
+     returns 797, including inverted repeats crossing the diagonal.
+     `--self-all-copies` adds `-P` (all chains, copy against copy:
+     31 k records there) for repeat-family structure.
 
 4. **Display follows D-GENIES, rendered deterministically.**
    * Each alignment is a line from (q_start, t_start) to (q_end, t_end),
      reversed for `-` strand, coloured by identity bin. Identity is
      `1 − de:f` when the record has it (aligner run with `-c`), else
      matches / block length (column 10 / column 11).
+   * Identity bins are those of D-GENIES: < 25, 25–50, 50–75, > 75 %,
+     on matches / block length unless `de:f` is present. `-c` is not
+     passed by default.
    * At overview zoom alignments are rasterised into per-pixel channels
      (max identity, aligned bp per strand); lines are drawn as vectors
      once the visible count falls below a limit. Rasterisation is
@@ -101,7 +113,13 @@ down, where large mode takes over.
    `mode = genome`, the aligner name, version and arguments (or the PAF
    path and its SHA-256), chunk size, filters and sort state.
 
-8. **Packaging.** The conda recipe lists `mm2plus  # [linux and x86_64]`
+8. **Engine selection.** `--engine auto` selects genome mode by size:
+   when query × subject reaches `--genome-threshold-cells` (10¹⁷, about
+   316 Mb × 316 Mb) and an aligner is found. Without an aligner it stays
+   on the large engine and logs why. The threshold is tuned on the G0
+   corpora.
+
+9. **Packaging.** The conda recipe lists `mm2plus  # [linux and x86_64]`
    and `minimap2  # [not win]` as run requirements. Windows builds ship
    without an aligner; `--paf` and a user-supplied aligner path work
    there.
@@ -113,8 +131,11 @@ down, where large mode takes over.
   (reader, plain and gzip), `dottir-io::faidx` (index builder and region
   reader), and a process runner for the aligner outside `dottir-core`.
 * Large-mode drill-down from genome mode runs on regions, so its repeat
-  classes are estimated within the visible regions, not genome-wide. This
-  is documented; a genome-wide depth track is a later option.
+  classes are estimated within the visible regions, not genome-wide. A
+  genome-wide seed-depth track computed during the genome run is adopted
+  only if it adds at most 25 % to the genome-mode wall time and fits the
+  memory limit on the G0 corpora; otherwise it is skipped and classes
+  stay region-local (documented).
 * Genome mode is repeat-blind by construction (aligner seed filtering and
   chain selection). The book states this and points to large mode.
 * minimap2 cannot index a single sequence ≥ 2³¹ bases; such records are

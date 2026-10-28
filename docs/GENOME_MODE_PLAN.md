@@ -105,8 +105,8 @@ on the test corpora, region reads across line wraps.
   length. Deterministic tie-breaks by record name.
 * Rasterisation: anti-diagonal lines for `-` strand; per pixel the max
   identity and aligned bp per strand, max-merge / sums only, so output
-  is independent of PAF order. Identity bins configurable; default as
-  D-GENIES (25 / 50 / 75 %) — see open decision 1.
+  is independent of PAF order. Identity bins as D-GENIES (< 25, 25–50,
+  50–75, > 75 %), configurable.
 * CLI: `dottir batch REF.fa QUERY.fa --engine genome --paf aln.paf
   -o plot.png [--min-aln-len] [--min-identity] [--primary-only]
   [--noise-filter] [--sort-query]`; sidecar `mode = genome`, PAF SHA-256,
@@ -127,9 +127,16 @@ on the test corpora, region reads across line wraps.
   total threads ≤ `--threads`. Coordinates are shifted back; records that
   end within a tolerance of a cut are joined with their co-linear partner
   on the other side.
-* Self-comparison: the trivial diagonal is drawn synthetically and
-  identical self hits are skipped; exact minimap2 flags settled here (see
-  open decision 2).
+* Self-comparison: `-D --dual=no`, off-diagonal records mirrored at draw
+  time, diagonal drawn synthetically; `--self-all-copies` adds `-P`.
+  Records with `q_rec == t_rec` and identical coordinates are kept: on
+  the `-` strand they are inverted repeats crossing the diagonal.
+* `--engine auto`: genome mode when query × subject ≥
+  `--genome-threshold-cells` (10¹⁷) and an aligner is found; otherwise
+  large engine with a log line saying why.
+* Genome-wide depth (decision 4): time the seed-depth pass on both
+  inputs alongside the aligner run on the G0 corpora; enable it only if
+  it adds ≤ 25 % wall time and fits the memory limit.
 * Cache: `$XDG_CACHE_HOME/dottir/genome/<sha256>.paf.gz`, key = SHA-256 of
   both inputs + aligner version + full argv; `--no-cache` and
   `--paf-out FILE` to keep a copy.
@@ -192,15 +199,22 @@ gated on `minimap2` being on PATH.
 | Unindexed gzip inputs | Decompress once into the cache, then faidx |
 | PAF from other aligners with missing tags | Identity falls back to columns 10 / 11; tags are optional |
 
-## Open decisions (resolve during implementation)
+## Decisions
 
-1. Default identity bins: D-GENIES' 25 / 50 / 75 % on matches / block
-   length, or bins on `de:f` (requires `-c`, slower)? Measure the `-c`
-   cost on the G0 corpora first.
-2. Self-comparison flags (`-X`, `-P`, `--dual`) so inter-chromosomal
-   duplications are kept and the diagonal is not duplicated.
-3. Whether `--engine auto` ever selects genome mode (e.g. above
-   10¹⁷ cells or more than N records, and only with an aligner present),
-   or genome mode stays explicit.
-4. Whether to precompute a genome-wide depth track during the genome run
-   so drill-down classes are genome-wide.
+1. Identity bins: D-GENIES settings (< 25, 25–50, 50–75, > 75 % on
+   matches / block length; `de:f` used when present; no `-c` by default).
+2. Self-comparison: `-D --dual=no` plus mirroring; `-P` opt-in. Measured
+   on the 10 Mb synthetic genome with `asm20`:
+
+   | Flags | Records | Aligned | Time |
+   |-------|---------|---------|------|
+   | none | 4 (diagonal only) | 10 Mb | 1.7 s |
+   | `-D` | 756 | 9.8 Mb | 1.1 s |
+   | `-D --dual=no` | 797 | 8.9 Mb, mirrored at draw | 1.1 s |
+   | `-D -P --dual=no` | 31,123 | 72 Mb | 1.1 s |
+   | `-X` (= `-DP --dual=no --no-long-join`) | 31,760 | 62 Mb | 0.7 s |
+
+3. `--engine auto` selects genome mode by size (≥ 10¹⁷ cells, aligner
+   present); threshold tuned in G0.
+4. Genome-wide depth track only if ≤ 25 % extra wall time and within the
+   memory limit; otherwise skipped (region-local classes).
