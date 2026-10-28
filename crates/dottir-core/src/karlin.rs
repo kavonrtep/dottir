@@ -47,8 +47,11 @@ const NOMINAL_MATRIX_DIM: u32 = 100;
 /// Tunables for the window-size estimate.
 #[derive(Debug, Clone, Copy)]
 pub struct KarlinConfig {
-    /// Lower clamp on the resulting window size (default 3). Spec §4.1.1.
+    /// Smallest accepted window size (default 3). Spec §4.1.1.
     pub min_window: u32,
+    /// Window used when the estimate is below `min_window` (default 10,
+    /// as C dotter, `dotplot.c:1126`; ADR 0010).
+    pub small_fallback: u32,
     /// Upper clamp on the resulting window size (default 50). Spec §4.1.1.
     pub max_window: u32,
     /// Nominal MSP matrix side (default 100). The expected MSP score is
@@ -60,8 +63,22 @@ impl Default for KarlinConfig {
     fn default() -> Self {
         Self {
             min_window: 3,
+            small_fallback: 10,
             max_window: 50,
             nominal_matrix_dim: NOMINAL_MATRIX_DIM,
+        }
+    }
+}
+
+impl KarlinConfig {
+    /// The window for an estimated MSP length: the estimate itself within
+    /// `[min_window, max_window]`, `small_fallback` below it, `max_window`
+    /// above.
+    pub fn window_for(&self, predicted: u32) -> u32 {
+        if predicted < self.min_window {
+            self.small_fallback
+        } else {
+            predicted.min(self.max_window)
         }
     }
 }
@@ -159,8 +176,8 @@ pub fn karlin_window_size_with(
         )));
     }
 
-    let (fq_q, _qlen) = residue_frequencies(query, mode, abetsize)?;
-    let (fq_s, _slen) = residue_frequencies(subject, mode, abetsize)?;
+    let (fq_q, _qlen) = residue_frequencies(query, mode, abetsize, false)?;
+    let (fq_s, _slen) = residue_frequencies(subject, mode, abetsize, true)?;
 
     // Lowest / highest score across the abetsize-by-abetsize submatrix.
     let mut lows: i64 = 0;
@@ -210,7 +227,7 @@ pub fn karlin_window_size_with(
     }
     let predicted = (exp_msp_score / exp_res_score + 0.5).floor() as i64;
     let predicted_u = predicted.max(0) as u32;
-    let window = predicted_u.clamp(cfg.min_window, cfg.max_window);
+    let window = cfg.window_for(predicted_u);
 
     Ok(KarlinResult {
         lambda,
@@ -225,14 +242,18 @@ pub fn karlin_window_size_with(
 
 /// Count scorable residues in a sequence and normalise to frequencies.
 ///
-/// Mirrors `winsizeFromlambdak`'s residue-counting loop: only bytes whose
-/// alphabet index is `< abetsize` contribute (so 'N' is excluded for DNA;
-/// for protein the C code's quirk of bucketing unknowns into the '*' slot
-/// is preserved by encoding `*` to index 23 in [`crate::alphabet`]).
+/// Mirrors `winsizeFromlambdak`'s residue-counting loops: only residues
+/// with alphabet index `< abetsize` are counted (no 'N' for DNA, no
+/// `BZX*` for protein). The query is divided by its counted residues; the
+/// subject (`whole_length`) by its full length, because C's subject loop
+/// tests `!= NA` (24), which no residue code reaches. The probabilities
+/// are renormalised in [`karlin`], but the expected residue score keeps
+/// the subject's shortfall, as in C.
 fn residue_frequencies(
     seq: &[u8],
     mode: BlastMode,
     abetsize: usize,
+    whole_length: bool,
 ) -> Result<(Vec<f64>, usize), DottirError> {
     if seq.is_empty() {
         return Err(DottirError::EmptySequence);
@@ -252,7 +273,7 @@ fn residue_frequencies(
     if total == 0 {
         return Err(DottirError::NoScorableResidues);
     }
-    let denom = total as f64;
+    let denom = if whole_length { seq.len() } else { total } as f64;
     Ok((
         counts.into_iter().map(|c| c as f64 / denom).collect(),
         total,
@@ -671,5 +692,20 @@ mod tests {
         assert_eq!(r1.k.to_bits(), r2.k.to_bits());
         assert_eq!(r1.h.to_bits(), r2.h.to_bits());
         assert_eq!(r1.window_size, r2.window_size);
+    }
+}
+
+#[cfg(test)]
+mod window_for_tests {
+    use super::KarlinConfig;
+
+    #[test]
+    fn small_estimates_fall_back_to_ten_as_c_dotter() {
+        let c = KarlinConfig::default();
+        assert_eq!(c.window_for(0), 10);
+        assert_eq!(c.window_for(2), 10);
+        assert_eq!(c.window_for(3), 3);
+        assert_eq!(c.window_for(50), 50);
+        assert_eq!(c.window_for(51), 50);
     }
 }

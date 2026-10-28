@@ -407,7 +407,7 @@ fn golden_channels_hash() {
             v.to_le_bytes().iter().for_each(|&b| eat(b));
         }
     }
-    assert_eq!(LARGE_PIXELMAP_FORMAT_VERSION, 2);
+    assert_eq!(LARGE_PIXELMAP_FORMAT_VERSION, 3);
     assert_eq!(h, GOLDEN, "large-mode output changed: new hash {h:#018x}");
 }
 

@@ -51,11 +51,11 @@ priority order:
 See [Architecture decisions](./adr.md) for context. Status is tracked in
 `docs/IMPROVEMENTS_PLAN.md`. Still open:
 
-* Pixelmap golden tests against the C dotter (Karlin values are already
-  pinned to it); they need a build of the GTK2 original.
-* Two known differences from the C dotter, recorded in ADR 0009: unknown
-  protein characters score 0 (C scores them as `*`), and an estimated
-  window below 3 is clamped to 3 (C substitutes 10).
+* Known differences from the C dotter, by decision (ADR 0010): unknown
+  residues (protein `X`-like characters, DNA `N`) score 0 where C scores
+  −4, and `-r`/`-v` of a sequence against itself is computed in full
+  rather than mirrored. Otherwise pixelmaps are identical to C dotter's
+  (15 pinned cases).
 * GFF3 repeat annotations as repeat-class floors in the GUI (the CLI has
   `--repeat-annot`; the GUI uses soft-masking).
 

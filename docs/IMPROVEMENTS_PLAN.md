@@ -41,7 +41,7 @@ Status as of 2026-10-28. Items checked here are merged on `main` or on `feat/lar
 | F1 | BLASTX three-frame | ☑ | a5b7baa |
 | F2 | `-r`/`-v` rev-complement | ☑ | 5110f02 |
 | F3 | watson-only / crick-only | ☑ | 5110f02 |
-| F4 | Pixelmap goldens vs C dotter | ☐ | — *(ops; needs GTK2 build)* |
+| F4 | Pixelmap goldens vs C dotter | ☑ | 15 cases from SeqTools 4.44.1 batch mode; ADR 0010 |
 | G1 | Inverted-repeat colour | ☑ | ffa6118 |
 | G2 | Sub-dotter spawn | ☑ | 96d8e01 (`--query-region` / `--subject-region`) |
 | H1 | Seq-name labels on axes (multi-record) | ☑ | 3f49af2 |

@@ -73,6 +73,26 @@ const GOLDENS: &[Golden] = &[
         predicted: 46,
         window: 46,
     },
+    Golden {
+        name: "prot_stops_x",
+        lambda: 0.27019718289375305,
+        k: 0.1057728731024509,
+        h: 0.23263132650573198,
+        exp_res: 0.80542236413144419,
+        exp_msp: 25.77332267888071,
+        predicted: 32,
+        window: 32,
+    },
+    Golden {
+        name: "dna_with_n",
+        lambda: 0.19152927398681641,
+        k: 0.17334580950735287,
+        h: 0.35672379416682848,
+        exp_res: 1.6991252903584961,
+        exp_msp: 38.938557203279061,
+        predicted: 23,
+        window: 23,
+    },
 ];
 
 fn dna_q1_long() -> Vec<u8> {
@@ -120,6 +140,18 @@ fn run_case(name: &str) -> KarlinResult {
             BlastMode::Blastp,
             PROT_Q1.to_vec(),
             PROT_S1.to_vec(),
+        ),
+        "prot_stops_x" => (
+            ScoreMatrix::blosum62(),
+            BlastMode::Blastp,
+            b"MKTAYIAKQRQ*SFVKSHFSRQLEERLGLIEVQAPXLSRVGDGTQDNLSGAEKAVQ*KVKAL".to_vec(),
+            b"MAATKRIIRQRYTIK*YVTRLREHIDHEEQXXKDLDEHKHRADRMLEELAG*ILAAEHRLRD".to_vec(),
+        ),
+        "dna_with_n" => (
+            ScoreMatrix::dna_identity(),
+            BlastMode::Blastn,
+            b"ACGTTGCANNACGTAGCTAGCTTTGACNGTACGATCGATGCAAATTTGGGCCCATGCA".to_vec(),
+            b"TTGACCANNNNGTACGATCGTAGCTAGCATCGATNACGTACGTAGCTAGGGCCCATG".to_vec(),
         ),
         other => panic!("unknown fixture {other}"),
     };

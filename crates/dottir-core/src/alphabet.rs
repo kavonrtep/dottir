@@ -31,10 +31,12 @@ pub const PROTEIN_LETTERS: &[u8; 24] = b"ARNDCQEGHILKMFPSTWYVBZX*";
 /// The nucleotide alphabet. Index = encoded residue, value = ASCII letter.
 pub const DNA_LETTERS: &[u8; 5] = b"ACGTN";
 
-/// Alphabet size used when summing Karlin/Altschul residue probabilities.
-/// For DNA we count only A/C/G/T (4); the 'N' bucket is *not* included.
-/// For protein all 24 buckets are included (matching C dotter abetsize=24).
+/// Protein alphabet (and score matrix) size, `ARNDCQEGHILKMFPSTWYVBZX*`.
 pub const PROTEIN_KARLIN_SIZE: usize = 24;
+/// Residues summed in the Karlin/Altschul probabilities: the 20 standard
+/// amino acids, as C dotter's `getAlphabetSize` (`dotplot.c:1088`); for DNA
+/// only A/C/G/T ([`DNA_KARLIN_SIZE`]).
+pub const PROTEIN_KARLIN_ABET: usize = 20;
 pub const DNA_KARLIN_SIZE: usize = 4;
 
 /// Look up the encoded residue for an ASCII byte. Returns [`SENTINEL`] for

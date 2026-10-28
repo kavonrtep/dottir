@@ -40,8 +40,8 @@ regenerated.
 * Unknown protein characters (and the missing last codon of a short
   frame) score 0 in dottir; C maps them to the `*` row/column of the
   matrix (`NR = 23`). This is a documented choice in `alphabet.rs`.
-* A Karlin window below 3 is clamped to 3 (spec §4.1.1); C dotter
-  substitutes 10.
+* A Karlin window below 3 was clamped to 3; C dotter substitutes 10.
+  Resolved in ADR 0010: dottir now substitutes 10 too.
 
-Both affect the zero-tolerance golden contract and need a decision of
-their own once C dotter goldens can be generated.
+The first remains, by decision (ADR 0010), as does its DNA counterpart:
+`N` scores 0 against everything, C scores it −4.

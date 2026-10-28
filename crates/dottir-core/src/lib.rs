@@ -68,4 +68,7 @@ pub use spectrum::{spectrum_of_signal, DetrendMode, Spectrum, SpectrumConfig, Wi
 ///
 /// * 1 — BLASTX auto window and pixel factor from the mean of the three
 ///   reading frames' Karlin estimates, as C dotter (ADR 0009).
-pub const PIXELMAP_FORMAT_VERSION: u32 = 1;
+/// * 2 — as C dotter (ADR 0010): a Karlin window estimate below 3
+///   becomes 10, the auto pixel factor truncates instead of rounding, and
+///   the reverse strand emits its last valid row (`s = slen - W`).
+pub const PIXELMAP_FORMAT_VERSION: u32 = 2;

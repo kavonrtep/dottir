@@ -1,0 +1,16 @@
+# name	C dotter flags	dottir flags	query	subject ("-": self-comparison)
+blastn_self_z5	-z 5	-z 5	chr4_ref_seq_short.fasta	-
+blastn_self_w12_z4	-z 4 -W 12	-z 4 -W 12	chr4_ref_seq_short.fasta	-
+blastn_self_nomirror_z5	-z 5 -D	-z 5 --disable-mirror	chr4_ref_seq_short.fasta	-
+blastn_pair_z2	-z 2	-z 2	chr4_ref_seq_short.fasta	DA730641_noN.fasta
+blastn_pair_z3_p60	-z 3 -p 60	-z 3 --pixel-fac 60	chr4_ref_seq_short.fasta	DA730641_noN.fasta
+blastn_revq_z3	-z 3 -r	-z 3 -r	chr4_ref_seq_short.fasta	DA730641_noN.fasta
+blastn_revs_z3	-z 3 -v	-z 3 -v	chr4_ref_seq_short.fasta	DA730641_noN.fasta
+blastn_watson_z3	-z 3 -w	-z 3 --watson-only	chr4_ref_seq_short.fasta	DA730641_noN.fasta
+blastn_crick_z7	-z 7 -c	-z 7 --crick-only	chr4_ref_seq_short.fasta	DA730641_noN.fasta
+blastp_self_z1	-z 1	-z 1 --mode blastp	Q9H8G1.fasta	-
+blastp_pair_z1	-z 1	-z 1 --mode blastp	Q9H8G1.fasta	chr4_translation_frame1.fasta
+blastp_pair_z2_w10	-z 2 -W 10	-z 2 -W 10 --mode blastp	Q9H8G1.fasta	chr4_translation_frame1.fasta
+blastx_z2	-z 2	-z 2 --mode blastx	chr4_ref_seq_short.fasta	Q9H8G1.fasta
+blastx_z3	-z 3	-z 3 --mode blastx	chr4_ref_seq_short.fasta	Q9H8G1.fasta
+blastx_frame1_z1	-z 1	-z 1 --mode blastx	chr4_ref_seq_short.fasta	chr4_translation_frame1.fasta

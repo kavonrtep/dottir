@@ -891,6 +891,7 @@ dependencies = [
  "clap",
  "dottir-core",
  "dottir-io",
+ "flate2",
  "png 0.17.16",
  "rayon",
  "tracing",

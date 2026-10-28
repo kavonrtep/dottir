@@ -14,6 +14,7 @@ over Y because…" live here. Format: [MADR](https://adr.github.io/madr/).
 | 0007 | Seed-based large-sequence mode | Accepted |
 | 0008 | Genome mode from external alignments | Accepted |
 | 0009 | BLASTX Karlin estimate over three frames | Accepted |
+| 0010 | C dotter pixelmap goldens; small-window fallback | Accepted |
 
 Add a new ADR whenever the change is one of:
 

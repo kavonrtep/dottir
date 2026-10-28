@@ -42,12 +42,12 @@ impl BlastMode {
     }
 
     /// Number of residue buckets used by the Karlin/Altschul probability
-    /// sum. Matches the C dotter `abetsize` argument (24 for protein, 4 for
+    /// sum. Matches the C dotter `abetsize` argument (20 for protein, 4 for
     /// DNA — note 'N' is excluded for DNA).
     pub const fn karlin_size(self) -> usize {
         match self {
             BlastMode::Blastn => DNA_KARLIN_SIZE,
-            BlastMode::Blastp | BlastMode::Blastx => PROTEIN_KARLIN_SIZE,
+            BlastMode::Blastp | BlastMode::Blastx => crate::alphabet::PROTEIN_KARLIN_ABET,
         }
     }
 }
@@ -204,8 +204,9 @@ impl ScoreMatrix {
             // X
             0, -1, -1, -1, -2, -1, -1, -1, -1, -1, -1, -1, -1, -1, -2, 0, 0, -2, -1, -1, -1, -1, -1,
             -4, // *
+            // `*:*` is -1 in C dotter's built-in table (`dotter.c`), +1 in NCBI's.
             -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4,
-            -4, 1,
+            -4, -1,
         ];
         ScoreMatrix {
             name: "BLOSUM62".to_string(),
@@ -632,8 +633,8 @@ mod tests {
                                        // Off-diagonal sanity.
         assert_eq!(m.get(0, 4), 0); // A/C
         assert_eq!(m.get(13, 17), 1); // F/W
-                                      // The '*' row/col is heavily negative (with a +1 on *,*).
-        assert_eq!(m.get(23, 23), 1);
+                                      // The '*' row/col is -4, and *,* is -1 as in C dotter.
+        assert_eq!(m.get(23, 23), -1);
         assert_eq!(m.get(23, 0), -4);
     }
 

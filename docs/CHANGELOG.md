@@ -147,6 +147,14 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+* Pixelmaps now match the C dotter exactly, checked against 15 pinned C
+  dotter pixelmaps (ADR 0010; pixelmap format version 2). Fixed on the
+  way: protein Karlin statistics over the 20 standard amino acids with
+  the subject's full length, as C (windows and pixel factors of protein
+  and BLASTX plots, and of DNA plots whose subject has `N`s, change); the
+  automatic pixel factor truncates; the reverse strand's last row was
+  missing; BLASTX plots could be a column narrower; BLOSUM62 `*:*` is −1
+  as in C. A Karlin window estimate below 3 now becomes 10, as in C.
 * GUI in BLASTX mode treated a pixelmap column (one codon) as one base:
   the crosshair, rectangle zoom, selections, auto zoom, record breaks,
   annotation bands, HSP lines and axis labels were off by 3 on x. They now

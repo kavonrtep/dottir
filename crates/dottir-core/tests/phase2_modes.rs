@@ -326,7 +326,7 @@ fn auto_pixel_fac_from_karlin() {
         .params
         .karlin
         .expect("Karlin should have run for auto pixel_fac");
-    let expected = ((0.2 * 256.0 / karlin.expected_residue_score).round() as u32).max(1);
+    let expected = ((0.2 * 256.0 / karlin.expected_residue_score) as u32).max(1);
     assert_eq!(
         p.params.pixel_fac, expected,
         "resolved pixel_fac mismatch: got {}, expected {} (expRes = {:.3})",

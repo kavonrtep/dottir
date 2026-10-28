@@ -66,8 +66,8 @@ deviation must be deliberate and documented.
 
 1. **Karlin/Altschul window-size estimation**. From residue composition of both
    sequences and the chosen score matrix, compute λ, K, H, then the expected MSP
-   length for a nominal 100×100 matrix; round to integer. Clamp to `[3, 50]` by default
-   (configurable). The user override (`-W <int>`) bypasses estimation.
+   length for a nominal 100×100 matrix; round to integer. An estimate above 50
+   becomes 50; one below 3 becomes 10, as C dotter does (ADR 0010). The user override (`-W <int>`) bypasses estimation.
 2. **Score-matrix-based scoring**. Default BLOSUM62 for protein, identity matrix for
    DNA (BLASTN-style). Custom matrices via BLAST format file. The sliding window sums
    *matrix scores*, not match/mismatch counts. This is what gives Dotter sensitivity

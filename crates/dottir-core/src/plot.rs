@@ -51,7 +51,7 @@ pub struct PlotConfig {
     /// Multiplier in the final scale step `min(255, score * pixel_fac / W)`.
     ///
     /// `0` means **auto** — derive from Karlin's expected residue score
-    /// in MSP via dotter's formula `round(0.2 * 256 / exp_res_score)`
+    /// in MSP via dotter's formula `(int)(0.2 * 256 / exp_res_score)` (truncated, as C)
     /// (see `dotplot.c:854`). This positions a Karlin-expected match
     /// residue at ~1/5 of the displayable range and pushes background
     /// noise toward white. The resolved value is reported back via
@@ -377,7 +377,7 @@ pub fn compute_dotplot(
                 "auto pixel_fac requires positive Karlin expected_residue_score, got {exp_res:.3}"
             )));
         }
-        ((0.2 * 256.0 / exp_res).round() as u32).max(1)
+        ((0.2 * 256.0 / exp_res) as u32).max(1)
     } else {
         config.pixel_fac
     };
@@ -693,7 +693,7 @@ pub fn blastx_karlin(
         expected_residue_score: mean(|k| k.expected_residue_score),
         expected_msp_score: mean(|k| k.expected_msp_score),
         predicted_msp_length: predicted,
-        window_size: predicted.clamp(cfg.min_window, cfg.max_window),
+        window_size: cfg.window_for(predicted),
         ..first
     })
 }
@@ -750,7 +750,7 @@ fn compute_blastx(
                 "auto pixel_fac requires positive Karlin expected_residue_score, got {exp_res:.3}"
             )));
         }
-        ((0.2 * 256.0 / exp_res).round() as u32).max(1)
+        ((0.2 * 256.0 / exp_res) as u32).max(1)
     } else {
         config.pixel_fac
     };
@@ -761,7 +761,9 @@ fn compute_blastx(
     let pepqlen = query.len() / 3;
     let alpha = crate::alphabet::AlphabetKind::Protein;
     let s_encoded = crate::alphabet::encode(subject, alpha);
-    let width = image_dimension(pepqlen, config.zoom);
+    // C: `ceil(qlen / (zoom * 3))` (getImageDimension), one column more
+    // than `ceil(pepqlen / zoom)` when qlen % (3 * zoom) > 3 * (pepqlen % zoom).
+    let width = image_dimension(query.len(), config.zoom.max(1) * 3);
     let height = image_dimension(subject.len(), config.zoom);
     let mut pixmap = PixelMap::new_checked(width, height, config.memory_limit_bytes)?;
 

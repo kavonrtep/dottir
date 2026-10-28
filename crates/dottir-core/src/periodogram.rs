@@ -383,7 +383,7 @@ fn resolve(seq: &[u8], config: &PeriodogramConfig) -> Result<Resolved, DottirErr
                 "auto pixel_fac requires positive expected_residue_score, got {e}"
             )));
         }
-        ((0.2 * 256.0 / e).round() as u32).max(1)
+        ((0.2 * 256.0 / e) as u32).max(1)
     } else {
         config.pixel_fac
     };

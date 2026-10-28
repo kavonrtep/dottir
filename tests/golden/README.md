@@ -12,10 +12,7 @@ algorithmic change must bump `PIXELMAP_FORMAT_VERSION` in
 ```
 tests/golden/
 ├── karlin/        # JSON files pinning (lambda, k, h, window_size)
-├── blastn/        # binary pixelmaps (Vec<u8>) + .sha256
-├── blastp/
-├── blastx/
-└── self/
+└── c_dotter/      # C dotter .dot pixelmaps + cases.tsv + regen.sh
 ```
 
 Each golden is paired with a `<name>.cmd` file recording the exact C dotter
@@ -27,6 +24,9 @@ dotter -W 0 examples/chr4_ref_seq.fasta examples/chr4_ref_seq.fasta
 ```
 
 ## Regenerating
+
+For the pixelmaps, an installed `dotter` is enough:
+`tests/golden/c_dotter/regen.sh`. The Karlin values come from the harness:
 
 1. Build C dotter from `third_party/seqtools/` (requires GTK2 dev headers
    plus glib-2.0). On Debian/Ubuntu:
@@ -48,6 +48,8 @@ dotter -W 0 examples/chr4_ref_seq.fasta examples/chr4_ref_seq.fasta
   `crates/dottir-core/src/karlin.rs` matches these values bit-for-bit on
   λ/K/H/window — verified by `crates/dottir-core/tests/karlin_golden.rs`.
   Regen: `tests/golden/karlin/regen.cmd`.
-- ☐ `tests/regen.rs` — driver that calls the full C dotter binary and
-  writes pixelmap goldens. Pending Phase 1 (currently we don't compute
-  pixelmaps yet).
+- ☑ `c_dotter/` — 15 pixelmaps from the C dotter (SeqTools 4.44.1 batch
+  mode, `dotter -b`), gzipped `.dot` files. Cases and the matching dottir
+  flags are in `c_dotter/cases.tsv`; inputs in `tests/corpora/c_dotter/`;
+  regenerate with `tests/golden/c_dotter/regen.sh`. Checked exactly by
+  `crates/dottir-cli/tests/c_dotter_golden.rs` (ADR 0010).

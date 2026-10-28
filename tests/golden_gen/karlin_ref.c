@@ -201,11 +201,10 @@ static int winsizeFromlambdak(gint32 mtx[24][24], int *tob, int abetsize,
         }
     for (i = 0; i < abetsize; ++i) n2[i] = 0;
     for (i = 0; sseq[i]; ++i)
-        if (tob[(int)(unsigned char)sseq[i]] != NA &&
-            tob[(int)(unsigned char)sseq[i]] < abetsize) {
-            /* The C original tests `!= NA` (=24); for DNA mode (abetsize=4)
-             * this lets 'N' through to be filtered later. We also gate on
-             * `< abetsize` to mirror the qseq loop. */
+        if (tob[(int)(unsigned char)sseq[i]] != NA) {
+            /* Verbatim C: `!= NA` (=24) is true for every residue code, so
+             * slen is the whole subject length; only counts below abetsize
+             * enter the frequencies. */
             n2[tob[(int)(unsigned char)sseq[i]]]++;
             slen++;
         }
@@ -333,9 +332,9 @@ static void run_fixture(const char *name, gint32 (*mtx)[24], int *tob,
     double lambda = 0, exp_res = 0, K = 0, H = 0, exp_msp = 0;
     int win = winsizeFromlambdak((gint32 (*)[24])mtx, tob, abetsize, q, s,
                                  &exp_res, &lambda, &K, &H, &exp_msp);
-    /* Apply C-dotter's clamp [3, 50] in winsizeFromlambdak's caller. */
+    /* C dotter's initWindow (dotplot.c:1126): below 3 -> 10, above 50 -> 50. */
     int predicted = win;
-    int window = win < 3 ? 3 : (win > 50 ? 50 : win);
+    int window = win < 3 ? 10 : (win > 50 ? 50 : win);
     printf("%s\t%.17g\t%.17g\t%.17g\t%.17g\t%.17g\t%d\t%d\n",
            name, lambda, K, H, exp_res, exp_msp, predicted, window);
 }
@@ -366,28 +365,39 @@ int main(void) {
     /* Self-comparison */
     run_fixture("dna_self_repeat", DNAmtx, ntob, 4, dna_q3, dna_q3);
 
-    /* === Protein fixtures (abetsize = 24) === */
+    /* === Protein fixtures (abetsize = 20, getAlphabetSize) === */
     const char *prot_q1 =
         "MKTAYIAKQRQISFVKSHFSRQLEERLGLIEVQAPILSRVGDGTQDNLSGAEKAVQVKVKAL"
         "RSALEFNAHVDEMVRLRREVGNQLEELQNRLREYIQRDHRGHEALQQYRVKQVHLDQEEIA";
     const char *prot_s1 =
         "MAATKRIIRQRYTIKHYVTRLREHIDHEEQVRKDLDEHKHRADRMLEELAGAILAAEHRLRD"
         "AREAFEQLLDKLEEHLRYAEELQEKFAKLERELAEHRLEEIEGRLAQAEEEFVEQHRRLENEL";
-    run_fixture("prot_uniform", BLOSUM62, atob_0, 24, prot_q1, prot_s1);
+    run_fixture("prot_uniform", BLOSUM62, atob_0, 20, prot_q1, prot_s1);
 
     /* Mostly hydrophobic */
     const char *prot_q2 =
         "MFLLAAVAILALAIVAFLGLAILAVFAGLAAVILSFAGLLAVIFVASLLAGAILAVAFGLLI";
     const char *prot_s2 =
         "AILAFFGLAVILFAVALILGAVILAFAGAILVAFLLAVGAILSFAGLAILVAFAVALILSFG";
-    run_fixture("prot_hydrophobic", BLOSUM62, atob_0, 24, prot_q2, prot_s2);
+    run_fixture("prot_hydrophobic", BLOSUM62, atob_0, 20, prot_q2, prot_s2);
 
     /* Mostly charged */
     const char *prot_q3 =
         "MDDEERKKDEEDKKRRDEEKKRDEEEDKKRRDEEKKRDEEEDKKRRDEEKKRDEEEDKKRRDE";
     const char *prot_s3 =
         "EEDDKKRRDDEEKKRDDEEKKRRDDEEKKRRDDEEKKRDDEEKKRRDDEEKKRRDDEEKKRDD";
-    run_fixture("prot_charged", BLOSUM62, atob_0, 24, prot_q3, prot_s3);
+    run_fixture("prot_charged", BLOSUM62, atob_0, 20, prot_q3, prot_s3);
+
+    /* Non-standard residues: X and * in both (subject keeps them in its
+     * length), N in DNA. */
+    const char *prot_q4 =
+        "MKTAYIAKQRQ*SFVKSHFSRQLEERLGLIEVQAPXLSRVGDGTQDNLSGAEKAVQ*KVKAL";
+    const char *prot_s4 =
+        "MAATKRIIRQRYTIK*YVTRLREHIDHEEQXXKDLDEHKHRADRMLEELAG*ILAAEHRLRD";
+    run_fixture("prot_stops_x", BLOSUM62, atob_0, 20, prot_q4, prot_s4);
+    const char *dna_q5 = "ACGTTGCANNACGTAGCTAGCTTTGACNGTACGATCGATGCAAATTTGGGCCCATGCA";
+    const char *dna_s5 = "TTGACCANNNNGTACGATCGTAGCTAGCATCGATNACGTACGTAGCTAGGGCCCATG";
+    run_fixture("dna_with_n", DNAmtx, ntob, 4, dna_q5, dna_s5);
 
     return 0;
 }

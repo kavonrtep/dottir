@@ -58,7 +58,8 @@ use crate::plot::{mirror_self_comparison, DotPlot, PlotParams, Strand, Triangle}
 
 /// Bumped whenever large-mode output for fixed inputs and parameters
 /// changes. Independent of [`crate::PIXELMAP_FORMAT_VERSION`].
-pub const LARGE_PIXELMAP_FORMAT_VERSION: u32 = 2;
+/// 3: the auto pixel factor truncates, as C dotter (ADR 0010).
+pub const LARGE_PIXELMAP_FORMAT_VERSION: u32 = 3;
 
 /// Largest automatic seed-sampling rate for the plot.
 pub const MAX_AUTO_SAMPLE: u32 = 32;
@@ -505,7 +506,7 @@ pub struct LargeSession {
 
 /// Automatic pixel factor from the Karlin expected residue score.
 fn auto_pixel_fac(exp_res: f64) -> Option<u32> {
-    (exp_res.is_finite() && exp_res > 0.0).then(|| ((0.2 * 256.0 / exp_res).round() as u32).max(1))
+    (exp_res.is_finite() && exp_res > 0.0).then(|| ((0.2 * 256.0 / exp_res) as u32).max(1))
 }
 
 impl LargeSession {

@@ -200,7 +200,12 @@ pub fn sliding_window_pass_chunked(
             // serial chunks start at absolute s = 0/slen-1 so iter_idx >= W
             // coincides with s >= W (or s < slen - W); chunked passes
             // get the same gate locally.
-            let s_valid = iter_idx >= w;
+            // C's `valueWithinRange` is inclusive: reverse keeps
+            // `sIdx == slen - W`, the row after W-1 iterations.
+            let s_valid = match direction {
+                Direction::Forward => iter_idx >= w,
+                Direction::Reverse => iter_idx + 1 >= w,
+            };
             // C self-comp cap: `qmax = min(sIdx + 1, pepQSeqLen)`.
             let q_end = if self_comp { qlen.min(s + 1) } else { qlen };
 

@@ -237,6 +237,6 @@ fn blastx_karlin_averages_the_three_frames() {
     assert!((k.expected_residue_score - mean_exp).abs() < 1e-12);
     assert_eq!(
         plot.params.pixel_fac,
-        ((0.2 * 256.0 / mean_exp).round() as u32).max(1)
+        ((0.2 * 256.0 / mean_exp) as u32).max(1)
     );
 }
