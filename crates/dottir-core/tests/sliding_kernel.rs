@@ -197,3 +197,46 @@ fn blastp_rejects_reverse_strand() {
     cfg.strand = Strand::Reverse;
     assert!(compute_dotplot(q, s, &cfg).is_err());
 }
+
+/// BLASTX auto window follows C dotter (`dotplot.c:1107`): the truncated
+/// mean of the three frames' unclamped Karlin MSP lengths, clamped; the
+/// expected residue score (and so the auto pixel factor) is the mean.
+#[test]
+fn blastx_karlin_averages_the_three_frames() {
+    use dottir_core::karlin::karlin_window_size;
+    use dottir_core::translation::translate_frame;
+    use dottir_core::BlastMode;
+    // Frames translate to different compositions, so their windows differ.
+    let q: Vec<u8> = b"ATGGCGTTAGCCTGGAAACGTTTACCGGATTTGCAGCATCAGTTGCCAAGTG".repeat(8);
+    let s = b"MALAWKRLPDLQHQLPKWRMKTAYIAKQRQISFVKSHFSRQLEERLGLIEVQ".to_vec();
+    let m = ScoreMatrix::blosum62();
+    let frames: Vec<_> = (0..3)
+        .map(|f| karlin_window_size(&m, &translate_frame(&q, f), &s, BlastMode::Blastp).unwrap())
+        .collect();
+    let mean_len = frames
+        .iter()
+        .map(|k| k.predicted_msp_length as f64)
+        .sum::<f64>()
+        / 3.0;
+    let mean_exp = frames.iter().map(|k| k.expected_residue_score).sum::<f64>() / 3.0;
+    assert!(
+        frames
+            .iter()
+            .any(|k| k.predicted_msp_length != frames[0].predicted_msp_length),
+        "test needs frames with different windows"
+    );
+
+    let mut cfg = PlotConfig::default_blastp(m);
+    cfg.mode = BlastMode::Blastx;
+    cfg.window_size = None;
+    cfg.pixel_fac = 0;
+    cfg.zoom = 1;
+    let plot = compute_dotplot(&q, &s, &cfg).unwrap();
+    let k = plot.params.karlin.unwrap();
+    assert_eq!(plot.params.window_size, (mean_len as u32).clamp(3, 50));
+    assert!((k.expected_residue_score - mean_exp).abs() < 1e-12);
+    assert_eq!(
+        plot.params.pixel_fac,
+        ((0.2 * 256.0 / mean_exp).round() as u32).max(1)
+    );
+}

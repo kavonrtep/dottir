@@ -281,9 +281,9 @@ impl DotPlot {
 /// Compute a dotplot for a `(query, subject)` pair.
 ///
 /// Supports BLASTN (forward, reverse, both, with optional separate
-/// strand channels and self-comparison mirroring) and BLASTP. BLASTX
-/// (three-frame translation) is Phase 2-extra and still returns
-/// [`DottirError::NotImplemented`].
+/// strand channels and self-comparison mirroring), BLASTP, and BLASTX
+/// (DNA query translated in three forward frames against a protein
+/// subject, max-merged; one pixel column per codon).
 ///
 /// # Example — BLASTN self-comparison, both strands
 ///
@@ -657,6 +657,47 @@ fn run_pass(
     }
 }
 
+/// Karlin estimate for BLASTX, as C dotter (`dotplot.c:1107`): one per
+/// translated reading frame against the protein subject; the window is
+/// the truncated mean of the three unclamped MSP lengths, then clamped,
+/// and the expected residue score is the mean. λ, K and H are frame 0's.
+/// Frames too short to translate (queries under 5 bases) are left out.
+pub fn blastx_karlin(
+    matrix: &ScoreMatrix,
+    query: &[u8],
+    subject: &[u8],
+) -> Result<KarlinResult, DottirError> {
+    let mut frames = Vec::with_capacity(3);
+    for f in 0..3 {
+        let pep = crate::translation::translate_frame(query, f);
+        if !pep.is_empty() {
+            frames.push(karlin_window_size(
+                matrix,
+                &pep,
+                subject,
+                BlastMode::Blastp,
+            )?);
+        }
+    }
+    let Some(&first) = frames.first() else {
+        return Err(DottirError::InvalidConfig(
+            "BLASTX query is too short to translate (<3 bases)".into(),
+        ));
+    };
+    let n = frames.len() as f64;
+    let mean = |f: fn(&KarlinResult) -> f64| frames.iter().map(f).sum::<f64>() / n;
+    // C: `slidingWinSize = (win1 + win2 + win3) / 3.0` into an int.
+    let predicted = (mean(|k| k.predicted_msp_length as f64)) as u32;
+    let cfg = crate::karlin::KarlinConfig::default();
+    Ok(KarlinResult {
+        expected_residue_score: mean(|k| k.expected_residue_score),
+        expected_msp_score: mean(|k| k.expected_msp_score),
+        predicted_msp_length: predicted,
+        window_size: predicted.clamp(cfg.min_window, cfg.max_window),
+        ..first
+    })
+}
+
 /// BLASTX: translate the DNA query in three forward reading frames,
 /// run the protein kernel against each, and max-merge into a single
 /// pixelmap. Subject is already in protein space. Self-comparison and
@@ -672,11 +713,7 @@ fn compute_blastx(
             "BLASTX requires a protein score matrix (BLOSUM/PAM)".into(),
         ));
     }
-    // Karlin estimate uses the translated frame-0 sequence vs the
-    // protein subject — matches the C dotter's BLASTX choice of
-    // pepQSeqLen for Karlin (it calls winsizeFromlambdak on frame 0).
-    let frame0 = crate::translation::translate_frame(query, 0);
-    if frame0.is_empty() {
+    if query.len() < 3 {
         return Err(DottirError::InvalidConfig(
             "BLASTX query is too short to translate (<3 bases)".into(),
         ));
@@ -685,12 +722,7 @@ fn compute_blastx(
     // either window_size OR pixel_fac is on auto.
     let need_karlin = config.window_size.is_none() || config.pixel_fac == 0;
     let karlin_result = if need_karlin {
-        Some(karlin_window_size(
-            &config.matrix,
-            &frame0,
-            subject,
-            BlastMode::Blastp,
-        )?)
+        Some(blastx_karlin(&config.matrix, query, subject)?)
     } else {
         None
     };

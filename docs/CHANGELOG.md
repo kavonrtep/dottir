@@ -109,6 +109,13 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+* **BLASTX window and pixel factor follow C dotter** (ADR 0009): the
+  automatic estimate is the mean over the three reading frames, not frame
+  0 alone. `PIXELMAP_FORMAT_VERSION` is now 1; BLASTN/BLASTP output is
+  unchanged. (BLASTX itself already worked; the docs said otherwise.)
+* Axis tick labels on fine steps no longer repeat (ticks 1050/1100/1150
+  were all "1.1k"); they get the decimals they need.
+
 Findings of `docs/reviews/since-v0.4.0.md`:
 
 * Genome mode: joining alignments split at query chunk cuts could drop

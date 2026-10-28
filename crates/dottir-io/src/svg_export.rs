@@ -223,7 +223,7 @@ fn write_svg_document(
             "  <text x=\"{x}\" y=\"{}\" text-anchor=\"middle\" \
              font-family=\"monospace\" font-size=\"11\" fill=\"#222\">{}</text>",
             margin.saturating_sub(10),
-            format_kb(t),
+            format_tick(t, step_x),
         )?;
         t += step_x;
     }
@@ -258,7 +258,7 @@ fn write_svg_document(
              font-family=\"monospace\" font-size=\"11\" fill=\"#222\">{}</text>",
             margin.saturating_sub(10),
             y + 4,
-            format_kb(t),
+            format_tick(t, step_y),
         )?;
         t += step_y;
     }
@@ -348,7 +348,7 @@ fn nice_step(span: u64) -> u64 {
     base.max(1)
 }
 
-use crate::text_overlay::format_kb;
+use crate::text_overlay::format_tick;
 
 #[cfg(test)]
 mod tests {

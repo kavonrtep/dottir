@@ -17,7 +17,7 @@ Every `dottir batch` invocation writes two artifacts:
 ```toml
 [dottir]
 version = "0.1.0"
-pixelmap_format_version = 0
+pixelmap_format_version = 1
 
 [query]
 path = "/path/to/q.fa"

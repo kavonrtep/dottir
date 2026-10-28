@@ -65,4 +65,7 @@ pub use spectrum::{spectrum_of_signal, DetrendMode, Spectrum, SpectrumConfig, Wi
 
 /// Bumped whenever the algorithmic contract changes such that previously
 /// pinned golden pixelmaps must be regenerated. See CLAUDE.md.
-pub const PIXELMAP_FORMAT_VERSION: u32 = 0;
+///
+/// * 1 — BLASTX auto window and pixel factor from the mean of the three
+///   reading frames' Karlin estimates, as C dotter (ADR 0009).
+pub const PIXELMAP_FORMAT_VERSION: u32 = 1;

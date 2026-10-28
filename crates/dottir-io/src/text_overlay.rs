@@ -419,7 +419,7 @@ pub fn compose_image_with_axes(
             top,
             frame_ink,
         );
-        let label = format_kb(t);
+        let label = format_tick(t, step_x);
         let lw = text_width(&label);
         let lx = x.saturating_sub(lw / 2);
         let ly = top.saturating_sub(5 + FONT_H + 2);
@@ -469,7 +469,7 @@ pub fn compose_image_with_axes(
             y,
             frame_ink,
         );
-        let label = format_kb(t);
+        let label = format_tick(t, step_y);
         let lw = text_width(&label);
         let lx = left.saturating_sub(5 + lw + 2);
         let ly = y.saturating_sub(FONT_H / 2);
@@ -683,6 +683,30 @@ pub fn format_kb(n: u64) -> String {
     } else {
         format!("{n}")
     }
+}
+
+/// [`format_kb`] for a tick at `n` on a `step` grid, with enough decimals
+/// that neighbouring ticks differ (step 50 at 1k: 1.05k, not 1.1k twice).
+pub fn format_tick(n: u64, step: u64) -> String {
+    let (unit, suffix, base) = if n >= 1_000_000 {
+        (1_000_000, "M", 1)
+    } else if n >= 10_000 {
+        (1_000, "k", 0)
+    } else if n >= 1_000 {
+        (1_000, "k", 1)
+    } else {
+        return format!("{n}");
+    };
+    let mut decimals: usize = base;
+    let mut scale = 10_u64.pow(base as u32);
+    while step.max(1) * scale % unit != 0 && decimals < 6 {
+        decimals += 1;
+        scale *= 10;
+    }
+    if decimals == base {
+        return format_kb(n);
+    }
+    format!("{:.*}{suffix}", decimals, n as f64 / unit as f64)
 }
 
 /// Nearest-neighbour resize a `(src_w × src_h)` greyscale pixelmap
@@ -933,6 +957,22 @@ mod tests {
         assert!(nice_tick_step(1000, 60) >= 60);
         // For a 1M-residue span the step should be at least 100k.
         assert!(nice_tick_step(1_000_000, 60) >= 60);
+    }
+
+    #[test]
+    fn tick_labels_stay_distinct_on_fine_steps() {
+        let labels: Vec<String> = (1000..=1200)
+            .step_by(50)
+            .map(|t| format_tick(t, 50))
+            .collect();
+        assert_eq!(labels, ["1.00k", "1.05k", "1.10k", "1.15k", "1.20k"]);
+        // Coarse steps keep the usual labels.
+        assert_eq!(format_tick(1_100, 100), "1.1k");
+        assert_eq!(format_tick(20_000, 5_000), "20k");
+        assert_eq!(format_tick(12_500, 500), "12.5k");
+        assert_eq!(format_tick(1_500_000, 500_000), "1.5M");
+        assert_eq!(format_tick(1_250_000, 250_000), "1.25M");
+        assert_eq!(format_tick(900, 50), "900");
     }
 
     #[test]

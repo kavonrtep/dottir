@@ -61,7 +61,7 @@ Large-sequence flags (`--engine`, `--seed-pattern`, `--hide-classes`,
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--mode {blastn,blastp,blastx}` | `blastn` | BLAST mode. `blastx` is not yet implemented. |
+| `--mode {blastn,blastp,blastx}` | `blastn` | BLAST mode. `blastx`: DNA query (horizontal, translated in its three forward frames, one column per codon; use `-r` for the reverse strand) against a protein subject. |
 | `--matrix NAME` | `BLOSUM62` for protein, `DNA+5/-4` for BLASTN | Built-in matrix name — see [Score matrices](./matrices.md). |
 | `-W, --window N` | Karlin/Altschul estimate | Sliding window size. |
 | `-z, --zoom N` | `1` | Pixels per matrix block. Increase to fit larger inputs. |
