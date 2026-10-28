@@ -1,4 +1,4 @@
-//! Genome-mode outputs (ADR 0008): the PNG (identity-coloured
+//! Genome-mode outputs (ADR 0008): the PNG and the SVG (identity-coloured
 //! alignments, record separators, shaded mix blocks, record names along
 //! the top (target) and left (query) edges), the association table and
 //! FASTA exports.
@@ -166,6 +166,190 @@ pub fn write_genome_png(
     write_rgb_png(path, w, h, &rgb, text_chunks)
 }
 
+/// Longest side of the SVG plot area, in user units.
+const SVG_PLOT: f64 = 1000.0;
+const SVG_FONT: f64 = 10.0;
+
+/// The plot as SVG: the same elements as the PNG, with alignments as
+/// vector lines (`lines` from [`dottir_core::genome::plot_lines`]),
+/// `line_width` units wide, coloured by identity class.
+#[allow(clippy::too_many_arguments)]
+pub fn write_genome_svg<W: Write>(
+    mut w: W,
+    lines: &[dottir_core::genome::PlotLine],
+    line_width: f64,
+    x: &AxisLayout,
+    x_recs: &[GenomeRecord],
+    y: &AxisLayout,
+    y_recs: &[GenomeRecord],
+    metadata: &[(&str, &str)],
+) -> std::io::Result<()> {
+    use crate::svg_export::xml_escape;
+    let scale = SVG_PLOT / x.total.max(y.total).max(1) as f64;
+    let (pw, ph) = (x.total as f64 * scale, y.total as f64 * scale);
+    // Text width estimate: monospace-ish 0.6 em per character.
+    let tw = |t: &str| t.chars().count() as f64 * SVG_FONT * 0.6;
+    let y_label_w = (0..y.segments.len())
+        .map(|i| tw(&label(y, y_recs, i)))
+        .fold(0.0, f64::max)
+        .min(MAX_LABEL_W as f64);
+    let (left, top) = (
+        MARGIN as f64 + y_label_w + 6.0,
+        MARGIN as f64 + SVG_FONT + 6.0,
+    );
+    let (total_w, total_h) = (left + pw + MARGIN as f64, top + ph + MARGIN as f64);
+    let grey = |g: u8| format!("#{g:02x}{g:02x}{g:02x}");
+
+    writeln!(
+        w,
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\"?>"
+    )?;
+    writeln!(
+        w,
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" \
+         xmlns:dottir=\"https://github.com/petr/dottir/ns/1\" \
+         width=\"{total_w:.0}\" height=\"{total_h:.0}\" viewBox=\"0 0 {total_w:.1} {total_h:.1}\">"
+    )?;
+    if !metadata.is_empty() {
+        writeln!(w, "  <metadata>")?;
+        for (k, v) in metadata {
+            writeln!(w, "    <dottir:{k}>{}</dottir:{k}>", xml_escape(v))?;
+        }
+        writeln!(w, "  </metadata>")?;
+    }
+    writeln!(w, "  <rect width=\"100%\" height=\"100%\" fill=\"white\"/>")?;
+    writeln!(w, "  <g transform=\"translate({left:.2} {top:.2})\">")?;
+    // Mix blocks.
+    writeln!(w, "    <g fill=\"{}\">", grey(MIX_SHADE))?;
+    for m in &x.mixes {
+        let (a, b) = (m.start as f64 * scale, m.end as f64 * scale);
+        writeln!(
+            w,
+            "      <rect x=\"{a:.2}\" y=\"0\" width=\"{:.2}\" height=\"{ph:.2}\"/>",
+            b - a
+        )?;
+    }
+    for m in &y.mixes {
+        let (a, b) = (m.start as f64 * scale, m.end as f64 * scale);
+        writeln!(
+            w,
+            "      <rect x=\"0\" y=\"{a:.2}\" width=\"{pw:.2}\" height=\"{:.2}\"/>",
+            b - a
+        )?;
+    }
+    writeln!(w, "    </g>")?;
+    // Record separators.
+    let boundaries = |l: &AxisLayout| -> Vec<f64> {
+        l.segments
+            .windows(2)
+            .filter(|s| s[0].mix.is_none() || s[0].mix != s[1].mix)
+            .map(|s| s[1].start as f64 * scale)
+            .collect()
+    };
+    writeln!(
+        w,
+        "    <g stroke=\"{}\" stroke-width=\"0.5\">",
+        grey(SEPARATOR)
+    )?;
+    for b in boundaries(x) {
+        writeln!(
+            w,
+            "      <line x1=\"{b:.2}\" y1=\"0\" x2=\"{b:.2}\" y2=\"{ph:.2}\"/>"
+        )?;
+    }
+    for b in boundaries(y) {
+        writeln!(
+            w,
+            "      <line x1=\"0\" y1=\"{b:.2}\" x2=\"{pw:.2}\" y2=\"{b:.2}\"/>"
+        )?;
+    }
+    writeln!(w, "    </g>")?;
+    // Alignments, one group per identity class, low identity first so
+    // high identity is drawn on top (the PNG keeps the highest).
+    let mut by_class: [Vec<&dottir_core::genome::PlotLine>; 4] = Default::default();
+    for l in lines {
+        let c = identity_class(dottir_core::genome::raster::identity_code(l.2)).unwrap_or(0);
+        by_class[c].push(l);
+    }
+    for (c, ls) in by_class.iter().enumerate() {
+        if ls.is_empty() {
+            continue;
+        }
+        let [r, g, b] = IDENTITY_COLOURS[c];
+        writeln!(
+            w,
+            "    <g stroke=\"#{r:02x}{g:02x}{b:02x}\" stroke-width=\"{line_width}\" \
+             stroke-linecap=\"round\">"
+        )?;
+        for ((x0, y0), (x1, y1), _) in ls {
+            writeln!(
+                w,
+                "      <line x1=\"{:.2}\" y1=\"{:.2}\" x2=\"{:.2}\" y2=\"{:.2}\"/>",
+                *x0 as f64 * scale,
+                *y0 as f64 * scale,
+                *x1 as f64 * scale,
+                *y1 as f64 * scale
+            )?;
+        }
+        writeln!(w, "    </g>")?;
+    }
+    writeln!(
+        w,
+        "    <rect width=\"{pw:.2}\" height=\"{ph:.2}\" fill=\"none\" stroke=\"{}\"/>",
+        grey(FRAME)
+    )?;
+    writeln!(w, "  </g>")?;
+    // Labels, skipped when they do not fit their span.
+    let spans = |l: &AxisLayout, recs: &[GenomeRecord]| -> Vec<(u64, u64, String)> {
+        let mut out: Vec<(u64, u64, String)> = Vec::new();
+        for (i, s) in l.segments.iter().enumerate() {
+            match s.mix {
+                None => out.push((s.start, s.start + s.len, label(l, recs, i))),
+                Some(m) if i == 0 || l.segments[i - 1].mix != Some(m) => {
+                    let r = &l.mixes[m as usize];
+                    let n = l.segments.iter().filter(|t| t.mix == Some(m)).count();
+                    out.push((r.start, r.end, format!("{n} small")));
+                }
+                Some(_) => {}
+            }
+        }
+        out
+    };
+    writeln!(
+        w,
+        "  <g font-family=\"monospace\" font-size=\"{SVG_FONT}\" fill=\"{}\">",
+        grey(INK)
+    )?;
+    for (a, b, text) in spans(x, x_recs) {
+        let (xa, xb) = (a as f64 * scale, b as f64 * scale);
+        if tw(&text) + 4.0 <= xb - xa {
+            writeln!(
+                w,
+                "    <text x=\"{:.2}\" y=\"{:.2}\" text-anchor=\"middle\">{}</text>",
+                left + (xa + xb) / 2.0,
+                top - 4.0,
+                xml_escape(&text)
+            )?;
+        }
+    }
+    for (a, b, text) in spans(y, y_recs) {
+        let (ya, yb) = (a as f64 * scale, b as f64 * scale);
+        if SVG_FONT + 2.0 <= yb - ya && tw(&text) <= MAX_LABEL_W as f64 {
+            writeln!(
+                w,
+                "    <text x=\"{:.2}\" y=\"{:.2}\" text-anchor=\"end\" \
+                 dominant-baseline=\"middle\">{}</text>",
+                left - 4.0,
+                top + (ya + yb) / 2.0,
+                xml_escape(&text)
+            )?;
+        }
+    }
+    writeln!(w, "  </g>")?;
+    writeln!(w, "</svg>")?;
+    Ok(())
+}
+
 /// Complement of an IUPAC nucleotide code, preserving case.
 pub(crate) fn complement(b: u8) -> u8 {
     let c = match b.to_ascii_uppercase() {
@@ -289,6 +473,46 @@ mod tests {
         // Record separator at x = 100 px.
         let o = ((top + 50) * w as usize + left + 100) * 3;
         assert_eq!(rgb[o], SEPARATOR);
+    }
+
+    #[test]
+    fn svg_draws_alignments_as_lines_by_identity_class() {
+        let recs = vec![
+            GenomeRecord {
+                name: "chr<1>".into(),
+                len: 1000,
+            },
+            GenomeRecord {
+                name: "chr2".into(),
+                len: 1000,
+            },
+        ];
+        let l = AxisLayout::new(&recs, None, &[], 0.0);
+        let aln = dottir_core::genome::Alignment {
+            q_rec: 1,
+            q_start: 0,
+            q_end: 500,
+            t_rec: 0,
+            t_start: 100,
+            t_end: 600,
+            reverse: true,
+            matches: 450,
+            block_len: 500,
+            mapq: 60,
+            primary: true,
+            divergence: None,
+        };
+        let lines = dottir_core::genome::plot_lines([&aln], &l, &l, false);
+        let mut out = Vec::new();
+        write_genome_svg(&mut out, &lines, 1.5, &l, &recs, &l, &recs, &[("k", "v")]).unwrap();
+        let svg = String::from_utf8(out).unwrap();
+        // 2000 bp on 1000 units: reverse, so target 600 at query 0.
+        assert!(svg.contains(r#"<line x1="300.00" y1="500.00" x2="50.00" y2="750.00"/>"#));
+        let [r, g, b] = IDENTITY_COLOURS[3];
+        assert!(svg.contains(&format!("stroke=\"#{r:02x}{g:02x}{b:02x}\"")));
+        assert!(svg.contains("chr&lt;1&gt;"));
+        assert!(svg.contains("<dottir:k>v</dottir:k>"));
+        assert!(svg.trim_end().ends_with("</svg>"));
     }
 
     #[test]

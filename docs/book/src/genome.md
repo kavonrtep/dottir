@@ -126,6 +126,7 @@ files, with either input sorted: see
 | `--sorted-query-out FILE.fa` | the vertical assembly in plot order, reverse-complemented where shown reversed (header ` dottir:revcomp`) |
 | `--unaligned-out PREFIX` | records without any alignment: `PREFIX.reference.fa`, `PREFIX.query.fa` |
 | `--paf-out FILE.paf` | the alignments drawn (after filters), query = vertical axis |
+| `--svg FILE.svg` | the plot as vectors: one line per alignment, coloured by identity class, record separators, mix blocks and names as text |
 
 ```sh
 # Order and orient a contig assembly along a reference.
@@ -149,7 +150,7 @@ background with a progress bar and *Cancel*; cached results open at once.
 
 The layout is the dotplot's: menu bar with the two inputs, controls on
 the right, pointer position in the status bar. *Fit* and *Back* (also in
-*View*, and *File → Save PNG*) act on the genome view. The right panel
+*View*, and *File → Save PNG / Save SVG*) act on the genome view. The right panel
 has the same filters as the CLI (applied instantly, no re-alignment),
 *Sort query along reference*, *Keep all copies of repeats* (re-runs the
 aligner, keeping the filters), line width, the identity legend and exports

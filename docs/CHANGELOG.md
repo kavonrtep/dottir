@@ -97,6 +97,11 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     where runs meet at chunk boundaries (coverage was double-counted there).
 * FASTA parsing records soft-masked (lowercase) runs
   (`FastaRecord::soft_masked`, `Sequence::soft_mask`).
+* **Genome-mode SVG** with vector lines: `--svg` in genome mode and
+  *File → Save SVG…* in the genome view (one line per drawn alignment,
+  coloured by identity class; separators, mix blocks and record names as
+  vectors and text). `dottir_core::genome::plot_lines` gives the PNG
+  raster and the SVG the same lines.
 * **PDF export** (spec §4.4.2, plan D3): *File → Save PDF…* and
   `dottir batch --pdf PATH` — one page with the plot and its axes, colours
   and HSPs as shown, metadata in the document information. Written

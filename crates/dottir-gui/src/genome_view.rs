@@ -1230,6 +1230,10 @@ impl GenomeView {
         self.export(Export::Png);
     }
 
+    pub fn export_svg(&mut self) {
+        self.export(Export::Svg);
+    }
+
     /// Menu-bar labels of the two inputs, as the dotplot shows them.
     pub fn input_labels(&self) -> (String, String) {
         let label = |a: &Assembly| {
@@ -1255,6 +1259,7 @@ impl GenomeView {
     fn export(&mut self, what: Export) {
         let (name, ext) = match what {
             Export::Png => ("genome.png", "png"),
+            Export::Svg => ("genome.svg", "svg"),
             Export::Association => ("assoc.tsv", "tsv"),
             Export::SortedQuery => ("query.sorted.fa", "fa"),
             Export::Paf => ("drawn.paf", "paf"),
@@ -1308,6 +1313,30 @@ impl GenomeView {
                     ],
                 )?;
             }
+            Export::Svg => {
+                let version = dottir_core::genome::GENOME_FORMAT_VERSION.to_string();
+                let lines = dottir_core::genome::plot_lines(
+                    a.drawn(&d.alns),
+                    &a.x,
+                    &a.y,
+                    d.self_comparison,
+                );
+                dottir_io::genome_export::write_genome_svg(
+                    create()?,
+                    &lines,
+                    1.5,
+                    &a.x,
+                    &d.x.records,
+                    &a.y,
+                    &d.y.records,
+                    &[
+                        ("dottir-engine", "genome"),
+                        ("dottir-version", env!("CARGO_PKG_VERSION")),
+                        ("dottir-genome-format", &version),
+                        ("dottir-alignments", &d.source),
+                    ],
+                )?;
+            }
             Export::Association => dottir_io::genome_export::write_association(
                 create()?,
                 &a.y,
@@ -1341,6 +1370,7 @@ impl GenomeView {
 #[derive(Clone, Copy)]
 enum Export {
     Png,
+    Svg,
     Association,
     SortedQuery,
     Paf,

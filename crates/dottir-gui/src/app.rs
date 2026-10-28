@@ -3112,13 +3112,12 @@ impl DottirApp {
                             _ => save_png(self),
                         }
                     }
-                    if ui
-                        .add_enabled(!genome, egui::Button::new("Save SVG…"))
-                        .on_disabled_hover_text("Not yet available for genome plots")
-                        .clicked()
-                    {
+                    if ui.button("Save SVG…").clicked() {
                         ui.close_menu();
-                        save_svg(self);
+                        match (genome, &mut self.genome) {
+                            (true, Some(g)) => g.export_svg(),
+                            _ => save_svg(self),
+                        }
                     }
                     if ui
                         .add_enabled(!genome, egui::Button::new("Save PDF…"))

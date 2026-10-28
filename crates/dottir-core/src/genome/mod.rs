@@ -33,5 +33,5 @@ pub use arrange::{arrange, Arranged};
 pub use filter::FilterConfig;
 pub use layout::{AxisLayout, AxisSegment};
 pub use order::{sort_query, QueryOrder};
-pub use raster::{rasterize, GenomeRaster, RasterConfig};
+pub use raster::{plot_lines, rasterize, GenomeRaster, PlotLine, RasterConfig};
 pub use records::{sort_by_chains, InputRecord, SortAxis};

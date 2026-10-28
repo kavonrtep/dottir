@@ -75,6 +75,58 @@ impl GenomeRaster {
     }
 }
 
+/// A line of the plot in axis coordinates (bp): from, to, identity.
+pub type PlotLine = ((u64, u64), (u64, u64), f64);
+
+/// The lines a genome plot draws for `alns` on the target (x) and query
+/// (y) layouts, in drawing order: each alignment, mirrored too for a
+/// self-comparison, then (self-comparison) the diagonal of each record.
+pub fn plot_lines<'a>(
+    alns: impl IntoIterator<Item = &'a Alignment>,
+    x: &AxisLayout,
+    y: &AxisLayout,
+    self_comparison: bool,
+) -> Vec<PlotLine> {
+    let mut out = Vec::new();
+    for a in alns {
+        let id = a.identity();
+        out.push((
+            (
+                x.to_axis(a.t_rec, a.t_at_q_start()),
+                y.to_axis(a.q_rec, a.q_start),
+            ),
+            (
+                x.to_axis(a.t_rec, a.t_at_q_end()),
+                y.to_axis(a.q_rec, a.q_end),
+            ),
+            id,
+        ));
+        if self_comparison {
+            out.push((
+                (
+                    x.to_axis(a.q_rec, a.q_start),
+                    y.to_axis(a.t_rec, a.t_at_q_start()),
+                ),
+                (
+                    x.to_axis(a.q_rec, a.q_end),
+                    y.to_axis(a.t_rec, a.t_at_q_end()),
+                ),
+                id,
+            ));
+        }
+    }
+    if self_comparison {
+        for s in &x.segments {
+            out.push((
+                (x.to_axis(s.rec, 0), y.to_axis(s.rec, 0)),
+                (x.to_axis(s.rec, s.len), y.to_axis(s.rec, s.len)),
+                1.0,
+            ));
+        }
+    }
+    out
+}
+
 /// Rasterise `alns` onto the target (x) and query (y) layouts.
 pub fn rasterize<'a>(
     alns: impl IntoIterator<Item = &'a Alignment>,
@@ -91,36 +143,8 @@ pub fn rasterize<'a>(
     };
     r.pixels = vec![0; r.width as usize * r.height as usize];
     let w = i64::from(cfg.line_width.max(1));
-    for a in alns {
-        let code = identity_code(a.identity());
-        let start = (
-            x.to_axis(a.t_rec, a.t_at_q_start()),
-            y.to_axis(a.q_rec, a.q_start),
-        );
-        let end = (
-            x.to_axis(a.t_rec, a.t_at_q_end()),
-            y.to_axis(a.q_rec, a.q_end),
-        );
-        r.line(start, end, w, code);
-        if cfg.self_comparison {
-            let start = (
-                x.to_axis(a.q_rec, a.q_start),
-                y.to_axis(a.t_rec, a.t_at_q_start()),
-            );
-            let end = (
-                x.to_axis(a.q_rec, a.q_end),
-                y.to_axis(a.t_rec, a.t_at_q_end()),
-            );
-            r.line(start, end, w, code);
-        }
-    }
-    if cfg.self_comparison {
-        let code = identity_code(1.0);
-        for s in &x.segments {
-            let (a, b) = (x.to_axis(s.rec, 0), x.to_axis(s.rec, s.len));
-            let (c, d) = (y.to_axis(s.rec, 0), y.to_axis(s.rec, s.len));
-            r.line((a, c), (b, d), w, code);
-        }
+    for (from, to, id) in plot_lines(alns, x, y, cfg.self_comparison) {
+        r.line(from, to, w, identity_code(id));
     }
     r
 }

@@ -473,6 +473,28 @@ pub fn run(args: &BatchArgs) -> Result<()> {
     )
     .with_context(|| format!("writing {}", output.display()))?;
     tracing::info!("wrote {}", output.display());
+    if let Some(svg) = &args.svg {
+        let lines = dottir_core::genome::plot_lines(
+            drawn.iter().copied(),
+            &x_layout,
+            &y_layout,
+            self_comparison,
+        );
+        let file =
+            std::fs::File::create(svg).with_context(|| format!("creating {}", svg.display()))?;
+        dottir_io::genome_export::write_genome_svg(
+            std::io::BufWriter::new(file),
+            &lines,
+            f64::from(g.line_width.max(1)) * 0.75,
+            &x_layout,
+            &x.records,
+            &y_layout,
+            &y.records,
+            &chunk_refs,
+        )
+        .with_context(|| format!("writing {}", svg.display()))?;
+        tracing::info!("wrote {} ({} lines)", svg.display(), lines.len());
+    }
 
     if !args.no_sidecar {
         let info = |a: &Assembly| -> Result<InputInfo> {
