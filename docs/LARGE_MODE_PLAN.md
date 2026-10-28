@@ -15,7 +15,7 @@ v0.5.x.
 | L1 | Seed index + query streaming + two-hit filter | ☑ |
 | L2 | Seeded exact scoring → dot layer, CLI `--engine large` | ☑ |
 | L3 | Repeat depth track, classes, occurrence cap | ☑ plus `seed` depth method (see ADR 0007) |
-| L4 | GUI integration + semantic zoom | ☑ except depth/capped tracks along the axes and GFF3 repeat floors in the GUI |
+| L4 | GUI integration + semantic zoom | ☑ including depth/capped tracks along the axes; GFF3 repeat floors are CLI-only (`--repeat-annot`), the GUI uses soft-masking |
 | L5 | Chaining layer + export | ☑ PAF, BEDPE, SVG chain lines |
 | L6 | Docs, book chapter, release | ☑ docs; release pending |
 

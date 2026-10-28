@@ -48,18 +48,16 @@ priority order:
 
 ## What's pending
 
-See [Architecture decisions](./adr.md) for context. The remaining
-spec items are tracked in `docs/IMPROVEMENTS_PLAN.md`:
+See [Architecture decisions](./adr.md) for context. Status is tracked in
+`docs/IMPROVEMENTS_PLAN.md`. Still open:
 
-* GFF3 / PAF annotation track overlays.
-* SVG / PDF / `.dot` exports.
-* BLASTX three-frame translation.
-* Recompute-on-zoom-settle for sub-pixel detail at high zoom (the
-  current GUI is a pure viewport transform over one computed
-  pixelmap).
-* Sub-dotter spawn from a rubber-band selection.
-* Alignment-view dock alongside the canvas.
-* Session save/load.
+* Pixelmap golden tests against the C dotter (Karlin values are already
+  pinned to it); they need a build of the GTK2 original.
+* Two known differences from the C dotter, recorded in ADR 0009: unknown
+  protein characters score 0 (C scores them as `*`), and an estimated
+  window below 3 is clamped to 3 (C substitutes 10).
+* GFF3 repeat annotations as repeat-class floors in the GUI (the CLI has
+  `--repeat-annot`; the GUI uses soft-masking).
 
 ## How to read this book
 

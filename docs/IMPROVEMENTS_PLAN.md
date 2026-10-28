@@ -12,7 +12,7 @@ polish + tests + docs.
 
 ## Progress
 
-Status as of 2026-05-17. Items checked here are merged on `master`.
+Status as of 2026-10-28. Items checked here are merged on `main` or on `feat/large-mode`.
 
 | ID | Item | Status | Commit |
 |----|------|--------|--------|
@@ -31,23 +31,23 @@ Status as of 2026-05-17. Items checked here are merged on `master`.
 | C8 | Light theme default | ☑ | 0de5f72 |
 | D1 | SVG export | ☑ | d83d44b |
 | D2 | `.dot` binary read/write | ☑ | b7b5992 |
-| D3 | PDF export | ☐ | — |
-| D4 | Selection-region export | ☐ | — |
-| D5 | Alignment-window export CLI flag | ☐ | — |
-| E1 | GFF3 loader (noodles-gff) | ☐ | — |
-| E2 | PAF loader (noodles-paf) | ☐ | — |
-| E3 | GUI track panel | ☐ | — |
-| E4 | HSP overlay modes | ☐ | — |
+| D3 | PDF export | ☑ | 6178d18 (raster page written directly; no `printpdf`) |
+| D4 | Selection-region export | ☑ | 96d8e01 (right-drag menu: BEDPE, open in new window) |
+| D5 | Alignment-window export CLI flag | ☑ | c2eff14 |
+| E1 | GFF3 loader | ☑ | 095bed4 (GFF3 + BED, ADR 0005) |
+| E2 | PAF loader | ☑ | own reader (no noodles PAF crate); HSP use in da0e1b0 |
+| E3 | GUI track panel | ☑ | 8c34a19 |
+| E4 | HSP overlay modes | ☑ | da0e1b0 |
 | F1 | BLASTX three-frame | ☑ | a5b7baa |
 | F2 | `-r`/`-v` rev-complement | ☑ | 5110f02 |
 | F3 | watson-only / crick-only | ☑ | 5110f02 |
 | F4 | Pixelmap goldens vs C dotter | ☐ | — *(ops; needs GTK2 build)* |
 | G1 | Inverted-repeat colour | ☑ | ffa6118 |
-| G2 | Sub-dotter spawn | ☐ | — |
-| H1 | Seq-name labels on axes (multi-record) | ☐ | — *(see phase H)* |
-| H2 | Alignment view at crosshair | ☐ | — *(see phase H)* |
+| G2 | Sub-dotter spawn | ☑ | 96d8e01 (`--query-region` / `--subject-region`) |
+| H1 | Seq-name labels on axes (multi-record) | ☑ | 3f49af2 |
+| H2 | Alignment view at crosshair | ☑ | 85bf6e5; BLASTX in 6c6b537 |
 
-Tests: 128 workspace tests passing (was 78 at start of these
+Tests: 350 workspace tests passing (was 78 at start of these
 improvements). MSRV 1.85.
 
 ### Gap-doc reconciliation
@@ -57,17 +57,17 @@ items shipped. Mapping its checklist to current state:
 
 | Gap-doc item | Status |
 |--------------|--------|
-| GFF3 annotation overlays | ☐ Pending (E1, E3 here) |
-| PAF / HSP overlays | ☐ Pending (E2, E4) |
-| Alignment view at crosshair | ☐ Pending — **addressed by H2 below** |
-| Sub-dotter spawning from selection | ☐ Pending (G2) |
+| GFF3 annotation overlays | ☑ Shipped — 095bed4, 8c34a19 (E1, E3) |
+| PAF / HSP overlays | ☑ Shipped — da0e1b0 (E2, E4) |
+| Alignment view at crosshair | ☑ Shipped — 85bf6e5 (H2) |
+| Sub-dotter spawning from selection | ☑ Shipped — 96d8e01 (G2) |
 | Session save/load | ☑ Shipped — 9362d0d (C5) |
 | SVG export | ☑ Shipped — d83d44b (D1) |
-| PDF export | ☐ Pending (D3) |
+| PDF export | ☑ Shipped — 6178d18 (D3) |
 | `.dot` export | ☑ Shipped — b7b5992 (D2) |
-| Selection-region export | ☐ Pending (D4) |
+| Selection-region export | ☑ Shipped — 96d8e01 (D4) |
 | BLASTX three-frame | ☑ Shipped — a5b7baa (F1) |
-| Breakline-aware multi-record viewing | ◐ Partial: breaklines (C3) and `record:position` crosshair coords (A3) shipped; **seq-name axis labels still missing — H1 below** |
+| Breakline-aware multi-record viewing | ☑ Shipped — breaklines (C3), `record:position` coords (A3), axis record names (H1) |
 | Inverted-repeat visualization parity | ☑ Initial — ffa6118 (G1); further controls per follow-up GUI requests |
 
 Each phase is independently shippable (commit per phase, mirroring how the
