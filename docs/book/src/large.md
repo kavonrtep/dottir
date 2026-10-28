@@ -151,7 +151,12 @@ under *Settings → Large sequences* and shown in the side panel.
 coordinates, strand, `tp:A:P`, `cm:i:` (anchors) and `s1:i:` (score). There
 is no CIGAR. By default only `unique` and `low` runs are chained
 (`--chain-max-class`), so repeats do not glue unrelated blocks together;
-`--chain-min-score` (300) drops short chains. For base-level alignments,
+`--chain-min-score` (300) drops short chains, and chains with fewer than 3
+anchors are dropped too. As in minimap2 (`--mask-level 0.5`), a chain is
+not reported when half or more of both its query and subject span lies
+inside a better chain of the same record pair and strand; this removes
+side chains along small indels of a block while keeping duplicated blocks
+elsewhere. For base-level alignments,
 run minimap2 and load its PAF.
 
 ## Parameters

@@ -47,6 +47,10 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     sequence length (depth pass); the 100 Mb plot step is about 2× faster
     at 94 % of the lit pixels. Scoring emits once per pixel crossing
     instead of per cell. Large pixelmap format version 2.
+  - Chains: minimap2-style masking (a chain mostly inside a better one on
+    both axes is dropped) and a 3-anchor minimum. Without them, seed
+    sampling fragmented synteny blocks into side chains (100 Mb pair:
+    46,064 chains; now 58, against 1,691 before sampling).
   - Coverage no longer saturates: 64-bit counters and an encoding reaching
     ~3.8 Gb per pixel (was ~63 kb), and cells are scored exactly once even
     where runs meet at chunk boundaries (coverage was double-counted there).

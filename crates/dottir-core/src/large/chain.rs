@@ -24,6 +24,15 @@ pub struct ChainConfig {
     pub gap_penalty: f64,
     /// Chains scoring below this are dropped.
     pub min_score: f64,
+    /// Chains with fewer two-hit anchors are dropped. With seed sampling
+    /// the two-hit distance grows, and a lone pair of chance hits can then
+    /// span enough bases to pass `min_score`.
+    pub min_anchors: u32,
+    /// A chain is dropped when at least this share of both its query and
+    /// its subject span lies inside a better chain of the same record pair
+    /// and strand (minimap2's `--mask-level`). Side chains along small
+    /// indels of a synteny block would otherwise be reported separately.
+    pub mask_level: f64,
 }
 
 impl Default for ChainConfig {
@@ -36,6 +45,8 @@ impl Default for ChainConfig {
             drift_penalty: 0.1,
             gap_penalty: 0.01,
             min_score: 300.0,
+            min_anchors: 3,
+            mask_level: 0.5,
         }
     }
 }
@@ -143,6 +154,7 @@ fn chain_group(group: &[&Segment], cfg: &ChainConfig, out: &mut Vec<Chain>) {
     let mut order: Vec<usize> = (0..n).collect();
     order.sort_by(|&x, &y| f[y].total_cmp(&f[x]).then(x.cmp(&y)));
     let mut used = vec![false; n];
+    let mut kept: Vec<(u32, u32, u32, u32)> = Vec::new();
     for &end in &order {
         if used[end] {
             continue;
@@ -164,20 +176,43 @@ fn chain_group(group: &[&Segment], cfg: &ChainConfig, out: &mut Vec<Chain>) {
             continue;
         }
         let segs: Vec<&Segment> = members.iter().map(|&m| group[m]).collect();
+        let n_anchors: u32 = segs.iter().map(|s| s.n_anchors).sum();
+        if n_anchors < cfg.min_anchors {
+            continue;
+        }
         let first = segs[0];
+        let q_start = segs.iter().map(|s| s.q_start).min().unwrap_or(0);
+        let q_end = segs.iter().map(|s| s.q_end).max().unwrap_or(0);
+        let s_start = segs.iter().map(|s| s.s_start).min().unwrap_or(0);
+        let s_end = segs.iter().map(|s| s.s_end).max().unwrap_or(0);
+        // Chains come out best first, so `kept` holds only better ones.
+        let masked = kept.iter().any(|&(q0, q1, s0, s1)| {
+            covered(q_start, q_end, q0, q1) >= cfg.mask_level
+                && covered(s_start, s_end, s0, s1) >= cfg.mask_level
+        });
+        if masked {
+            continue;
+        }
+        kept.push((q_start, q_end, s_start, s_end));
         out.push(Chain {
             reverse: first.reverse,
             q_rec: first.q_rec,
             s_rec: first.s_rec,
-            q_start: segs.iter().map(|s| s.q_start).min().unwrap_or(0),
-            q_end: segs.iter().map(|s| s.q_end).max().unwrap_or(0),
-            s_start: segs.iter().map(|s| s.s_start).min().unwrap_or(0),
-            s_end: segs.iter().map(|s| s.s_end).max().unwrap_or(0),
+            q_start,
+            q_end,
+            s_start,
+            s_end,
             score,
             n_segments: segs.len() as u32,
-            n_anchors: segs.iter().map(|s| s.n_anchors).sum(),
+            n_anchors,
         });
     }
+}
+
+/// Share of `[a0, a1)` inside `[b0, b1)`.
+fn covered(a0: u32, a1: u32, b0: u32, b1: u32) -> f64 {
+    let inter = a1.min(b1).saturating_sub(a0.max(b0));
+    inter as f64 / (a1 - a0).max(1) as f64
 }
 
 #[cfg(test)]
@@ -241,5 +276,62 @@ mod tests {
         let chains = chain_segments(&[a, b, c], &ChainConfig::default());
         assert_eq!(chains.len(), 2);
         assert!(chains.iter().all(|c| c.n_segments == 1));
+    }
+}
+
+#[cfg(test)]
+mod mask_tests {
+    use super::*;
+
+    fn seg(q: u32, s: u32, len: u32) -> Segment {
+        Segment {
+            reverse: false,
+            q_rec: 0,
+            s_rec: 0,
+            q_start: q,
+            q_end: q + len,
+            s_start: s,
+            s_end: s + len,
+            n_anchors: len / 20,
+            class: RepeatClass::Unique,
+        }
+    }
+
+    #[test]
+    fn side_chains_inside_a_block_are_masked() {
+        // A 3-segment block, plus a 700 bp run on a diagonal shifted by a
+        // small indel that overlaps the second segment too much to join it.
+        let segs = vec![
+            seg(0, 0, 2000),
+            seg(2050, 2060, 2000),
+            seg(4100, 4115, 2000),
+            seg(2400, 2390, 700),
+        ];
+        let chains = chain_segments(&segs, &ChainConfig::default());
+        assert_eq!(chains.len(), 1, "{chains:?}");
+        assert_eq!(chains[0].n_segments, 3);
+        // Without masking the side run is its own chain.
+        let cfg = ChainConfig {
+            mask_level: 1.01,
+            ..ChainConfig::default()
+        };
+        assert_eq!(chain_segments(&segs, &cfg).len(), 2);
+    }
+
+    #[test]
+    fn two_anchor_chains_are_dropped() {
+        let mut lone = seg(0, 0, 400);
+        lone.n_anchors = 2;
+        assert!(chain_segments(&[lone.clone()], &ChainConfig::default()).is_empty());
+        lone.n_anchors = 3;
+        assert_eq!(chain_segments(&[lone], &ChainConfig::default()).len(), 1);
+    }
+
+    #[test]
+    fn duplicated_blocks_elsewhere_are_kept() {
+        // Same query block matching two subject places (a segdup): only
+        // the query overlaps, so both chains survive.
+        let segs = vec![seg(0, 0, 3000), seg(0, 50_000, 3000)];
+        assert_eq!(chain_segments(&segs, &ChainConfig::default()).len(), 2);
     }
 }
