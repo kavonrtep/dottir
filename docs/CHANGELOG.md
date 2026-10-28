@@ -97,6 +97,9 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     where runs meet at chunk boundaries (coverage was double-counted there).
 * FASTA parsing records soft-masked (lowercase) runs
   (`FastaRecord::soft_masked`, `Sequence::soft_mask`).
+* **Chain exports** (plan L5): `--chains-out FILE.bedpe` writes BEDPE;
+  `--svg` draws the chains as vector lines; GUI *Save chains…* (PAF or
+  BEDPE) and chain lines in *Save SVG* when shown.
 * **Genome-mode SVG** with vector lines: `--svg` in genome mode and
   *File → Save SVG…* in the genome view (one line per drawn alignment,
   coloured by identity class; separators, mix blocks and record names as
@@ -131,6 +134,11 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 * New `DottirError::Cancelled` variant.
 
 ### Fixed
+
+* SVG exports at zoom > 1 labelled the axes in pixelmap pixels and dropped
+  the names of records beyond the pixel width; ticks and names are now in
+  residues (`write_svg` / `write_rgb_svg` take the coordinate size, like the
+  PNG writers).
 
 * **BLASTX window and pixel factor follow C dotter** (ADR 0009): the
   automatic estimate is the mean over the three reading frames, not frame

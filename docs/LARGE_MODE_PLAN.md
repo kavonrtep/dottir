@@ -16,7 +16,7 @@ v0.5.x.
 | L2 | Seeded exact scoring → dot layer, CLI `--engine large` | ☑ |
 | L3 | Repeat depth track, classes, occurrence cap | ☑ plus `seed` depth method (see ADR 0007) |
 | L4 | GUI integration + semantic zoom | ☑ except depth/capped tracks along the axes and GFF3 repeat floors in the GUI |
-| L5 | Chaining layer + export | ☑ PAF; BED-pair export and SVG chain lines not done |
+| L5 | Chaining layer + export | ☑ PAF, BEDPE, SVG chain lines |
 | L6 | Docs, book chapter, release | ☑ docs; release pending |
 
 Measured (8 cores, synthetic repeat-rich genomes, seed depth): 100 Mb

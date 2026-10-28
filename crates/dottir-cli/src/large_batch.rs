@@ -154,7 +154,8 @@ pub struct LargeArgs {
     #[arg(long, value_delimiter = ',', value_name = "TYPES")]
     pub repeat_types: Vec<String>,
 
-    /// Write synteny chains as PAF (no CIGAR) to this path.
+    /// Write synteny chains to this path: PAF (no CIGAR), or BEDPE when
+    /// the name ends in `.bedpe`. The chains are also drawn in `--svg`.
     #[arg(long, value_name = "PATH")]
     pub chains_out: Option<PathBuf>,
 
@@ -412,6 +413,8 @@ pub fn sort_records(
 pub struct LargeOutcome {
     pub plot: DotPlot,
     pub info: LargeParamsInfo,
+    /// Synteny chains (absolute residues), when `--chains-out` asked.
+    pub chains: Vec<dottir_core::large::Chain>,
 }
 
 /// Run the large engine with the resolved exact-engine `cfg` (zoom,
@@ -516,7 +519,7 @@ pub fn run(
     );
 
     if let Some(path) = &args.chains_out {
-        dottir_io::large::write_chains_paf(path, &lp.chains, query, subject)
+        dottir_io::large::write_chains(path, &lp.chains, query, subject)
             .with_context(|| format!("writing {}", path.display()))?;
         tracing::info!("wrote {} chains to {}", lp.chains.len(), path.display());
     }
@@ -559,6 +562,7 @@ pub fn run(
     Ok(LargeOutcome {
         plot: lp.to_dot_plot(shown, false, Shade::Score),
         info,
+        chains: lp.chains.clone(),
     })
 }
 

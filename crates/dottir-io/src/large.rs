@@ -9,6 +9,7 @@ use dottir_core::large::{Chain, DepthTrack};
 
 use crate::annotation::AnnotSet;
 use crate::sequence::Sequence;
+use crate::svg_export::SvgLine;
 
 /// Per-base depth floor: `value` on soft-masked bases, 0 elsewhere.
 /// `None` when the sequence has no soft-masked bases.
@@ -118,6 +119,95 @@ pub fn write_chains_paf<P: AsRef<Path>>(
     w.flush()
 }
 
+/// Chain colours: forward dark green, reverse magenta (as the canvas).
+pub const CHAIN_FORWARD: [u8; 3] = [0, 140, 60];
+pub const CHAIN_REVERSE: [u8; 3] = [190, 0, 190];
+
+/// Chains as vector lines in pixelmap pixels at `zoom` residues per
+/// pixel; `mirror` also draws them across the diagonal (self-comparison).
+pub fn chain_svg_lines(chains: &[Chain], zoom: usize, mirror: bool) -> Vec<SvgLine> {
+    let z = zoom.max(1) as f64;
+    let mut out = Vec::new();
+    for c in chains {
+        let (q0, q1) = (c.q_start as f64 / z, c.q_end as f64 / z);
+        let (s0, s1) = (c.s_start as f64 / z, c.s_end as f64 / z);
+        let (from, to, rgb) = if c.reverse {
+            ((q0, s1), (q1, s0), CHAIN_REVERSE)
+        } else {
+            ((q0, s0), (q1, s1), CHAIN_FORWARD)
+        };
+        out.push(SvgLine {
+            from,
+            to,
+            rgb,
+            width: 1.5,
+        });
+        if mirror {
+            out.push(SvgLine {
+                from: (from.1, from.0),
+                to: (to.1, to.0),
+                rgb,
+                width: 1.5,
+            });
+        }
+    }
+    out
+}
+
+/// Write chains as PAF, or as BEDPE when `path` ends in `.bedpe`.
+pub fn write_chains<P: AsRef<Path>>(
+    path: P,
+    chains: &[Chain],
+    query: &Sequence,
+    subject: &Sequence,
+) -> std::io::Result<()> {
+    let bedpe = path
+        .as_ref()
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("bedpe"));
+    if bedpe {
+        write_chains_bedpe(path, chains, query, subject)
+    } else {
+        write_chains_paf(path, chains, query, subject)
+    }
+}
+
+/// Write chains as BEDPE: query interval, subject interval (0-based,
+/// end-exclusive, source records), name `chainN`, score, and strands
+/// (`+` for the query, the chain's relative strand for the subject).
+pub fn write_chains_bedpe<P: AsRef<Path>>(
+    path: P,
+    chains: &[Chain],
+    query: &Sequence,
+    subject: &Sequence,
+) -> std::io::Result<()> {
+    let mut w = BufWriter::new(std::fs::File::create(path)?);
+    for (i, c) in chains.iter().enumerate() {
+        let (Some(qr), Some(sr)) = (
+            query.records.get(c.q_rec as usize),
+            subject.records.get(c.s_rec as usize),
+        ) else {
+            continue;
+        };
+        let (qn, _, qs, qe, qrev) = qr.source_interval(
+            c.q_start as usize - qr.range.start,
+            c.q_end as usize - qr.range.start,
+        );
+        let (sn, _, ss, se, srev) = sr.source_interval(
+            c.s_start as usize - sr.range.start,
+            c.s_end as usize - sr.range.start,
+        );
+        writeln!(
+            w,
+            "{qn}\t{qs}\t{qe}\t{sn}\t{ss}\t{se}\tchain{}\t{}\t+\t{}",
+            i + 1,
+            c.score.round() as i64,
+            if c.reverse ^ qrev ^ srev { '-' } else { '+' },
+        )?;
+    }
+    w.flush()
+}
+
 /// Write a depth track as bedGraph, averaged over `bin`-base bins (source-
 /// record coordinates; bins never span records).
 pub fn write_depth_bedgraph<P: AsRef<Path>>(
@@ -193,7 +283,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("dottir_sorted_export_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let paf = dir.join("c.paf");
-        write_chains_paf(&paf, &[chain], &q, &s).unwrap();
+        write_chains_paf(&paf, std::slice::from_ref(&chain), &q, &s).unwrap();
         let line = std::fs::read_to_string(&paf).unwrap();
         let f: Vec<&str> = line.trim().split('\t').collect();
         // Displayed 0..4 of the reversed query is source 6..10, minus strand.
@@ -201,6 +291,17 @@ mod tests {
             &f[..9],
             ["q", "10", "6", "10", "-", "s", "1000", "102", "106"]
         );
+        let bedpe = dir.join("c.bedpe");
+        write_chains(&bedpe, std::slice::from_ref(&chain), &q, &s).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&bedpe).unwrap(),
+            "q\t6\t10\ts\t102\t106\tchain1\t400\t+\t-\n"
+        );
+        let lines = chain_svg_lines(std::slice::from_ref(&chain), 2, true);
+        assert_eq!(lines.len(), 2);
+        assert_eq!((lines[0].from, lines[0].to), ((0.0, 1.0), (2.0, 3.0)));
+        assert_eq!((lines[1].from, lines[1].to), ((1.0, 0.0), (3.0, 2.0)));
+        assert_eq!(lines[0].rgb, CHAIN_FORWARD);
 
         let depth = DepthTrack {
             method: DepthMethod::None,

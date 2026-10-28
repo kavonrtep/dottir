@@ -47,6 +47,8 @@ pub fn write_svg<P: AsRef<Path>>(
     path: P,
     width: u32,
     height: u32,
+    coord_w: u32,
+    coord_h: u32,
     pixels: &[u8],
     margin: u32,
     axis_records_x: &[crate::text_overlay::AxisRecord],
@@ -72,12 +74,24 @@ pub fn write_svg<P: AsRef<Path>>(
         path.as_ref(),
         width,
         height,
+        coord_w,
+        coord_h,
         &png_buf,
         margin,
         axis_records_x,
         axis_records_y,
         metadata,
+        &[],
     )
+}
+
+/// A vector line over the plot, in pixelmap pixels (origin top left).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SvgLine {
+    pub from: (f64, f64),
+    pub to: (f64, f64),
+    pub rgb: [u8; 3],
+    pub width: f64,
 }
 
 /// As [`write_svg`] for display-ready RGB pixels (`width × height × 3`
@@ -87,11 +101,44 @@ pub fn write_rgb_svg<P: AsRef<Path>>(
     path: P,
     width: u32,
     height: u32,
+    coord_w: u32,
+    coord_h: u32,
     rgb: &[u8],
     margin: u32,
     axis_records_x: &[crate::text_overlay::AxisRecord],
     axis_records_y: &[crate::text_overlay::AxisRecord],
     metadata: &[(&str, &str)],
+) -> Result<(), SvgError> {
+    write_rgb_svg_with_lines(
+        path,
+        width,
+        height,
+        coord_w,
+        coord_h,
+        rgb,
+        margin,
+        axis_records_x,
+        axis_records_y,
+        metadata,
+        &[],
+    )
+}
+
+/// As [`write_rgb_svg`], with `lines` drawn as vectors over the image
+/// (e.g. synteny chains).
+#[allow(clippy::too_many_arguments)]
+pub fn write_rgb_svg_with_lines<P: AsRef<Path>>(
+    path: P,
+    width: u32,
+    height: u32,
+    coord_w: u32,
+    coord_h: u32,
+    rgb: &[u8],
+    margin: u32,
+    axis_records_x: &[crate::text_overlay::AxisRecord],
+    axis_records_y: &[crate::text_overlay::AxisRecord],
+    metadata: &[(&str, &str)],
+    lines: &[SvgLine],
 ) -> Result<(), SvgError> {
     if rgb.len() != (width as usize) * (height as usize) * 3 {
         return Err(SvgError::DimensionMismatch {
@@ -105,11 +152,14 @@ pub fn write_rgb_svg<P: AsRef<Path>>(
         path.as_ref(),
         width,
         height,
+        coord_w,
+        coord_h,
         &png_buf,
         margin,
         axis_records_x,
         axis_records_y,
         metadata,
+        lines,
     )
 }
 
@@ -137,11 +187,14 @@ fn write_svg_document(
     path: &Path,
     width: u32,
     height: u32,
+    coord_w: u32,
+    coord_h: u32,
     png_buf: &[u8],
     margin: u32,
     axis_records_x: &[crate::text_overlay::AxisRecord],
     axis_records_y: &[crate::text_overlay::AxisRecord],
     metadata: &[(&str, &str)],
+    lines: &[SvgLine],
 ) -> Result<(), SvgError> {
     let png_b64 = base64::engine::general_purpose::STANDARD.encode(png_buf);
 
@@ -184,6 +237,29 @@ fn write_svg_document(
          image-rendering=\"pixelated\" \
          xlink:href=\"data:image/png;base64,{png_b64}\"/>"
     )?;
+    if !lines.is_empty() {
+        // Clipped to the plot, like the canvas (the clip rectangle is in
+        // the group's translated space).
+        writeln!(
+            w,
+            "  <clipPath id=\"plot\"><rect width=\"{width}\" height=\"{height}\"/></clipPath>"
+        )?;
+        writeln!(
+            w,
+            "  <g clip-path=\"url(#plot)\" stroke-linecap=\"round\" \
+             transform=\"translate({margin} {margin})\">"
+        )?;
+        for l in lines {
+            let [r, g, b] = l.rgb;
+            writeln!(
+                w,
+                "    <line x1=\"{:.2}\" y1=\"{:.2}\" x2=\"{:.2}\" y2=\"{:.2}\" \
+                 stroke=\"#{r:02x}{g:02x}{b:02x}\" stroke-width=\"{}\"/>",
+                l.from.0, l.from.1, l.to.0, l.to.1, l.width
+            )?;
+        }
+        writeln!(w, "  </g>")?;
+    }
     // Axis box.
     writeln!(
         w,
@@ -194,15 +270,18 @@ fn write_svg_document(
     // Top-axis ticks. Minor (unlabeled, 3 px) at step/5; major
     // (labelled, 6 px) at step. Minor drawn first so major paints on
     // top.
-    let step_x = nice_step(width as u64);
+    // Ticks are in residues (`coord_*`), placed on the pixelmap's pixels.
+    let fx = width as f64 / coord_w.max(1) as f64;
+    let fy = height as f64 / coord_h.max(1) as f64;
+    let step_x = nice_step(coord_w as u64);
     let minor_step_x = step_x / 5;
     if minor_step_x >= 1 {
         let mut t = 0u64;
-        while t <= width as u64 {
-            let x = margin + t as u32;
+        while t <= coord_w as u64 {
+            let x = margin as f64 + t as f64 * fx;
             writeln!(
                 w,
-                "  <line x1=\"{x}\" y1=\"{}\" x2=\"{x}\" y2=\"{}\" stroke=\"#444\" stroke-width=\"1\"/>",
+                "  <line x1=\"{x:.2}\" y1=\"{}\" x2=\"{x:.2}\" y2=\"{}\" stroke=\"#444\" stroke-width=\"1\"/>",
                 margin,
                 margin.saturating_sub(3),
             )?;
@@ -210,17 +289,17 @@ fn write_svg_document(
         }
     }
     let mut t = 0u64;
-    while t <= width as u64 {
-        let x = margin + t as u32;
+    while t <= coord_w as u64 {
+        let x = margin as f64 + t as f64 * fx;
         writeln!(
             w,
-            "  <line x1=\"{x}\" y1=\"{}\" x2=\"{x}\" y2=\"{}\" stroke=\"#444\" stroke-width=\"1\"/>",
+            "  <line x1=\"{x:.2}\" y1=\"{}\" x2=\"{x:.2}\" y2=\"{}\" stroke=\"#444\" stroke-width=\"1\"/>",
             margin,
             margin.saturating_sub(6),
         )?;
         writeln!(
             w,
-            "  <text x=\"{x}\" y=\"{}\" text-anchor=\"middle\" \
+            "  <text x=\"{x:.2}\" y=\"{}\" text-anchor=\"middle\" \
              font-family=\"monospace\" font-size=\"11\" fill=\"#222\">{}</text>",
             margin.saturating_sub(10),
             format_tick(t, step_x),
@@ -228,15 +307,15 @@ fn write_svg_document(
         t += step_x;
     }
     // Left-axis ticks.
-    let step_y = nice_step(height as u64);
+    let step_y = nice_step(coord_h as u64);
     let minor_step_y = step_y / 5;
     if minor_step_y >= 1 {
         let mut t = 0u64;
-        while t <= height as u64 {
-            let y = margin + t as u32;
+        while t <= coord_h as u64 {
+            let y = margin as f64 + t as f64 * fy;
             writeln!(
                 w,
-                "  <line x1=\"{}\" y1=\"{y}\" x2=\"{}\" y2=\"{y}\" stroke=\"#444\" stroke-width=\"1\"/>",
+                "  <line x1=\"{}\" y1=\"{y:.2}\" x2=\"{}\" y2=\"{y:.2}\" stroke=\"#444\" stroke-width=\"1\"/>",
                 margin,
                 margin.saturating_sub(3),
             )?;
@@ -244,11 +323,11 @@ fn write_svg_document(
         }
     }
     let mut t = 0u64;
-    while t <= height as u64 {
-        let y = margin + t as u32;
+    while t <= coord_h as u64 {
+        let y = margin as f64 + t as f64 * fy;
         writeln!(
             w,
-            "  <line x1=\"{}\" y1=\"{y}\" x2=\"{}\" y2=\"{y}\" stroke=\"#444\" stroke-width=\"1\"/>",
+            "  <line x1=\"{}\" y1=\"{y:.2}\" x2=\"{}\" y2=\"{y:.2}\" stroke=\"#444\" stroke-width=\"1\"/>",
             margin,
             margin.saturating_sub(6),
         )?;
@@ -257,7 +336,7 @@ fn write_svg_document(
             "  <text x=\"{}\" y=\"{}\" text-anchor=\"end\" \
              font-family=\"monospace\" font-size=\"11\" fill=\"#222\">{}</text>",
             margin.saturating_sub(10),
-            y + 4,
+            y + 4.0,
             format_tick(t, step_y),
         )?;
         t += step_y;
@@ -267,8 +346,8 @@ fn write_svg_document(
     // the residue tick labels (margin - 28). Left axis names sit
     // along the left edge of the SVG, rotated 0° but right-aligned
     // to just before the tick labels.
-    let coord_w = width.max(1) as f64;
-    let coord_h = height.max(1) as f64;
+    let coord_w = coord_w.max(1) as f64;
+    let coord_h = coord_h.max(1) as f64;
     for r in axis_records_x {
         if r.end <= r.start || r.start as f64 >= coord_w {
             continue;
@@ -360,7 +439,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("a.svg");
         let rgb: Vec<u8> = (0..6).flat_map(|_| [220_u8, 30, 220]).collect();
-        write_rgb_svg(&p, 3, 2, &rgb, 50, &[], &[], &[("shading", "score")]).unwrap();
+        write_rgb_svg(&p, 3, 2, 3, 2, &rgb, 50, &[], &[], &[("shading", "score")]).unwrap();
         let text = std::fs::read_to_string(&p).unwrap();
         let b64 = text
             .split("base64,")
@@ -377,7 +456,7 @@ mod tests {
             .unwrap();
         assert_eq!(info.info().color_type, png::ColorType::Rgb);
         assert!(text.contains("<dottir:shading>score</dottir:shading>"));
-        assert!(write_rgb_svg(&p, 3, 3, &rgb, 50, &[], &[], &[]).is_err());
+        assert!(write_rgb_svg(&p, 3, 3, 3, 3, &rgb, 50, &[], &[], &[]).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -388,6 +467,8 @@ mod tests {
         let pixels: Vec<u8> = (0..255_u8).collect();
         write_svg(
             &path,
+            17,
+            15,
             17,
             15,
             &pixels,
@@ -407,10 +488,46 @@ mod tests {
     }
 
     #[test]
+    fn ticks_and_record_names_are_in_residues() {
+        // Review: at zoom 10 the axes showed pixels, and records past
+        // the pixel width were dropped.
+        let path =
+            std::env::temp_dir().join(format!("dottir_svg_coord_{}.svg", std::process::id()));
+        let recs = [
+            crate::text_overlay::AxisRecord::new("first", 0, 500),
+            crate::text_overlay::AxisRecord::new("second", 500, 1000),
+        ];
+        write_svg(
+            &path,
+            100,
+            100,
+            1000,
+            1000,
+            &[0; 10_000],
+            40,
+            &recs,
+            &recs,
+            &[],
+            true,
+        )
+        .unwrap();
+        let s = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            s.contains(">1.0k</text>"),
+            "last major tick labelled in residues"
+        );
+        assert!(s.contains(">second</text>"));
+        // Tick 400 sits at pixel 40 (+ margin).
+        assert!(s.contains(r#"<text x="80.00""#));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
     fn dimension_mismatch_errors() {
         let dir = std::env::temp_dir();
         let path = dir.join("dottir_svg_test_mismatch.svg");
-        let err = write_svg(&path, 10, 10, &[0_u8; 50], 30, &[], &[], &[], true).unwrap_err();
+        let err =
+            write_svg(&path, 10, 10, 10, 10, &[0_u8; 50], 30, &[], &[], &[], true).unwrap_err();
         assert!(matches!(err, SvgError::DimensionMismatch { .. }));
     }
 

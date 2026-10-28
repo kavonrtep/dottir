@@ -407,7 +407,7 @@ fn run_batch(args: BatchArgs) -> Result<()> {
         args.window,
         zoom
     );
-    let (plot, large_info) = if use_large {
+    let (plot, large_info, chains) = if use_large {
         let out = large_batch::run(
             &args.large,
             &cfg,
@@ -415,11 +415,11 @@ fn run_batch(args: BatchArgs) -> Result<()> {
             &subject_input,
             is_self_comparison,
         )?;
-        (out.plot, Some(out.info))
+        (out.plot, Some(out.info), out.chains)
     } else {
         let plot = compute_dotplot(query.bytes(), subject.bytes(), &cfg)
             .context("compute_dotplot failed")?;
-        (plot, None)
+        (plot, None, Vec::new())
     };
     tracing::info!(
         "wrote pixelmap {}x{} ({} bytes)",
@@ -668,11 +668,30 @@ fn run_batch(args: BatchArgs) -> Result<()> {
     tracing::info!("wrote {}", output.display());
 
     if let Some(svg_path) = &args.svg {
-        match &hsp_rgb {
+        // Chains as vectors over the image, mirrored for a
+        // self-comparison like the raster.
+        let chain_lines = dottir_io::large::chain_svg_lines(
+            &chains,
+            plot.params.zoom.max(1) as usize,
+            is_self_comparison,
+        );
+        let rgb = match &hsp_rgb {
+            Some(rgb) => Some(rgb.clone()),
+            None if !chain_lines.is_empty() => Some(
+                render_pixels
+                    .iter()
+                    .flat_map(|&v| [255 - v, 255 - v, 255 - v])
+                    .collect(),
+            ),
+            None => None,
+        };
+        match &rgb {
             None => dottir_io::svg_export::write_svg(
                 svg_path,
                 render_w,
                 render_h,
+                query.len() as u32,
+                subject.len() as u32,
                 &render_pixels,
                 png_margin,
                 &axis_records_x,
@@ -680,15 +699,18 @@ fn run_batch(args: BatchArgs) -> Result<()> {
                 &text_chunk_refs,
                 true, // raw kernel output → invert for "white bg, dark hits"
             ),
-            Some(rgb) => dottir_io::svg_export::write_rgb_svg(
+            Some(rgb) => dottir_io::svg_export::write_rgb_svg_with_lines(
                 svg_path,
                 render_w,
                 render_h,
+                query.len() as u32,
+                subject.len() as u32,
                 rgb,
                 png_margin,
                 &axis_records_x,
                 &axis_records_y,
                 &text_chunk_refs,
+                &chain_lines,
             ),
         }
         .context("SVG export failed")?;

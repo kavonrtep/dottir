@@ -159,6 +159,14 @@ side chains along small indels of a block while keeping duplicated blocks
 elsewhere. For base-level alignments,
 run minimap2 and load its PAF.
 
+A name ending in `.bedpe` writes BEDPE instead: query interval, subject
+interval (0-based, end-exclusive, source records), `chainN`, score, `+`
+and the chain's relative strand. With `--svg` the chains are also drawn
+over the image as vector lines (forward green, reverse magenta, mirrored
+for a self-comparison). In the GUI, *Save chains…* under *Show synteny
+chains* writes the chains above the min-score slider in either format,
+and *Save SVG* includes the chains when they are shown.
+
 ## Sorting records
 
 Contigs, scaffolds or BAC clones in file order make a scattered plot.

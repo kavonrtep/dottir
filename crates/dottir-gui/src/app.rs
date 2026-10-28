@@ -1792,6 +1792,67 @@ impl DottirApp {
         }
     }
 
+    /// Synteny chains as shown (toggle, min score, mirror), as SVG lines
+    /// in the current slice's pixelmap pixels.
+    fn shown_chain_lines(&self) -> Vec<dottir_io::svg_export::SvgLine> {
+        let (true, Some(lp), Some(plot)) = (
+            self.settings.large.show_chains,
+            &self.large_plot,
+            &self.plot,
+        ) else {
+            return Vec::new();
+        };
+        let min = self.settings.large.chain_min_score as f64;
+        let chains: Vec<_> = lp
+            .chains
+            .iter()
+            .filter(|c| c.score >= min)
+            .cloned()
+            .collect();
+        let z = plot.params.zoom.max(1) as f64;
+        let (q_off, s_off) = self
+            .current_slice
+            .as_ref()
+            .map_or((0, 0), |sl| (sl.q_range.start, sl.s_range.start));
+        let mirror = lp.self_comparison && lp.origin_q == lp.origin_s;
+        dottir_io::large::chain_svg_lines(&chains, z as usize, mirror)
+            .into_iter()
+            .map(|mut l| {
+                for p in [&mut l.from, &mut l.to] {
+                    p.0 -= q_off as f64 / z;
+                    p.1 -= s_off as f64 / z;
+                }
+                l
+            })
+            .collect()
+    }
+
+    /// Write the synteny chains (PAF, or BEDPE by extension).
+    fn save_chains(&mut self) {
+        let (Some(lp), Some(q), Some(s)) = (&self.large_plot, &self.query, &self.subject) else {
+            return;
+        };
+        let Some(path) = rfd::FileDialog::new()
+            .set_title("Save synteny chains")
+            .set_file_name("chains.paf")
+            .add_filter("PAF", &["paf"])
+            .add_filter("BEDPE", &["bedpe"])
+            .save_file()
+        else {
+            return;
+        };
+        let min = self.settings.large.chain_min_score as f64;
+        let chains: Vec<_> = lp
+            .chains
+            .iter()
+            .filter(|c| c.score >= min)
+            .cloned()
+            .collect();
+        if let Err(e) = dottir_io::large::write_chains(&path, &chains, q, s) {
+            self.last_error = Some(format!("writing {}: {e}", path.display()));
+        }
+    }
+
     /// Spawn another dottir-gui on the selected regions of the inputs.
     fn open_selection_window(&self, sel: &Selection) -> Result<(), String> {
         let (Some(q), Some(s)) = (&self.query, &self.subject) else {
@@ -4347,12 +4408,20 @@ impl DottirApp {
         ui.add_space(4.0);
         ui.checkbox(&mut ls.show_chains, "Show synteny chains")
             .on_hover_text("Co-linear chains of unique/low-copy runs (not alignments).");
+        let mut save_chains = false;
         if ls.show_chains {
             ui.add(
                 Slider::new(&mut ls.chain_min_score, 100.0..=100_000.0)
                     .logarithmic(true)
                     .text("min score"),
             );
+            save_chains = ui
+                .small_button("Save chains…")
+                .on_hover_text(
+                    "The chains above the min score as PAF, or BEDPE (.bedpe), in \
+                     source-record coordinates",
+                )
+                .clicked();
         }
         if let Some(lp) = &self.large_plot {
             let shown = lp
@@ -4389,6 +4458,9 @@ impl DottirApp {
         }
         if retexture {
             self.texture_dirty = true;
+        }
+        if save_chains {
+            self.save_chains();
         }
     }
 
@@ -6642,6 +6714,7 @@ fn save_svg(app: &mut DottirApp) {
     };
     let shown = app.display_rgba(true);
     let metadata = app.export_metadata();
+    let chain_lines = app.shown_chain_lines();
     let pick = rfd::FileDialog::new()
         .set_title("Save SVG")
         .add_filter("SVG", &["svg"])
@@ -6685,13 +6758,41 @@ fn save_svg(app: &mut DottirApp) {
             .unwrap_or_default();
         let meta: Vec<(&str, &str)> = metadata.iter().map(|(k, v)| (*k, v.as_str())).collect();
         let (w, h) = (plot.width, plot.height);
+        let qlen = app.query.as_ref().map_or(w, |q| q.len() as u32);
+        let slen = app.subject.as_ref().map_or(h, |s| s.len() as u32);
         let written = match &pixels {
+            ExportPixels::Grey(g) if chain_lines.is_empty() => dottir_io::svg_export::write_svg(
+                &path, w, h, qlen, slen, g, 50, &recs_x, &recs_y, &meta, false,
+            ),
             ExportPixels::Grey(g) => {
-                dottir_io::svg_export::write_svg(&path, w, h, g, 50, &recs_x, &recs_y, &meta, false)
+                let rgb: Vec<u8> = g.iter().flat_map(|&v| [v, v, v]).collect();
+                dottir_io::svg_export::write_rgb_svg_with_lines(
+                    &path,
+                    w,
+                    h,
+                    qlen,
+                    slen,
+                    &rgb,
+                    50,
+                    &recs_x,
+                    &recs_y,
+                    &meta,
+                    &chain_lines,
+                )
             }
-            ExportPixels::Rgb(c) => {
-                dottir_io::svg_export::write_rgb_svg(&path, w, h, c, 50, &recs_x, &recs_y, &meta)
-            }
+            ExportPixels::Rgb(c) => dottir_io::svg_export::write_rgb_svg_with_lines(
+                &path,
+                w,
+                h,
+                qlen,
+                slen,
+                c,
+                50,
+                &recs_x,
+                &recs_y,
+                &meta,
+                &chain_lines,
+            ),
         };
         match written {
             Ok(()) => {}
