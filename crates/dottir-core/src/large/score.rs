@@ -7,7 +7,8 @@
 //! rule and scaling, so every pixel written here is `<=` the exact engine's
 //! pixel and equal to the exact value of each scored cell.
 
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::ops::Range;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::depth::{ClassThresholds, RepeatClass};
 use super::hits::Run;
@@ -64,46 +65,117 @@ pub(crate) struct Canvas<'a> {
     pub fwd: &'a [PixelView<'a>],
     pub rev: &'a [PixelView<'a>],
     /// Coverage counters `[strand * COUNT + class][pixel]`, when requested.
-    pub coverage: Option<&'a [Vec<AtomicU32>]>,
+    pub coverage: Option<&'a [Vec<AtomicU64>]>,
 }
 
-/// Batches coverage increments: consecutive cells of a diagonal usually
-/// land in the same pixel, so the atomic add happens once per pixel
-/// crossing rather than once per cell.
-struct CovAcc<'a> {
-    buf: Option<&'a [Vec<AtomicU32>]>,
-    channel: usize,
-    pixel: usize,
-    n: u32,
+/// Collects the cells of one diagonal pixel by pixel. Consecutive cells
+/// of a diagonal mostly fall in the same pixel, and within one pixel the
+/// anti-diagonal rule gives the same answer for every cell of the diagonal
+/// (forward: `s_local - q_local` is constant; reverse: `s_local + q_local`
+/// is). So per pixel crossing the accumulator keeps a running max score and
+/// a cell count per class, and touches the shared pixel arrays only when
+/// the diagonal leaves the pixel. The result is identical to emitting
+/// every cell, because the scaling is monotone.
+struct PixelAcc<'c, 'a> {
+    ctx: &'c ScoreCtx<'c>,
+    canvas: &'c Canvas<'a>,
+    reverse: bool,
+    /// Base ranges of the current pixel; empty until the first cell.
+    q_px: Range<usize>,
+    s_px: Range<usize>,
+    /// Canvas pixel index of the current pixel, `None` when off canvas.
+    pixel: Option<(usize, usize)>,
+    keep: bool,
+    best: [i32; RepeatClass::COUNT],
+    count: [u64; RepeatClass::COUNT],
 }
 
-impl<'a> CovAcc<'a> {
-    fn new(buf: Option<&'a [Vec<AtomicU32>]>) -> Self {
+impl<'c, 'a> PixelAcc<'c, 'a> {
+    fn new(ctx: &'c ScoreCtx<'c>, canvas: &'c Canvas<'a>, reverse: bool) -> Self {
         Self {
-            buf,
-            channel: 0,
-            pixel: 0,
-            n: 0,
+            ctx,
+            canvas,
+            reverse,
+            q_px: 0..0,
+            s_px: 0..0,
+            pixel: None,
+            keep: false,
+            best: [0; RepeatClass::COUNT],
+            count: [0; RepeatClass::COUNT],
         }
     }
 
+    /// A cell with a positive window `score` at sequence position (qi, si).
     #[inline]
-    fn add(&mut self, channel: usize, pixel: usize) {
-        if self.buf.is_none() {
+    fn cell(&mut self, score: i32, qi: usize, si: usize) {
+        let win2 = self.ctx.window / 2;
+        let qc = qi - win2;
+        let sc = if self.reverse { si + win2 } else { si - win2 };
+        if !(self.q_px.contains(&qc) && self.s_px.contains(&sc)) {
+            self.flush();
+            self.enter(qc, sc);
+        }
+        if self.pixel.is_none() {
             return;
         }
-        if self.n > 0 && (channel, pixel) == (self.channel, self.pixel) {
-            self.n += 1;
-            return;
-        }
-        self.flush();
-        (self.channel, self.pixel, self.n) = (channel, pixel, 1);
+        let c = self
+            .ctx
+            .thresholds
+            .classify(self.ctx.q_depth[qc].max(self.ctx.s_depth[sc]))
+            .index();
+        self.best[c] = self.best[c].max(score);
+        self.count[c] += 1;
     }
 
+    /// Start the pixel containing (qc, sc) — the mirror of
+    /// `sliding::emit_pixel`, offset by the canvas origin.
+    fn enter(&mut self, qc: usize, sc: usize) {
+        let canvas = self.canvas;
+        let zoom = canvas.zoom;
+        let (x_abs, y_abs) = (qc / zoom, sc / zoom);
+        self.q_px = x_abs * zoom..(x_abs + 1) * zoom;
+        self.s_px = y_abs * zoom..(y_abs + 1) * zoom;
+        self.pixel = None;
+        // Canvas origins are multiples of the zoom.
+        if qc < canvas.q0 || sc < canvas.s0 {
+            return;
+        }
+        let x = x_abs - canvas.q0 / zoom;
+        let y = y_abs - canvas.s0 / zoom;
+        if x >= canvas.width || y >= canvas.height {
+            return;
+        }
+        let q_local = (qc - x_abs * zoom) as u32;
+        let s_local = (sc - y_abs * zoom) as u32;
+        self.keep = keep_dot(zoom as u32, q_local, s_local, self.reverse);
+        self.pixel = Some((x, y));
+    }
+
+    /// Write the current pixel. Coverage counts every positive cell,
+    /// including those the anti-diagonal rule drops from the score
+    /// channels: it measures similarity, not line drawing.
     fn flush(&mut self) {
-        if let (Some(buf), true) = (self.buf, self.n > 0) {
-            buf[self.channel][self.pixel].fetch_add(self.n, Ordering::Relaxed);
-            self.n = 0;
+        let Some((x, y)) = self.pixel else {
+            return;
+        };
+        let canvas = self.canvas;
+        let views = if self.reverse { canvas.rev } else { canvas.fwd };
+        for c in 0..RepeatClass::COUNT {
+            if self.count[c] == 0 {
+                continue;
+            }
+            if let Some(cov) = canvas.coverage {
+                cov[self.reverse as usize * RepeatClass::COUNT + c][y * canvas.width + x]
+                    .fetch_add(self.count[c], Ordering::Relaxed);
+            }
+            if self.keep {
+                let scaled = (self.best[c] as i64 * self.ctx.pixel_fac as i64
+                    / self.ctx.window as i64)
+                    .clamp(0, 255) as u8;
+                views[c].max_merge(x, y, scaled);
+            }
+            self.best[c] = 0;
+            self.count[c] = 0;
         }
     }
 }
@@ -122,10 +194,18 @@ pub(crate) struct ScoreCtx<'a> {
     pub lower_only: bool,
 }
 
-/// Score one run; returns the number of cells scored. The cell interval
-/// covers every window overlapping an anchor seed, `extend` beyond, and
-/// through to any fill partner in a neighbouring chunk.
-pub(crate) fn score_run(ctx: &ScoreCtx<'_>, canvas: &Canvas<'_>, run: &Run) -> u64 {
+/// Score the cells covered by `runs` whose query position lies in `own`;
+/// returns the number of cells scored. A run covers every window that
+/// overlaps one of its anchor seeds, plus `extend` cells beyond. Runs on the
+/// same diagonal are merged first, so each cell is scored once; ownership by
+/// query position makes the result independent of how the query is cut into
+/// chunks, provided `runs` holds every anchor within reach of `own`.
+pub(crate) fn score_owned(
+    ctx: &ScoreCtx<'_>,
+    canvas: &Canvas<'_>,
+    runs: &[Run],
+    own: &Range<usize>,
+) -> u64 {
     let w = ctx.window;
     let qlen = ctx.q_enc.len();
     let slen = ctx.s_enc.len();
@@ -133,25 +213,44 @@ pub(crate) fn score_run(ctx: &ScoreCtx<'_>, canvas: &Canvas<'_>, run: &Run) -> u
         return 0;
     }
     let win2 = w / 2;
-    let mut lo = (run.first_p as usize).saturating_sub(ctx.extend);
-    let mut hi = run.last_p as usize + ctx.span + w - 2 + ctx.extend;
-    if let Some(l) = run.lo_fill {
-        lo = lo.min(l as usize);
-    }
-    if let Some(h) = run.hi_fill {
-        hi = hi.max(h as usize);
-    }
     // Cells whose pixel column can land on the canvas.
-    lo = lo.max(canvas.q0 + win2).max(w);
-    hi = hi
-        .min(qlen - 1)
-        .min(canvas.q0 + canvas.width * canvas.zoom + win2);
-
-    if run.reverse {
-        score_reverse(ctx, canvas, run.diag as i64, lo, hi, slen)
-    } else {
-        score_forward(ctx, canvas, run.diag as i64 - qlen as i64, lo, hi, slen)
+    let q_lo = own.start.max(canvas.q0 + win2).max(w);
+    let q_hi = (own.end.min(qlen) - 1).min(canvas.q0 + canvas.width * canvas.zoom + win2);
+    if q_lo > q_hi {
+        return 0;
     }
+    let mut cells = 0u64;
+    let mut score = |reverse: bool, diag: u64, lo: usize, hi: usize| {
+        let (lo, hi) = (lo.max(q_lo), hi.min(q_hi));
+        if lo > hi {
+            return;
+        }
+        cells += if reverse {
+            score_reverse(ctx, canvas, diag as i64, lo, hi, slen)
+        } else {
+            score_forward(ctx, canvas, diag as i64 - qlen as i64, lo, hi, slen)
+        };
+    };
+    let mut cur: Option<(bool, u64, usize, usize)> = None;
+    for run in runs {
+        let lo = (run.first_p as usize).saturating_sub(ctx.extend);
+        let hi = run.last_p as usize + ctx.span + w - 2 + ctx.extend;
+        match &mut cur {
+            Some((r, d, _, c_hi)) if *r == run.reverse && *d == run.diag && lo <= *c_hi + 1 => {
+                *c_hi = (*c_hi).max(hi);
+            }
+            _ => {
+                if let Some((r, d, l, h)) = cur.take() {
+                    score(r, d, l, h);
+                }
+                cur = Some((run.reverse, run.diag, lo, hi));
+            }
+        }
+    }
+    if let Some((r, d, l, h)) = cur {
+        score(r, d, l, h);
+    }
+    cells
 }
 
 fn score_forward(
@@ -186,16 +285,15 @@ fn score_forward(
 
     let mut sum: i32 = (0..w).map(|k| t.fwd(s[at(lo) - k], q[lo - k])).sum();
     let mut cells = 0u64;
-    let mut cov = CovAcc::new(canvas.coverage);
+    let mut acc = PixelAcc::new(ctx, canvas, false);
     let mut qi = lo;
     loop {
-        let si = at(qi);
         if sum > 0 {
-            emit(ctx, canvas, &mut cov, sum, qi, si, false);
+            acc.cell(sum, qi, at(qi));
         }
         cells += 1;
         if qi == hi {
-            cov.flush();
+            acc.flush();
             break;
         }
         qi += 1;
@@ -245,16 +343,15 @@ fn score_reverse(
 
     let mut sum: i32 = (0..w).map(|k| t.rev(s[at(lo) + k], q[lo - k])).sum();
     let mut cells = 0u64;
-    let mut cov = CovAcc::new(canvas.coverage);
+    let mut acc = PixelAcc::new(ctx, canvas, true);
     let mut qi = lo;
     loop {
-        let si = at(qi);
         if sum > 0 {
-            emit(ctx, canvas, &mut cov, sum, qi, si, true);
+            acc.cell(sum, qi, at(qi));
         }
         cells += 1;
         if qi == hi {
-            cov.flush();
+            acc.flush();
             break;
         }
         qi += 1;
@@ -262,49 +359,4 @@ fn score_reverse(
         sum += t.rev(s[si], q[qi]) - t.rev(s[si + w], q[qi - w]);
     }
     cells
-}
-
-/// Mirror of `sliding::emit_pixel`, offset by the canvas origin and routed
-/// to the class channel of the cell. Coverage counts every positive cell
-/// of the pixel, including those the anti-diagonal rule drops from the
-/// score channels: it measures similarity, not line drawing.
-#[inline]
-fn emit(
-    ctx: &ScoreCtx<'_>,
-    canvas: &Canvas<'_>,
-    cov: &mut CovAcc<'_>,
-    score: i32,
-    qi: usize,
-    si: usize,
-    reverse: bool,
-) {
-    let win2 = ctx.window / 2;
-    let zoom = canvas.zoom;
-    let qc = qi - win2;
-    let sc = if reverse { si + win2 } else { si - win2 };
-    if qc < canvas.q0 || sc < canvas.s0 {
-        return;
-    }
-    let x_abs = qc / zoom;
-    let y_abs = sc / zoom;
-    let x = x_abs - canvas.q0 / zoom;
-    let y = y_abs - canvas.s0 / zoom;
-    if x >= canvas.width || y >= canvas.height {
-        return;
-    }
-    let class: RepeatClass = ctx
-        .thresholds
-        .classify(ctx.q_depth[qc].max(ctx.s_depth[sc]));
-    cov.add(
-        reverse as usize * RepeatClass::COUNT + class.index(),
-        y * canvas.width + x,
-    );
-    let q_local = (qc - x_abs * zoom) as u32;
-    let s_local = (sc - y_abs * zoom) as u32;
-    if !keep_dot(zoom as u32, q_local, s_local, reverse) {
-        return;
-    }
-    let scaled = (score as i64 * ctx.pixel_fac as i64 / ctx.window as i64).clamp(0, 255) as u8;
-    let views = if reverse { canvas.rev } else { canvas.fwd };
-    views[class.index()].max_merge(x, y, scaled);
 }

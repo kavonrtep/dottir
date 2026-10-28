@@ -89,6 +89,13 @@ minimizers on their own.
   above 10¹¹ cells), so very large BLASTN inputs no longer default to the
   exact engine. On the benchmark machine a 1 Mb self-plot takes ~10 min
   with the exact engine and 0.5 s with the large engine.
+* Seed sampling (added after acceptance, format version 2): at overview
+  zoom only seeds whose key hash falls in a 1-in-N subset are looked up,
+  with N = zoom / 6000 (≤ 32) for the plot and length / 25 Mb (≤ 16) for
+  the seed depth pass. Key-based sampling keeps both copies of a match
+  consistent without coordination, unlike position-based thinning. Cells
+  are scored by query-position ownership over merged run intervals, which
+  makes per-pixel coverage independent of chunking.
 * Exports (PNG tEXt, params sidecar) MUST record `mode = large` and the
   seed/filter/class parameters so a figure is reproducible.
 

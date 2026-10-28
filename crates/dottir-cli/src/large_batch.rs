@@ -73,6 +73,16 @@ pub struct LargeArgs {
     #[arg(long, value_name = "N", default_value_t = 1000)]
     pub max_occ: u32,
 
+    /// Look up one seed in N (by seed hash) for the plot; the two-hit
+    /// distance scales by N. `auto` = zoom / 6000, capped at 32.
+    #[arg(long, value_name = "N|auto", default_value = "auto", value_parser = parse_rate)]
+    pub seed_sample: Rate,
+
+    /// Seed sampling for `--depth seed`. `auto` = sequence length / 25 Mb,
+    /// capped at 16.
+    #[arg(long, value_name = "N|auto", default_value = "auto", value_parser = parse_rate)]
+    pub depth_sample: Rate,
+
     /// Cells scored beyond each anchored run. Default: the window size.
     #[arg(long, value_name = "BP")]
     pub extend: Option<u32>,
@@ -277,6 +287,8 @@ pub fn run(
         seed,
         two_hit_dist: args.two_hit_dist,
         max_occ: args.max_occ,
+        sample: args.seed_sample.0,
+        depth_sample: args.depth_sample.0,
         extend: args.extend,
         depth: match args.depth {
             DepthArg::Seed => DepthMethod::Seed,
@@ -358,8 +370,10 @@ pub fn run(
         .context("large engine: compute")?;
     let st = lp.stats;
     tracing::info!(
-        "computed in {:.1}s: {} raw hits, {} anchors, {} runs, {} cells scored, {} capped query positions",
+        "computed in {:.1}s (seed sampling 1/{}, depth 1/{}): {} raw hits, {} anchors, {} runs, {} cells scored, {} capped query positions",
         t1.elapsed().as_secs_f32(),
+        lp.params.sample,
+        lp.params.depth_sample.0.max(lp.params.depth_sample.1),
         st.raw_hits,
         st.anchors,
         st.runs,
@@ -389,6 +403,8 @@ pub fn run(
         seed: lp.params.seed.clone(),
         two_hit_dist: lp.params.two_hit_dist,
         max_occ: lp.params.max_occ,
+        seed_sample: lp.params.sample,
+        depth_sample: [lp.params.depth_sample.0, lp.params.depth_sample.1],
         extend: lp.params.extend,
         depth: lp.params.depth.describe(),
         class_thresholds: [thresholds.low, thresholds.mid, thresholds.high],
@@ -417,4 +433,19 @@ fn with_suffix(prefix: &std::path::Path, suffix: &str) -> PathBuf {
     s.push(".");
     s.push(suffix);
     PathBuf::from(s)
+}
+
+/// A sampling rate; `None` = automatic.
+#[derive(Debug, Clone, Copy)]
+pub struct Rate(pub Option<u32>);
+
+/// `auto` or a sampling rate >= 1.
+fn parse_rate(s: &str) -> Result<Rate, String> {
+    if s.eq_ignore_ascii_case("auto") {
+        return Ok(Rate(None));
+    }
+    match s.parse::<u32>() {
+        Ok(n) if n >= 1 => Ok(Rate(Some(n))),
+        _ => Err(format!("expected `auto` or an integer >= 1, got `{s}`")),
+    }
 }

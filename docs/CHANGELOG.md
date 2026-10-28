@@ -42,6 +42,14 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     (`LargePlot::{q,s}_depth_bins`).
   - Synthetic benchmark generator:
     `cargo run --release -p dottir-cli --example simulate_genome`.
+  - Seed sampling for overview views (`--seed-sample`, `--depth-sample`,
+    GUI settings): one seed in N by seed hash, N from the zoom (plot) and
+    sequence length (depth pass); the 100 Mb plot step is about 2× faster
+    at 94 % of the lit pixels. Scoring emits once per pixel crossing
+    instead of per cell. Large pixelmap format version 2.
+  - Coverage no longer saturates: 64-bit counters and an encoding reaching
+    ~3.8 Gb per pixel (was ~63 kb), and cells are scored exactly once even
+    where runs meet at chunk boundaries (coverage was double-counted there).
 * FASTA parsing records soft-masked (lowercase) runs
   (`FastaRecord::soft_masked`, `Sequence::soft_mask`).
 

@@ -155,6 +155,9 @@ struct LargeSettings {
     /// Soft-masked (lowercase) bases count as at least `mid`.
     softmask_as_repeat: bool,
     memory_limit_bytes: u64,
+    /// Seed sampling for the plot / the seed depth pass; `None` = auto.
+    seed_sample: Option<u32>,
+    depth_sample: Option<u32>,
     // Display only.
     classes: ClassMask,
     colour_by_class: bool,
@@ -183,6 +186,8 @@ impl Default for LargeSettings {
             thresholds: ClassThresholds::default(),
             softmask_as_repeat: true,
             memory_limit_bytes: 6 << 30,
+            seed_sample: None,
+            depth_sample: None,
             classes: ClassMask::ALL,
             colour_by_class: true,
             show_chains: false,
@@ -247,6 +252,8 @@ impl LargeSettings {
             coverage_ramp_bp: Some([self.cov_white_bp, self.cov_black_bp]),
             coverage_auto: Some(self.cov_auto),
             axis_tracks: Some(self.show_axis_tracks),
+            seed_sample: Some(self.seed_sample.unwrap_or(0)),
+            depth_sample: Some(self.depth_sample.unwrap_or(0)),
         }
     }
 
@@ -302,6 +309,8 @@ impl LargeSettings {
                 .map_or(d.cov_black_bp, |r| r[1].max(r[0].max(1.0) * 2.0)),
             cov_auto: s.coverage_auto.unwrap_or(d.cov_auto),
             show_axis_tracks: s.axis_tracks.unwrap_or(d.show_axis_tracks),
+            seed_sample: s.seed_sample.filter(|&r| r > 0),
+            depth_sample: s.depth_sample.filter(|&r| r > 0),
         }
     }
 
@@ -1564,6 +1573,8 @@ impl DottirApp {
             seed,
             two_hit_dist: ls.two_hit_dist,
             max_occ: ls.max_occ,
+            sample: ls.seed_sample,
+            depth_sample: ls.depth_sample,
             extend: None,
             depth: ls.depth_method(),
             classes: ls.thresholds,
@@ -3065,6 +3076,38 @@ impl DottirApp {
                 )
                 .changed();
         });
+        let rate_ui = |ui: &mut egui::Ui, label: &str, tip: &str, rate: &mut Option<u32>| {
+            let mut changed = false;
+            ui.horizontal(|ui| {
+                ui.label(label).on_hover_text(tip);
+                let mut auto = rate.is_none();
+                if ui.checkbox(&mut auto, "auto").changed() {
+                    *rate = if auto { None } else { Some(1) };
+                    changed = true;
+                }
+                if let Some(r) = rate {
+                    changed |= ui
+                        .add(egui::DragValue::new(r).range(1..=64).prefix("1/"))
+                        .changed();
+                }
+            });
+            changed
+        };
+        changed |= rate_ui(
+            ui,
+            "Seed sampling:",
+            "Look up one seed in N for the plot (the two-hit distance scales by N). \
+             Auto: zoom / 6000, at most 1/32, so only overview views are sampled.",
+            &mut ls.seed_sample,
+        );
+        if ls.depth == DepthChoice::Seed {
+            changed |= rate_ui(
+                ui,
+                "Depth sampling:",
+                "Seed sampling for the copy-number pass. Auto: length / 25 Mb, at most 1/16.",
+                &mut ls.depth_sample,
+            );
+        }
         ui.horizontal(|ui| {
             ui.label("Repeat depth:");
             for (v, label, tip) in [
@@ -3222,7 +3265,7 @@ impl DottirApp {
             }
             let white = ui
                 .add(
-                    Slider::new(&mut ls.cov_white_bp, 1.0..=100_000.0)
+                    Slider::new(&mut ls.cov_white_bp, 1.0..=1e8)
                         .logarithmic(true)
                         .integer()
                         .text("bp: white below"),
@@ -3230,7 +3273,7 @@ impl DottirApp {
                 .on_hover_text("Pixels with less matching sequence than this are hidden.");
             let black = ui
                 .add(
-                    Slider::new(&mut ls.cov_black_bp, 2.0..=200_000.0)
+                    Slider::new(&mut ls.cov_black_bp, 2.0..=1e9)
                         .logarithmic(true)
                         .integer()
                         .text("bp: black at"),
@@ -3284,10 +3327,11 @@ impl DottirApp {
             let st = lp.stats;
             ui.label(
                 egui::RichText::new(format!(
-                    "{} anchors · {} runs · {} chains{}",
+                    "{} anchors · {} runs · {} chains · seeds 1/{}{}",
                     format_thousands(st.anchors as usize),
                     format_thousands(st.runs as usize),
                     shown,
+                    lp.params.sample,
                     if st.capped_query_positions > 0 {
                         format!(
                             " · {} capped",

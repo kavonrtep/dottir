@@ -57,6 +57,11 @@ pub struct SessionLarge {
     pub coverage_auto: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub axis_tracks: Option<bool>,
+    /// Seed sampling rates; 0 = auto.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed_sample: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub depth_sample: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -253,6 +258,8 @@ mod tests {
                 coverage_ramp_bp: Some([50.0, 3000.0]),
                 coverage_auto: Some(false),
                 axis_tracks: Some(true),
+                seed_sample: Some(0),
+                depth_sample: Some(4),
             }),
         }
     }

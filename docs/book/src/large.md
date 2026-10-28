@@ -122,6 +122,29 @@ copies are not drawn. Hovering the strip shows the coordinates, the
 matching bp and copies per base, the class split and the copy number of
 the bases themselves (median and maximum).
 
+## Seed sampling
+
+At overview zoom a pixel spans tens or hundreds of kilobases, and looking
+up every seed is mostly wasted work. The large engine therefore looks up
+only one seed in *N*, chosen by a hash of the seed itself: every copy of a
+sequence carries the same seeds, so a match keeps 1/*N* of its hits instead
+of disappearing, and the two-hit distance is scaled by *N* to compensate.
+What sampling loses is short or diverged fragments, which may be left with
+fewer than two sampled hits; bigger pixels hold many fragments, so few lit
+pixels go dark.
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--seed-sample` | `auto` | plot rate: zoom / 6000, at most 1/32 |
+| `--depth-sample` | `auto` | copy-number pass rate: length / 25 Mb, at most 1/16 |
+
+Below 6 kb per pixel nothing is sampled, so zoomed-in views are unaffected.
+On the 100 Mb benchmark at 25 kb per pixel, rate 1/4 kept 94 % of the lit
+pixels (1/8: 83 %, 1/25: 48 %) and halved the plot time. Pass
+`--seed-sample 1 --depth-sample 1` for a full-sensitivity figure. The rates
+used are logged and recorded in the params sidecar; in the GUI they are
+under *Settings → Large sequences* and shown in the side panel.
+
 ## Chains
 
 `--chains-out FILE.paf` writes one PAF line per chain: record-local
@@ -140,6 +163,7 @@ run minimap2 and load its PAF.
 | `--seed-pattern` | `1110100110010101111` | weight 6–13, span ≤ 32 |
 | `--two-hit-dist` | 100 | max distance between two hits on one diagonal |
 | `--max-occ` | 1000 | skip seeds more frequent than this |
+| `--seed-sample` / `--depth-sample` | `auto` | seed sampling (see above) |
 | `--extend` | W | cells scored beyond each run |
 | `--depth` / `--depth-k` | `seed` / 21 | copy-number method |
 | `--class-thresholds` | `2,5,51` | class boundaries |

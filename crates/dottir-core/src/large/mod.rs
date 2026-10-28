@@ -42,7 +42,7 @@ pub(crate) mod score;
 pub mod seed;
 
 use std::ops::Range;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 pub use chain::{chain_segments, Chain, ChainConfig};
 pub use depth::{compute_depth, ClassThresholds, DepthMethod, DepthTrack, RepeatClass};
@@ -58,7 +58,26 @@ use crate::plot::{mirror_self_comparison, DotPlot, PlotParams, Strand, Triangle}
 
 /// Bumped whenever large-mode output for fixed inputs and parameters
 /// changes. Independent of [`crate::PIXELMAP_FORMAT_VERSION`].
-pub const LARGE_PIXELMAP_FORMAT_VERSION: u32 = 1;
+pub const LARGE_PIXELMAP_FORMAT_VERSION: u32 = 2;
+
+/// Largest automatic seed-sampling rate for the plot.
+pub const MAX_AUTO_SAMPLE: u32 = 32;
+/// Largest automatic seed-sampling rate for the seed depth pass.
+pub const MAX_AUTO_DEPTH_SAMPLE: u32 = 16;
+
+/// Automatic plot sampling: one seed in `zoom / 6000`. Sampling loses short
+/// or diverged fragments (each needs two sampled hits), but bigger pixels
+/// hold more fragments, so the share of lit pixels kept stays high: on a
+/// TE-rich 100 Mb benchmark at 25 kb/pixel, rate 4 kept 94 % of lit pixels
+/// (rate 8: 83 %, rate 25: 48 %) and halved the compute time.
+pub fn auto_sample_rate(zoom: u32) -> u32 {
+    (zoom / 6000).clamp(1, MAX_AUTO_SAMPLE)
+}
+
+/// Automatic depth sampling: one seed in `len / 25 Mb`.
+pub fn auto_depth_sample_rate(len: usize) -> u32 {
+    ((len / 25_000_000) as u32).clamp(1, MAX_AUTO_DEPTH_SAMPLE)
+}
 
 /// Query/subject ranges, in bases, of a sub-view.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,8 +118,28 @@ pub struct LargeConfig {
     /// Compute only this sub-view; `None` = whole plot.
     pub viewport: Option<Viewport>,
     /// Also count matching bases per pixel ([`LargePlot::coverage`]).
-    /// Costs 4 bytes per pixel and channel while computing.
+    /// Costs 8 bytes per pixel and channel while computing.
     pub coverage: bool,
+    /// Seed sampling rate for the plot (1 = every seed); `None` =
+    /// [`auto_sample_rate`] of the zoom. The two-hit distance scales with
+    /// the rate.
+    pub sample: Option<u32>,
+    /// Seed sampling rate for [`DepthMethod::Seed`]; `None` =
+    /// [`auto_depth_sample_rate`] of each sequence's length.
+    pub depth_sample: Option<u32>,
+}
+
+impl LargeConfig {
+    pub fn sample_rate(&self) -> u32 {
+        self.sample
+            .unwrap_or_else(|| auto_sample_rate(self.zoom))
+            .max(1)
+    }
+    pub fn depth_sample_rate(&self, len: usize) -> u32 {
+        self.depth_sample
+            .unwrap_or_else(|| auto_depth_sample_rate(len))
+            .max(1)
+    }
 }
 
 impl Default for LargeConfig {
@@ -124,6 +163,8 @@ impl Default for LargeConfig {
             chain: None,
             viewport: None,
             coverage: false,
+            sample: None,
+            depth_sample: None,
         }
     }
 }
@@ -265,6 +306,11 @@ pub struct LargeParams {
     pub extend: u32,
     pub depth: DepthMethod,
     pub classes: ClassThresholds,
+    /// Seed sampling rate used for the plot.
+    pub sample: u32,
+    /// Seed sampling rates used for the query / subject depth tracks
+    /// (1 unless the depth method is `Seed`).
+    pub depth_sample: (u32, u32),
     pub format_version: u32,
 }
 
@@ -279,18 +325,18 @@ pub struct DepthBin {
     pub class_frac: [u8; RepeatClass::COUNT],
 }
 
-/// Coverage values are stored as `round(16 · log2(1 + bases))`, saturating
-/// at 255 (≈ 63 kb per pixel): 16 steps per doubling.
+/// Coverage values are stored as `round(8 · log2(1 + bases))`: 8 steps per
+/// doubling (±4.5 %), saturating at 255 ≈ 3.8 Gb per pixel.
 pub fn coverage_code(bases: f64) -> u8 {
     if bases <= 0.0 {
         return 0;
     }
-    ((1.0 + bases).log2() * 16.0).round().min(255.0) as u8
+    ((1.0 + bases).log2() * 8.0).round().min(255.0) as u8
 }
 
 /// Inverse of [`coverage_code`].
 pub fn coverage_bases(code: u8) -> f64 {
-    (code as f64 / 16.0).exp2() - 1.0
+    (code as f64 / 8.0).exp2() - 1.0
 }
 
 /// How [`LargePlot::to_dot_plot`] fills the pixels.
@@ -450,8 +496,11 @@ pub struct LargeSession {
     pixel_fac: u32,
     matrix: ScoreMatrix,
     depth: DepthMethod,
-    /// `(two_hit_dist, max_occ)` the seed depth was computed with.
-    depth_params: (u32, u32),
+    /// `(two_hit_dist, max_occ, depth_sample)` the seed depth was
+    /// computed with.
+    depth_params: (u32, u32, Option<u32>),
+    /// Resolved depth sampling rates (query, subject).
+    depth_rates: (u32, u32),
 }
 
 impl LargeSession {
@@ -576,7 +625,8 @@ impl LargeSession {
                             &built
                         }
                     };
-                    seed_depth(idx, enc, breaks, cfg.two_hit_dist, cfg.max_occ, ctl)?
+                    let rate = cfg.depth_sample_rate(enc.len());
+                    seed_depth(idx, enc, breaks, cfg.two_hit_dist, cfg.max_occ, rate, ctl)?
                 }
             };
             if let Some(f) = floor {
@@ -595,6 +645,17 @@ impl LargeSession {
             None => None,
         };
         ctl.report(1.0);
+        let rate_of = |len: usize| {
+            if cfg.depth == DepthMethod::Seed {
+                cfg.depth_sample_rate(len)
+            } else {
+                1
+            }
+        };
+        let depth_rates = (
+            rate_of(q_enc.len()),
+            rate_of(s_enc.as_ref().map_or(q_enc.len(), |s| s.len())),
+        );
 
         Ok(Self {
             q_enc,
@@ -609,7 +670,8 @@ impl LargeSession {
             pixel_fac,
             matrix: cfg.matrix.clone(),
             depth: cfg.depth,
-            depth_params: (cfg.two_hit_dist, cfg.max_occ),
+            depth_params: (cfg.two_hit_dist, cfg.max_occ, cfg.depth_sample),
+            depth_rates,
         })
     }
 
@@ -619,7 +681,7 @@ impl LargeSession {
         self.index.seed() == &cfg.seed
             && self.depth == cfg.depth
             && (self.depth != DepthMethod::Seed
-                || self.depth_params == (cfg.two_hit_dist, cfg.max_occ))
+                || self.depth_params == (cfg.two_hit_dist, cfg.max_occ, cfg.depth_sample))
             && self.matrix.name == cfg.matrix.name
             && self.matrix.scores == cfg.matrix.scores
             && cfg.window_size.is_none_or(|w| w == self.window)
@@ -698,7 +760,7 @@ impl LargeSession {
         let channel_bytes = per_channel
             * n_strands
             * RepeatClass::COUNT as u64
-            * if cfg.coverage { 1 + 4 } else { 1 };
+            * if cfg.coverage { 1 + 8 } else { 1 };
         let requested = channel_bytes + self.bytes();
         if requested > cfg.memory_limit_bytes {
             return Err(DottirError::OutOfMemory {
@@ -716,7 +778,8 @@ impl LargeSession {
         let window = self.window as usize;
         let span = cfg.seed.span();
         let extend = cfg.extend.map_or(window, |e| e as usize);
-        let dist = cfg.two_hit_dist as usize;
+        let sample = cfg.sample_rate();
+        let dist = cfg.two_hit_dist.saturating_mul(sample) as usize;
         let margin = extend + 2 * window + span + 2 * dist;
 
         let new_maps = |on: bool| -> Result<Vec<PixelMap>, DottirError> {
@@ -742,7 +805,9 @@ impl LargeSession {
             thresholds: cfg.classes,
             s_range: s_view.start.saturating_sub(margin)..(s_view.end + margin).min(slen),
             max_occ: cfg.max_occ,
-            two_hit_dist: cfg.two_hit_dist,
+            two_hit_dist: cfg.two_hit_dist.saturating_mul(sample),
+            sample,
+            stream_runs: true,
             forward: do_fwd,
             reverse: do_rev,
             lower_only,
@@ -763,7 +828,8 @@ impl LargeSession {
         };
 
         let q_seed_range = q_view.start.saturating_sub(margin)..(q_view.end + margin).min(qlen);
-        const CHUNK: usize = 1 << 14;
+        // Large chunks keep the stream overlap (`reach` below) small.
+        const CHUNK: usize = 1 << 16;
         let chunks: Vec<Range<usize>> = q_seed_range
             .clone()
             .step_by(CHUNK)
@@ -780,13 +846,13 @@ impl LargeSession {
             stats: LargeStats,
         }
 
-        let cov_bufs: Vec<Vec<AtomicU32>> = if cfg.coverage {
+        let cov_bufs: Vec<Vec<AtomicU64>> = if cfg.coverage {
             [do_fwd, do_rev]
                 .into_iter()
                 .flat_map(|on| {
                     (0..RepeatClass::COUNT).map(move |_| {
                         if on {
-                            (0..per_channel).map(|_| AtomicU32::new(0)).collect()
+                            (0..per_channel).map(|_| AtomicU64::new(0)).collect()
                         } else {
                             Vec::new()
                         }
@@ -818,7 +884,10 @@ impl LargeSession {
                         stats: LargeStats::default(),
                     };
                 }
-                let stream = core.start.saturating_sub(dist)..(core.end + dist).min(qlen);
+                // Wide enough that every anchor deciding whether a core
+                // cell is covered is seen (see `score::score_owned`).
+                let reach = extend + span + window + 2 * dist;
+                let stream = core.start.saturating_sub(reach)..(core.end + reach).min(qlen);
                 let ch = hits::chunk_hits(&hit_ctx, core.clone(), stream);
                 let mut stats = LargeStats {
                     raw_hits: ch.stats.raw_hits,
@@ -827,9 +896,10 @@ impl LargeSession {
                     scored_cells: 0,
                     capped_query_positions: ch.stats.capped_positions,
                 };
+                stats.scored_cells +=
+                    score::score_owned(&score_ctx, &canvas, &ch.stream_runs, core);
                 let mut segments = Vec::new();
                 for run in &ch.runs {
-                    stats.scored_cells += score::score_run(&score_ctx, &canvas, run);
                     if keep_segments && chain_max_class.is_some_and(|m| run.class <= m) {
                         segments.push(run_to_segment(run, qlen, span));
                     }
@@ -938,6 +1008,8 @@ impl LargeSession {
                 extend: extend as u32,
                 depth: cfg.depth,
                 classes: cfg.classes,
+                sample,
+                depth_sample: self.depth_rates,
                 format_version: LARGE_PIXELMAP_FORMAT_VERSION,
             },
             stats,
@@ -992,14 +1064,17 @@ impl LargeSession {
 /// (which must index `enc` itself): one plus the number of off-diagonal
 /// runs covering each base. Bases whose seed exceeds `max_occ` get
 /// `u16::MAX`.
+#[allow(clippy::too_many_arguments)]
 fn seed_depth(
     index: &SeedIndex,
     enc: &[u8],
     breaks: &[usize],
     two_hit_dist: u32,
     max_occ: u32,
+    sample: u32,
     ctl: &Control<'_>,
 ) -> Result<DepthTrack, DottirError> {
+    let two_hit_dist = two_hit_dist.saturating_mul(sample);
     use std::sync::atomic::AtomicI32;
     let n = enc.len();
     let span = index.seed().span();
@@ -1019,6 +1094,8 @@ fn seed_depth(
         s_range: 0..n,
         max_occ,
         two_hit_dist,
+        sample,
+        stream_runs: false,
         forward: true,
         reverse: true,
         lower_only: true,

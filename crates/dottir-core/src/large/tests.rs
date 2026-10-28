@@ -369,11 +369,13 @@ proptest! {
         zoom in 1u32..7,
         window in prop::option::of(8u32..40),
         unit_len in 100usize..900,
+        sample in 1u32..6,
     ) {
         let (q, s) = planted_pair(3000, unit_len, rate, seed);
         let e = exact(&q, &s, zoom, window, false);
         let mut cfg = large_cfg(zoom, window);
         cfg.seed = SpacedSeed::parse("11011011011").unwrap();
+        cfg.sample = Some(sample);
         let l = large(&q, &s, &cfg);
         assert_le(&l.merged(Some(false), ClassMask::ALL), &e.pixels, "forward");
         assert_le(&l.merged(Some(true), ClassMask::ALL), e.reverse_pixels.as_ref().unwrap(), "reverse");
@@ -405,19 +407,19 @@ fn golden_channels_hash() {
             v.to_le_bytes().iter().for_each(|&b| eat(b));
         }
     }
-    assert_eq!(LARGE_PIXELMAP_FORMAT_VERSION, 1);
+    assert_eq!(LARGE_PIXELMAP_FORMAT_VERSION, 2);
     assert_eq!(h, GOLDEN, "large-mode output changed: new hash {h:#018x}");
 }
 
 const GOLDEN: u64 = 0x7f156c95cbc4c727;
 
 #[test]
-fn coverage_code_round_trips_within_three_percent() {
+fn coverage_code_round_trips_within_five_percent() {
     assert_eq!(coverage_code(0.0), 0);
     assert_eq!(coverage_code(1e12), 255);
     for b in [1.0, 7.0, 100.0, 1234.0, 40_000.0] {
         let back = coverage_bases(coverage_code(b));
-        assert!((back - b).abs() / b < 0.03, "{b} -> {back}");
+        assert!((back - b).abs() / b < 0.05, "{b} -> {back}");
     }
 }
 
@@ -477,4 +479,107 @@ fn depth_bins_follow_the_depth_track() {
         l.q_depth_bins[2].class_frac[RepeatClass::Unique.index()],
         255
     );
+}
+
+#[test]
+fn sampling_keeps_about_one_seed_in_rate() {
+    for rate in [2u32, 8, 32] {
+        let kept = (0..200_000u32).filter(|&k| hits::sampled(k, rate)).count() as f64;
+        let expect = 200_000.0 / rate as f64;
+        assert!((kept - expect).abs() / expect < 0.05, "rate {rate}: {kept}");
+    }
+    assert_eq!(auto_sample_rate(1), 1);
+    assert_eq!(auto_sample_rate(5_999), 1);
+    assert_eq!(auto_sample_rate(25_000), 4);
+    assert_eq!(auto_sample_rate(750_000), MAX_AUTO_SAMPLE);
+    assert_eq!(auto_depth_sample_rate(10_000_000), 1);
+    assert_eq!(auto_depth_sample_rate(600_000_000), MAX_AUTO_DEPTH_SAMPLE);
+}
+
+#[test]
+fn sampled_plot_still_finds_diverged_copies_with_fewer_hits() {
+    // 4 kb copies at 15 % divergence, sampled 1 in 8.
+    let (q, s) = planted_pair(60_000, 4000, 15, 33);
+    let mut cfg = large_cfg(200, None);
+    cfg.coverage = true;
+    cfg.sample = Some(1);
+    let full = large(&q, &s, &cfg);
+    cfg.sample = Some(8);
+    let sampled = large(&q, &s, &cfg);
+    assert_eq!(sampled.params.sample, 8);
+    assert!(sampled.stats.raw_hits * 4 < full.stats.raw_hits);
+    let e = exact(&q, &s, 200, None, false);
+    for strand in [false, true] {
+        let l = sampled.merged(Some(strand), ClassMask::ALL);
+        let ex = if strand {
+            e.reverse_pixels.as_ref().unwrap()
+        } else {
+            &e.pixels
+        };
+        assert_le(&l, ex, "sampled");
+        // Matching bp of the planted copy is mostly recovered.
+        let cov = |p: &LargePlot| -> f64 {
+            p.merged_coverage(Some(strand), ClassMask::ALL)
+                .iter()
+                .map(|&c| coverage_bases(c))
+                .sum()
+        };
+        let (a, b) = (cov(&sampled), cov(&full));
+        assert!(a > 0.8 * b, "strand {strand}: sampled {a} vs full {b}");
+    }
+}
+
+#[test]
+fn sampled_viewport_equals_crop_and_is_deterministic() {
+    let (q, s) = planted_pair(80_000, 6000, 12, 44);
+    let mut cfg = large_cfg(50, None);
+    cfg.sample = Some(4);
+    cfg.coverage = true;
+    let run = |cfg: &LargeConfig, threads| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap()
+            .install(|| large(&q, &s, cfg))
+    };
+    let full = run(&cfg, 1);
+    assert_eq!(full.channels, run(&cfg, 4).channels);
+    cfg.viewport = Some(Viewport {
+        q: 10_000..50_000,
+        s: 5_000..60_000,
+    });
+    let v = run(&cfg, 4);
+    let (vw, fw) = (v.width as usize, full.width as usize);
+    let (x0, y0) = (v.origin_q / 50, v.origin_s / 50);
+    for strand in [false, true] {
+        let (fm, vm) = (
+            full.merged(Some(strand), ClassMask::ALL),
+            v.merged(Some(strand), ClassMask::ALL),
+        );
+        let (fc, vc) = (
+            full.merged_coverage(Some(strand), ClassMask::ALL),
+            v.merged_coverage(Some(strand), ClassMask::ALL),
+        );
+        for y in 0..v.height as usize {
+            for x in 0..vw {
+                let (i, j) = (y * vw + x, (y + y0) * fw + x + x0);
+                assert_eq!(vm[i], fm[j], "strand {strand} ({x},{y})");
+                assert_eq!(vc[i], fc[j], "coverage strand {strand} ({x},{y})");
+            }
+        }
+        assert!(vm.iter().any(|&p| p > 0));
+    }
+}
+
+#[test]
+fn coverage_does_not_saturate_at_chromosome_zoom() {
+    // One 200 kb self-similar block in a single 1 Mb pixel.
+    let q = lcg_dna(200_000, 9);
+    let mut cfg = large_cfg(1_000_000, Some(20));
+    cfg.self_comparison = true;
+    cfg.coverage = true;
+    cfg.strand = Strand::Forward;
+    let l = compute_large_dotplot(&LargeInput::self_comparison(&q, &[]), &cfg).unwrap();
+    let got = coverage_bases(l.merged_coverage(None, ClassMask::ALL)[0]);
+    assert!((180_000.0..220_000.0).contains(&got), "{got}");
 }

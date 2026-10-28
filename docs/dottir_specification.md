@@ -289,6 +289,11 @@ exact engine; §4.1 continues to govern that engine and its C-dotter goldens.
    viewport whose origin is a multiple of the zoom MUST give the same pixels
    as the corresponding crop of the full plot. The GUI hands views below a
    cell-count threshold (default 2·10¹⁰) to the exact engine.
+7a. **Seed sampling**: the engine MAY look up only seeds whose key hash
+   falls in a 1-in-*N* subset (scaling the two-hit distance by *N*), with
+   *N* derived from the zoom (plot) or sequence length (depth pass) unless
+   set explicitly. The rates used MUST be recorded (§4.6.9). Sampling only
+   removes runs, so §4.6.4 (`large <= exact`) still holds.
 8. **Determinism**: identical output across runs and thread counts; pinned by
    a golden hash tied to `LARGE_PIXELMAP_FORMAT_VERSION`, which MUST be bumped
    on any output change.

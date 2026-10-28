@@ -26,12 +26,6 @@ pub(crate) struct Run {
     pub q_rec: u32,
     pub s_rec: u32,
     pub class: RepeatClass,
-    /// Query start of a two-hit partner just outside the chunk core that
-    /// would have merged with the first (`lo_fill`) / last (`hi_fill`)
-    /// anchor. Scoring through to it makes the scored cell set independent
-    /// of where chunk boundaries fall.
-    pub lo_fill: Option<u32>,
-    pub hi_fill: Option<u32>,
 }
 
 /// Everything a chunk worker reads.
@@ -47,7 +41,13 @@ pub(crate) struct HitCtx<'a> {
     /// Subject seed starts considered.
     pub s_range: Range<usize>,
     pub max_occ: u32,
+    /// Already scaled by `sample`.
     pub two_hit_dist: u32,
+    /// Look up only seeds with `sampled(key, sample)`; 1 = all.
+    pub sample: u32,
+    /// Also return the runs of every anchor in the stream
+    /// ([`ChunkHits::stream_runs`]), for scoring by cell ownership.
+    pub stream_runs: bool,
     pub forward: bool,
     pub reverse: bool,
     /// Self-comparison lower triangle: drop hits that can only produce
@@ -63,7 +63,11 @@ pub(crate) struct HitStats {
 }
 
 pub(crate) struct ChunkHits {
+    /// Runs of the anchors whose start lies in the core.
     pub runs: Vec<Run>,
+    /// Runs of all anchors in the stream, without fills; empty unless
+    /// requested. Sorted by strand, diagonal and position.
+    pub stream_runs: Vec<Run>,
     /// Query seed starts in the chunk core whose lookup was capped.
     pub capped: Vec<u32>,
     pub stats: HitStats,
@@ -80,20 +84,23 @@ pub(crate) fn chunk_hits(ctx: &HitCtx<'_>, core: Range<usize>, stream: Range<usi
     let mut capped = Vec::new();
     let mut stats = HitStats::default();
 
+    let mut in_core_hits = 0u64;
     for_each_window(seed, ctx.q_enc, ctx.q_breaks, stream, |p, fwd, rc| {
         let p64 = p as u64;
+        let in_core = core.contains(&p);
         let mut was_capped = false;
         if ctx.forward {
             let key = seed.key(fwd);
             if ctx.index.count(key) > ctx.max_occ {
                 was_capped = true;
-            } else {
+            } else if sampled(key, ctx.sample) {
                 for &s in ctx.index.bucket_in(key, &ctx.s_range) {
                     let s = s as u64;
                     if ctx.lower_only && s < p64 {
                         continue;
                     }
                     fwd_hits.push(((s + qlen - p64) << 32) | p64);
+                    in_core_hits += in_core as u64;
                 }
             }
         }
@@ -101,7 +108,7 @@ pub(crate) fn chunk_hits(ctx: &HitCtx<'_>, core: Range<usize>, stream: Range<usi
             let key = seed.key(rc);
             if ctx.index.count(key) > ctx.max_occ {
                 was_capped = true;
-            } else {
+            } else if sampled(key, ctx.sample) {
                 for &s in ctx.index.bucket_in(key, &ctx.s_range) {
                     let s = s as u64;
                     // Cells of this hit have q + s = p + s + span - 1; any
@@ -110,6 +117,7 @@ pub(crate) fn chunk_hits(ctx: &HitCtx<'_>, core: Range<usize>, stream: Range<usi
                         continue;
                     }
                     rev_hits.push(((p64 + s + span - 1) << 32) | p64);
+                    in_core_hits += in_core as u64;
                 }
             }
         }
@@ -118,21 +126,34 @@ pub(crate) fn chunk_hits(ctx: &HitCtx<'_>, core: Range<usize>, stream: Range<usi
         }
     });
     stats.capped_positions = capped.len() as u64;
-    stats.raw_hits = (fwd_hits.len() + rev_hits.len()) as u64;
+    stats.raw_hits = in_core_hits;
 
     let mut runs = Vec::new();
+    let mut stream_runs = Vec::new();
     for (reverse, mut hits) in [(false, fwd_hits), (true, rev_hits)] {
         if hits.is_empty() {
             continue;
         }
         hits.sort_unstable();
-        stats.anchors += two_hit_runs(ctx, &hits, reverse, &core, &mut runs);
+        stats.anchors += two_hit_runs(ctx, &hits, reverse, Some(&core), &mut runs);
+        if ctx.stream_runs {
+            two_hit_runs(ctx, &hits, reverse, None, &mut stream_runs);
+        }
     }
     ChunkHits {
         runs,
+        stream_runs,
         capped,
         stats,
     }
+}
+
+/// Seed sampling by key: every copy of a sequence carries the same keys, so
+/// a match keeps `1/rate` of its hits on average instead of being lost, and
+/// query and subject need no coordination.
+#[inline]
+pub(crate) fn sampled(key: u32, rate: u32) -> bool {
+    rate <= 1 || ((key as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 40) % rate as u64 == 0
 }
 
 #[inline]
@@ -150,12 +171,13 @@ fn record_of(breaks: &[usize], pos: usize) -> u32 {
 }
 
 /// Apply the two-hit test to sorted `hits` and append merged runs; returns
-/// the number of anchors kept.
+/// the number of anchors kept. With a `core`, only anchors starting in it
+/// are kept; without, every anchor is.
 fn two_hit_runs(
     ctx: &HitCtx<'_>,
     hits: &[u64],
     reverse: bool,
-    core: &Range<usize>,
+    core: Option<&Range<usize>>,
     out: &mut Vec<Run>,
 ) -> u64 {
     let dist = ctx.two_hit_dist;
@@ -177,32 +199,20 @@ fn two_hit_runs(
             record_of(ctx.s_breaks, subject_of(h)),
         )
     };
-    let in_core = |h: u64| core.contains(&(pos_of(h) as usize));
-    // A margin hit adjacent to a run end, in the same record pair, is an
-    // anchor that the neighbouring chunk merges with this run.
-    let fill = |h: u64, other: Option<u64>| -> Option<u32> {
-        let o = other?;
-        let adjacent = if pos_of(o) < pos_of(h) {
-            near(o, h)
-        } else {
-            near(h, o)
-        };
-        (adjacent && !in_core(o) && records(o) == records(h)).then_some(pos_of(o))
-    };
+    let in_core = |h: u64| core.is_none_or(|c| c.contains(&(pos_of(h) as usize)));
 
     let mut kept = 0u64;
-    let mut cur: Option<(Run, usize)> = None; // run + index of its last hit
+    let mut cur: Option<Run> = None;
     let mut votes = [0u32; RepeatClass::COUNT];
 
-    let mut flush = |cur: &mut Option<(Run, usize)>, votes: &mut [u32; RepeatClass::COUNT]| {
-        if let Some((mut r, last)) = cur.take() {
+    let mut flush = |cur: &mut Option<Run>, votes: &mut [u32; RepeatClass::COUNT]| {
+        if let Some(mut r) = cur.take() {
             // Majority class; ties go to the more repetitive class.
             let best = (0..RepeatClass::COUNT)
                 .rev()
                 .max_by_key(|&i| votes[i])
                 .unwrap_or(0);
             r.class = RepeatClass::from_index(best).unwrap_or(RepeatClass::Unique);
-            r.hi_fill = fill(hits[last], hits.get(last + 1).copied());
             out.push(r);
         }
         *votes = [0; RepeatClass::COUNT];
@@ -229,36 +239,25 @@ fn two_hit_runs(
             .thresholds
             .classify(depth(ctx.q_depth, qc).max(depth(ctx.s_depth, sc)));
 
-        let extend = cur.as_ref().is_some_and(|(r, _)| {
+        let extend = cur.as_ref().is_some_and(|r| {
             r.diag == d && p - r.last_p <= dist && r.q_rec == q_rec && r.s_rec == s_rec
         });
         if extend {
-            let (r, last) = cur.as_mut().expect("checked above");
+            let r = cur.as_mut().expect("checked above");
             r.last_p = p;
             r.n_anchors += 1;
-            *last = i;
         } else {
             flush(&mut cur, &mut votes);
-            let lo_fill = if i > 0 {
-                fill(h, Some(hits[i - 1]))
-            } else {
-                None
-            };
-            cur = Some((
-                Run {
-                    reverse,
-                    diag: d,
-                    first_p: p,
-                    last_p: p,
-                    n_anchors: 1,
-                    q_rec,
-                    s_rec,
-                    class: RepeatClass::Unique,
-                    lo_fill,
-                    hi_fill: None,
-                },
-                i,
-            ));
+            cur = Some(Run {
+                reverse,
+                diag: d,
+                first_p: p,
+                last_p: p,
+                n_anchors: 1,
+                q_rec,
+                s_rec,
+                class: RepeatClass::Unique,
+            });
         }
         votes[class.index()] += 1;
     }
@@ -301,6 +300,8 @@ mod tests {
             s_range: 0..s.len(),
             max_occ: 1000,
             two_hit_dist: dist,
+            sample: 1,
+            stream_runs: false,
             forward: true,
             reverse: true,
             lower_only: false,

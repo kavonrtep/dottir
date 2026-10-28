@@ -60,6 +60,8 @@ fn pairwise_large_writes_png_sidecar_and_chains() {
         "high",
         "--chains-out",
         paf.to_str().unwrap(),
+        "--seed-sample",
+        "2",
     ]);
     assert!(
         result.status.success(),
@@ -76,6 +78,9 @@ fn pairwise_large_writes_png_sidecar_and_chains() {
     );
     assert!(sidecar.contains("depth = \"seed\""), "{sidecar}");
     assert!(sidecar.contains("soft_mask_class = \"mid\""), "{sidecar}");
+    assert!(sidecar.contains("seed_sample = 2"), "{sidecar}");
+    let compact: String = sidecar.split_whitespace().collect();
+    assert!(compact.contains("depth_sample=[1,1,]"), "{sidecar}");
 
     // The shared block: q1:5000-25000 vs s1:8000-28000, forward.
     let paf = std::fs::read_to_string(&paf).unwrap();

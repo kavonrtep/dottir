@@ -35,8 +35,15 @@ pub struct ParamsSidecar {
 pub struct LargeParamsInfo {
     pub format_version: u32,
     pub seed: String,
+    /// Before scaling by `seed_sample`.
     pub two_hit_dist: u32,
     pub max_occ: u32,
+    /// Plot seed sampling rate (1 = every seed).
+    #[serde(default = "one")]
+    pub seed_sample: u32,
+    /// Depth-pass sampling rates, query and subject.
+    #[serde(default = "ones")]
+    pub depth_sample: [u32; 2],
     pub extend: u32,
     /// `seed`, `kmer:<k>` or `none`.
     pub depth: String,
@@ -51,6 +58,13 @@ pub struct LargeParamsInfo {
     pub scored_cells: u64,
     pub capped_query_positions: u64,
     pub chains: Option<usize>,
+}
+
+fn one() -> u32 {
+    1
+}
+fn ones() -> [u32; 2] {
+    [1, 1]
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -211,6 +225,8 @@ mod tests {
             seed: "1110100110010101111".into(),
             two_hit_dist: 100,
             max_occ: 1000,
+            seed_sample: 4,
+            depth_sample: [2, 2],
             extend: 25,
             depth: "seed".into(),
             class_thresholds: [2, 5, 51],
