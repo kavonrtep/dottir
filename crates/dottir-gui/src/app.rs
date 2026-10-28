@@ -46,6 +46,9 @@ pub struct StartupConfig {
     /// PAF drawn over the plot, and how.
     pub hsp_paf: Option<PathBuf>,
     pub hsp_mode: Option<HspMode>,
+    /// Plot only these regions (`name:start-end[:-]`) of the inputs.
+    pub query_regions: Vec<String>,
+    pub subject_regions: Vec<String>,
 }
 
 impl Default for StartupConfig {
@@ -67,6 +70,8 @@ impl Default for StartupConfig {
             sort_records: None,
             hsp_paf: None,
             hsp_mode: None,
+            query_regions: Vec::new(),
+            subject_regions: Vec::new(),
         }
     }
 }
@@ -558,6 +563,10 @@ pub struct DottirApp {
     /// coords; `current` is the latest mouse position. On release we
     /// compute a new zoom from the rectangle and push a history entry.
     rect_select: Option<RectSelect>,
+    /// Right-drag selection: in progress (screen), then done (residues)
+    /// with its action menu open.
+    selection_drag: Option<RectSelect>,
+    selection: Option<Selection>,
     /// Residue range covered by the most recently computed pixelmap.
     /// `None` before any compute has completed. Coordinate transforms
     /// in the paint loop add `slice.start` when converting
@@ -697,6 +706,16 @@ struct ViewSnapshot {
     crosshair: Option<(u32, u32)>,
 }
 
+/// A finished right-drag selection: absolute residue ranges, the canvas
+/// it was made on, and where its menu opens.
+#[derive(Clone, Debug)]
+struct Selection {
+    q: std::ops::Range<usize>,
+    s: std::ops::Range<usize>,
+    plot_area: Rect,
+    menu_at: Pos2,
+}
+
 /// Middle-mouse rectangle-select drag state.
 #[derive(Clone, Copy, Debug)]
 struct RectSelect {
@@ -778,6 +797,8 @@ impl DottirApp {
             history: std::collections::VecDeque::with_capacity(HISTORY_MAX),
             pixelmap_cache: std::collections::VecDeque::with_capacity(HISTORY_MAX),
             rect_select: None,
+            selection_drag: None,
+            selection: None,
             pending_view_offset_after_compute: None,
             pending_rect_zoom: None,
             current_slice: None,
@@ -814,11 +835,15 @@ impl DottirApp {
         // are stashed in `last_error` and surfaced in the status bar
         // instead of aborting the GUI — the user can still recover via
         // File → Open.
-        if let Some(p) = startup.query {
-            app.load_sequence(SeqRole::Query, p);
-        }
-        if let Some(p) = startup.subject {
-            app.load_sequence(SeqRole::Subject, p);
+        for (role, path, regions) in [
+            (SeqRole::Query, startup.query, startup.query_regions),
+            (SeqRole::Subject, startup.subject, startup.subject_regions),
+        ] {
+            match (path, regions.is_empty()) {
+                (Some(p), true) => app.load_sequence(role, p),
+                (Some(p), false) => app.load_sequence_regions(role, p, &regions),
+                (None, _) => {}
+            }
         }
         // Bind any startup annotation files now that the sequences are
         // loaded (set_annotation needs the target sequence present).
@@ -959,6 +984,38 @@ impl DottirApp {
                 if let Some(set) = embedded {
                     self.set_annotation(role, set);
                 }
+                self.sequences_changed(detected);
+            }
+            Err(e) => {
+                self.last_error = Some(format!("failed to load {}: {e}", path.display()));
+            }
+        }
+    }
+
+    /// Load regions of a FASTA (`--query-region` / `--subject-region`):
+    /// records keep their source coordinates.
+    fn load_sequence_regions(&mut self, role: SeqRole, path: PathBuf, regions: &[String]) {
+        match dottir_io::faidx::load_regions(&path, regions, &dottir_io::cache::cache_dir()) {
+            Ok(seq) => {
+                tracing::info!(
+                    "loaded {} regions of {} ({} residues)",
+                    seq.records.len(),
+                    path.display(),
+                    seq.len()
+                );
+                let detected = seq.detect_alphabet();
+                match role {
+                    SeqRole::Query => {
+                        self.query = Some(seq);
+                        self.query_annot = None;
+                    }
+                    SeqRole::Subject => {
+                        self.subject = Some(seq);
+                        self.subject_annot = None;
+                    }
+                }
+                self.forget_record_sorts();
+                self.last_error = None;
                 self.sequences_changed(detected);
             }
             Err(e) => {
@@ -1669,16 +1726,160 @@ impl DottirApp {
     /// `poll_compute_results` applies the pending `view_offset` so
     /// the user sees the selected region.
     fn action_rect_zoom(&mut self, plot_area: Rect, rs: RectSelect) {
+        if let Some((x, y)) = self.selection_residues(plot_area, &rs) {
+            self.zoom_to_residues(plot_area, x, y);
+        }
+    }
+
+    /// The action menu of a finished right-drag selection.
+    fn selection_menu(&mut self, ctx: &Context) {
+        let Some(sel) = self.selection.clone() else {
+            return;
+        };
+        let (Some(q), Some(s)) = (&self.query, &self.subject) else {
+            self.selection = None;
+            return;
+        };
+        let size = |r: &std::ops::Range<usize>| fmt_bp(r.len() as u64);
+        let header = format!("{} × {}", size(&sel.q), size(&sel.s));
+        let bedpe = selection_bedpe(q, s, &sel.q, &sel.s);
+        let mut action = None;
+        egui::Area::new(egui::Id::new("selection_menu"))
+            .fixed_pos(sel.menu_at + Vec2::new(6.0, 6.0))
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.label(egui::RichText::new(header).size(11.0).strong());
+                    if ui.button("Zoom to selection").clicked() {
+                        action = Some(0);
+                    }
+                    if ui
+                        .button("Open in new window")
+                        .on_hover_text(
+                            "A new dottir window with just these regions, the same \
+                             settings, HSPs and annotations",
+                        )
+                        .clicked()
+                    {
+                        action = Some(1);
+                    }
+                    if ui
+                        .button("Copy coordinates (BEDPE)")
+                        .on_hover_text(bedpe.trim_end())
+                        .clicked()
+                    {
+                        ctx.copy_text(bedpe.clone());
+                        action = Some(2);
+                    }
+                    if ui.button("Cancel").clicked() {
+                        action = Some(2);
+                    }
+                });
+            });
+        match action {
+            Some(0) => {
+                self.selection = None;
+                self.zoom_to_residues(sel.plot_area, sel.q, sel.s);
+            }
+            Some(1) => {
+                self.selection = None;
+                if let Err(e) = self.open_selection_window(&sel) {
+                    self.last_error = Some(format!("open in new window: {e}"));
+                }
+            }
+            Some(_) => self.selection = None,
+            None => {}
+        }
+    }
+
+    /// Spawn another dottir-gui on the selected regions of the inputs.
+    fn open_selection_window(&self, sel: &Selection) -> Result<(), String> {
+        let (Some(q), Some(s)) = (&self.query, &self.subject) else {
+            return Err("no sequences".into());
+        };
+        let set = &self.settings;
+        let mut args: Vec<std::ffi::OsString> = Vec::new();
+        let mut regions = Vec::new();
+        for (seq, range, flipped, flag) in [
+            (q, &sel.q, set.reverse_query, "--query-region"),
+            (s, &sel.s, set.reverse_subject, "--subject-region"),
+        ] {
+            let path = seq
+                .source_path
+                .clone()
+                .ok_or("the sequence was not read from a file")?;
+            args.push(path.into());
+            let specs = selection_specs(seq, range, flipped);
+            for spec in &specs {
+                regions.push((flag, spec.clone()));
+            }
+        }
+        for (flag, spec) in regions {
+            args.push(flag.into());
+            args.push(spec.into());
+        }
+        let mode = match set.mode {
+            BlastMode::Blastn => "blastn",
+            BlastMode::Blastp => "blastp",
+            BlastMode::Blastx => "blastx",
+        };
+        let strand = match set.strand {
+            Strand::Forward => "forward",
+            Strand::Reverse => "reverse",
+            Strand::Both => "both",
+        };
+        for (k, v) in [
+            ("--mode", mode),
+            ("--matrix", &set.matrix_name),
+            ("--strand", strand),
+        ] {
+            args.push(k.into());
+            args.push(v.into());
+        }
+        if let Some(w) = set.window_size {
+            args.push("-W".into());
+            args.push(w.to_string().into());
+        }
+        if let Some(h) = &self.hsps {
+            args.push("--hsp-paf".into());
+            args.push(h.path.clone().into());
+            args.push("--hsp-mode".into());
+            args.push(self.hsp_mode.name().into());
+        }
+        for (annot, flag) in [
+            (&self.query_annot, "--gff-query"),
+            (&self.subject_annot, "--gff-subject"),
+        ] {
+            if let Some(p) = annot.as_ref().and_then(|a| a.set.source_path.clone()) {
+                args.push(flag.into());
+                args.push(p.into());
+            }
+        }
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        tracing::info!("open in new window: {} {:?}", exe.display(), args);
+        std::process::Command::new(exe)
+            .args(&args)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Absolute residue ranges (query, subject) under a screen
+    /// rectangle; `None` for a near-empty drag.
+    fn selection_residues(
+        &self,
+        plot_area: Rect,
+        rs: &RectSelect,
+    ) -> Option<(std::ops::Range<usize>, std::ops::Range<usize>)> {
         let (Some(plot), Some(q), Some(s), Some(cur_slice)) = (
             self.plot.as_ref(),
             self.query.as_ref(),
             self.subject.as_ref(),
             self.current_slice.clone(),
         ) else {
-            return;
+            return None;
         };
-        let cur_zoom_u = plot.params.zoom.max(1);
-        let cur_zoom = cur_zoom_u as f32;
+        let cur_zoom = plot.params.zoom.max(1) as f32;
         let ppp = self.pixels_per_point;
 
         // Screen → pixelmap-texel. Match the canvas's snap policy
@@ -1699,7 +1900,7 @@ impl DottirApp {
         let (px_lo_y, px_hi_y) = if sy <= ey { (sy, ey) } else { (ey, sy) };
         // Drop tiny selections (likely accidental clicks).
         if (px_hi_x - px_lo_x) < 3.0 || (px_hi_y - px_lo_y) < 3.0 {
-            return;
+            return None;
         }
         let px_lo_x = px_lo_x.max(0.0).min(plot.width as f32);
         let px_lo_y = px_lo_y.max(0.0).min(plot.height as f32);
@@ -1714,6 +1915,27 @@ impl DottirApp {
             (cur_slice.q_range.start + (px_hi_x * cur_zoom).ceil() as usize).min(q.len());
         let sel_hi_y =
             (cur_slice.s_range.start + (px_hi_y * cur_zoom).ceil() as usize).min(s.len());
+        (sel_lo_x < sel_hi_x && sel_lo_y < sel_hi_y)
+            .then_some((sel_lo_x..sel_hi_x, sel_lo_y..sel_hi_y))
+    }
+
+    /// Zoom so residues `x` × `y` fill the canvas (with a panning margin).
+    fn zoom_to_residues(
+        &mut self,
+        plot_area: Rect,
+        x: std::ops::Range<usize>,
+        y: std::ops::Range<usize>,
+    ) {
+        let (Some(plot), Some(q), Some(s)) = (
+            self.plot.as_ref(),
+            self.query.as_ref(),
+            self.subject.as_ref(),
+        ) else {
+            return;
+        };
+        let cur_zoom_u = plot.params.zoom.max(1);
+        let ppp = self.pixels_per_point;
+        let (sel_lo_x, sel_hi_x, sel_lo_y, sel_hi_y) = (x.start, x.end, y.start, y.end);
         let sel_w = sel_hi_x.saturating_sub(sel_lo_x).max(1);
         let sel_h = sel_hi_y.saturating_sub(sel_lo_y).max(1);
 
@@ -2344,7 +2566,9 @@ impl eframe::App for DottirApp {
 
         // Esc → Back (history pop). Backspace also; both are dotter-
         // classic for "step out".
-        if ctx.input(|i| i.key_pressed(egui::Key::Escape) || i.key_pressed(egui::Key::Backspace)) {
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape) || i.key_pressed(egui::Key::Backspace))
+            && self.selection.take().is_none()
+        {
             self.action_back();
         }
         self.handle_keyboard(ctx);
@@ -2366,6 +2590,7 @@ impl eframe::App for DottirApp {
         if let Some((pa, rs)) = self.pending_rect_zoom.take() {
             self.action_rect_zoom(pa, rs);
         }
+        self.selection_menu(ctx);
 
         // Deferred initial compute: pre-loaded sequences (CLI or
         // load_sequence before the first paint) couldn't pick a
@@ -4486,6 +4711,44 @@ impl DottirApp {
                 }
             }
 
+            // Right-drag = selection with an action menu (zoom, copy
+            // coordinates, open in a new window).
+            if response.drag_started_by(egui::PointerButton::Secondary) {
+                if let Some(p) = response
+                    .interact_pointer_pos()
+                    .filter(|p| plot_area.contains(*p))
+                {
+                    self.selection = None;
+                    self.selection_drag = Some(RectSelect {
+                        start_screen: p,
+                        current_screen: p,
+                    });
+                }
+            }
+            if response.dragged_by(egui::PointerButton::Secondary) {
+                if let (Some(p), Some(rs)) = (
+                    response.interact_pointer_pos(),
+                    self.selection_drag.as_mut(),
+                ) {
+                    rs.current_screen = p;
+                }
+            }
+            if response.drag_stopped_by(egui::PointerButton::Secondary) {
+                if let Some(rs) = self.selection_drag.take() {
+                    self.selection =
+                        self.selection_residues(plot_area, &rs)
+                            .map(|(q, s)| Selection {
+                                q,
+                                s,
+                                plot_area,
+                                menu_at: rs.current_screen,
+                            });
+                }
+            }
+            if response.clicked_by(egui::PointerButton::Primary) {
+                self.selection = None;
+            }
+
             // Left-drag = pan. Plain drag, applied directly to
             // view_offset (1:1 means drag-delta is pixelmap-pixel
             // delta).
@@ -4639,6 +4902,38 @@ impl DottirApp {
                         egui::Stroke::new(1.0, Color32::from_rgb(40, 100, 200)),
                     );
                 }
+            }
+
+            // Right-drag selection: dashed-free outline in orange, while
+            // dragging and while its menu is open.
+            let sel_rect = match (&self.selection_drag, &self.selection) {
+                (Some(rs), _) => Some(Rect::from_two_pos(rs.start_screen, rs.current_screen)),
+                (None, Some(sel)) => {
+                    let z = plot.params.zoom.max(1) as f32;
+                    let (q_off, s_off) = self
+                        .current_slice
+                        .as_ref()
+                        .map_or((0, 0), |sl| (sl.q_range.start, sl.s_range.start));
+                    let at = |q: usize, s: usize| {
+                        Pos2::new(
+                            plot_area.left() + (q as f32 - q_off as f32) / z / ppp - draw_offset.x,
+                            plot_area.top() + (s as f32 - s_off as f32) / z / ppp - draw_offset.y,
+                        )
+                    };
+                    Some(Rect::from_two_pos(
+                        at(sel.q.start, sel.s.start),
+                        at(sel.q.end, sel.s.end),
+                    ))
+                }
+                _ => None,
+            };
+            if let Some(r) = sel_rect {
+                clip_painter.rect_filled(r, 0.0, Color32::from_rgba_unmultiplied(230, 120, 0, 28));
+                clip_painter.rect_stroke(
+                    r,
+                    0.0,
+                    egui::Stroke::new(1.5, Color32::from_rgb(230, 120, 0)),
+                );
             }
 
             // Annotation bands (ADR 0005). Query features paint as
@@ -6246,6 +6541,79 @@ fn pick_and_load(app: &mut DottirApp, role: SeqRole) {
     }
 }
 
+/// `n` residues as bp / kb / Mb.
+fn fmt_bp(n: u64) -> String {
+    match n {
+        0..=9_999 => format!("{n} bp"),
+        10_000..=9_999_999 => format!("{:.1} kb", n as f64 / 1e3),
+        _ => format!("{:.2} Mb", n as f64 / 1e6),
+    }
+}
+
+/// Pieces of plot interval `range` of `seq`, record by record: record,
+/// record-local lo..hi.
+fn record_pieces<'a>(
+    seq: &'a Sequence,
+    range: &std::ops::Range<usize>,
+) -> Vec<(&'a dottir_io::sequence::RecordSpan, usize, usize)> {
+    seq.records
+        .iter()
+        .filter_map(|r| {
+            let lo = range.start.max(r.range.start);
+            let hi = range.end.min(r.range.end);
+            (lo < hi).then(|| (r, lo - r.range.start, hi - r.range.start))
+        })
+        .collect()
+}
+
+/// Region specs (`name:start-end[:-]`, source coordinates) showing plot
+/// interval `range` of `seq`, in plot order. `flipped`: the whole axis
+/// is shown reverse-complemented (`-r`/`-v`), so plot positions count
+/// from the end.
+fn selection_specs(seq: &Sequence, range: &std::ops::Range<usize>, flipped: bool) -> Vec<String> {
+    let n = seq.len();
+    let r = if flipped {
+        n - range.end..n - range.start
+    } else {
+        range.clone()
+    };
+    let mut specs: Vec<String> = record_pieces(seq, &r)
+        .into_iter()
+        .map(|(rec, lo, hi)| {
+            let (name, _, a, b, rev) = rec.source_interval(lo, hi);
+            dottir_io::faidx::region_spec(name, &(a..b), rev ^ flipped)
+        })
+        .collect();
+    if flipped {
+        specs.reverse();
+    }
+    specs
+}
+
+/// BEDPE lines (query first, subject second; 0-based, end-exclusive) for
+/// every record pair under a selection.
+fn selection_bedpe(
+    q: &Sequence,
+    s: &Sequence,
+    qr: &std::ops::Range<usize>,
+    sr: &std::ops::Range<usize>,
+) -> String {
+    let mut out = String::new();
+    for (qrec, qlo, qhi) in record_pieces(q, qr) {
+        let (qn, _, qa, qb, qrev) = qrec.source_interval(qlo, qhi);
+        for (srec, slo, shi) in record_pieces(s, sr) {
+            let (sn, _, sa, sb, srev) = srec.source_interval(slo, shi);
+            let strand = |r: bool| if r { '-' } else { '+' };
+            out.push_str(&format!(
+                "{qn}\t{qa}\t{qb}\t{sn}\t{sa}\t{sb}\tselection\t.\t{}\t{}\n",
+                strand(qrev),
+                strand(srev)
+            ));
+        }
+    }
+    out
+}
+
 fn pick_and_load_annotation(app: &mut DottirApp, role: SeqRole) {
     let label = match role {
         SeqRole::Query => "Load annotation for query",
@@ -6728,5 +7096,41 @@ mod axis_profile_tests {
         )
         .unwrap();
         assert!(low_only.s.iter().all(|c| c.iter().sum::<f32>() == 0.0));
+    }
+}
+
+#[cfg(test)]
+mod selection_tests {
+    use super::*;
+
+    fn seq(text: &str) -> Sequence {
+        Sequence::from_records(dottir_io::fasta::parse_fasta(text).unwrap(), None)
+    }
+
+    #[test]
+    fn selections_map_to_source_regions() {
+        // a: 0..10, b: 10..30 in the plot.
+        let s = seq(">a\nACGTACGTAC\n>b\nACGTACGTACGTACGTACGT\n");
+        assert_eq!(selection_specs(&s, &(5..15), false), ["a:6-10", "b:1-5"]);
+        // Axis shown reverse-complemented: plot 0..5 is b's last 5 bp.
+        assert_eq!(selection_specs(&s, &(0..5), true), ["b:16-20:-"]);
+        assert_eq!(
+            selection_specs(&s, &(15..25), true),
+            ["b:1-5:-", "a:6-10:-"]
+        );
+        // A sorted (flipped) record keeps source coordinates.
+        let f = s.reordered(&[1, 0], &[false, true]);
+        assert_eq!(selection_specs(&f, &(0..5), false), ["b:16-20:-"]);
+    }
+
+    #[test]
+    fn bedpe_lists_every_record_pair() {
+        let q = seq(">a\nACGTACGTAC\n>b\nACGTACGTACGTACGTACGT\n");
+        let s = seq(">s\nACGTACGTAC\n").reordered(&[0], &[true]);
+        assert_eq!(
+            selection_bedpe(&q, &s, &(8..12), &(0..4)),
+            "a\t8\t10\ts\t6\t10\tselection\t.\t+\t-\n\
+             b\t0\t2\ts\t6\t10\tselection\t.\t+\t-\n"
+        );
     }
 }

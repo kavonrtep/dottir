@@ -97,6 +97,11 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     where runs meet at chunk boundaries (coverage was double-counted there).
 * FASTA parsing records soft-masked (lowercase) runs
   (`FastaRecord::soft_masked`, `Sequence::soft_mask`).
+* **Selections** (plan D4, G2): a right-button drag selects a rectangle
+  with *Zoom to selection*, *Open in new window* and *Copy coordinates
+  (BEDPE)*. The new window is `dottir-gui --query-region/--subject-region
+  NAME:START-END[:-]`, loading just those regions through the FASTA index
+  in their source coordinates.
 * **HSP overlays from PAF** (spec §4.2.3, plan E2/E4): *File → Load HSPs
   (PAF)…*, `--hsp-paf` / `--hsp-mode` in `dottir-gui` and `dottir batch`.
   Modes off / line / score (identity-coloured) / greyscale (replaces the

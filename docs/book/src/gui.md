@@ -31,6 +31,8 @@ Each positional is a FASTA file, or a GFF3 file with an embedded
 | `--gff-subject PATH` | — | Annotation overlay for the subject (vertical) axis. `--bed-subject` alias. |
 | `--hsp-paf PATH` | — | Alignments of a PAF file drawn over the plot ([HSPs](#hsps-paf)). |
 | `--hsp-mode {line,score,greyscale,off}` | `line` | How the HSPs are drawn. |
+| `--query-region REGION` | — | Plot only this region of QUERY: `NAME:START-END` (1-based, inclusive), `:-` appended for the reverse complement, or a whole record. Repeatable. QUERY must be a FASTA (plain or gzipped). |
+| `--subject-region REGION` | — | The same for SUBJECT. |
 | `--sort-records {vertical,horizontal}` | — | Order and orient one input's records along the other ([Sorting records](./large.md#sorting-records)). |
 
 Per-axis flags override `--gff`, which in turn overrides features
@@ -85,6 +87,8 @@ through the `--gff*` flags or **File → Load GFF3/BED…** instead.
 | Input | Action |
 |-------|--------|
 | Primary-button drag on the canvas | Pan |
+| Middle-button drag | Zoom to the rectangle |
+| Right-button drag | Select a rectangle and open its menu: *Zoom to selection*, *Open in new window*, *Copy coordinates (BEDPE)*. Esc or a click closes it. |
 | Scroll wheel on the canvas | Zoom on cursor |
 | Click on the canvas | Set crosshair |
 | Arrow keys | Nudge crosshair by 1 |
@@ -156,6 +160,22 @@ children still get distinct colors. BED files use one color per file.
 annotations overlapping the crosshair residue for the query (`q:`) and
 subject (`s:`) — all of them when features nest — and frames the
 crosshair cell in each alignment row in the feature's color.
+
+## Selections
+
+A right-button drag selects a rectangle; its menu offers:
+
+* **Zoom to selection** — as a middle-button drag.
+* **Open in new window** — starts another `dottir-gui` on just the selected
+  regions (`--query-region` / `--subject-region`) with the same mode,
+  matrix, strand, window, HSPs and annotation files. The regions keep the
+  coordinates of their source records, so positions, annotations and HSPs
+  line up; selections across several records give several regions,
+  sorted or reverse-complemented records give `:-` regions. Needs FASTA
+  inputs (a GFF3 with `##FASTA` cannot be indexed).
+* **Copy coordinates (BEDPE)** — one line per record pair under the
+  selection, query first, 0-based end-exclusive source coordinates, with
+  strands.
 
 ## HSPs (PAF)
 

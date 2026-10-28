@@ -41,6 +41,8 @@ pub enum FaidxError {
         end: u64,
         len: u64,
     },
+    #[error("region {spec:?}: {msg}")]
+    Spec { spec: String, msg: String },
 }
 
 fn io_err(path: &Path) -> impl FnOnce(std::io::Error) -> FaidxError + '_ {
@@ -239,6 +241,32 @@ pub fn plain_fasta(path: &Path, cache_dir: &Path) -> Result<PathBuf, FaidxError>
     Ok(out)
 }
 
+/// A region as text: `name:start-end`, 1-based inclusive like samtools,
+/// with `:-` appended for the reverse complement.
+pub fn region_spec(name: &str, range: &std::ops::Range<u64>, reverse: bool) -> String {
+    let strand = if reverse { ":-" } else { "" };
+    format!("{name}:{}-{}{strand}", range.start + 1, range.end)
+}
+
+/// The FASTA at `path` (plain or gzipped) cut to `specs` (see
+/// [`region_spec`]; a bare record name means the whole record), as one
+/// sequence whose records carry their [`RegionOrigin`].
+pub fn load_regions(
+    path: &Path,
+    specs: &[String],
+    cache_dir: &Path,
+) -> Result<Sequence, FaidxError> {
+    let plain = plain_fasta(path, cache_dir)?;
+    let index = FastaIndex::open(&plain, cache_dir)?;
+    let regions = specs
+        .iter()
+        .map(|s| index.parse_region(s))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut seq = index.region_sequence(&regions)?;
+    seq.source_path = Some(path.to_path_buf());
+    Ok(seq)
+}
+
 /// A region of an indexed record: `range` is 0-based, end-exclusive.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Region {
@@ -311,6 +339,42 @@ impl FastaIndex {
 
     pub fn find(&self, name: &str) -> Option<usize> {
         self.by_name.get(name).copied()
+    }
+
+    /// Parse a [`region_spec`] against this index.
+    pub fn parse_region(&self, spec: &str) -> Result<Region, FaidxError> {
+        let bad = |msg: &str| FaidxError::Spec {
+            spec: spec.to_string(),
+            msg: msg.to_string(),
+        };
+        let (body, reverse) = match spec.strip_suffix(":-") {
+            Some(b) => (b, true),
+            None => (spec.strip_suffix(":+").unwrap_or(spec), false),
+        };
+        // A record name may itself contain ':'; try the whole text first.
+        if let Some(rec) = self.find(body) {
+            return Ok(Region {
+                rec,
+                range: 0..self.entries[rec].len,
+                reverse,
+            });
+        }
+        let (name, range) = body.rsplit_once(':').ok_or_else(|| bad("no such record"))?;
+        let rec = self.find(name).ok_or_else(|| bad("no such record"))?;
+        let (a, b) = range
+            .replace(',', "")
+            .split_once('-')
+            .and_then(|(a, b)| Some((a.parse::<u64>().ok()?, b.parse::<u64>().ok()?)))
+            .ok_or_else(|| bad("expected NAME:START-END"))?;
+        let len = self.entries[rec].len;
+        if a == 0 || a > b || b > len {
+            return Err(bad(&format!("outside 1..{len} or empty")));
+        }
+        Ok(Region {
+            rec,
+            range: a - 1..b,
+            reverse,
+        })
     }
 
     /// The given regions as one multi-record [`Sequence`], reverse-
@@ -406,6 +470,39 @@ mod tests {
     // samtools faidx output for this file:
     // r1 10 9 4 5 / r2 6 27 6 8
     const FA: &str = ">r1 desc\nACGT\nacgt\nAC\n>r2\r\nGGGTTT\r\n";
+
+    #[test]
+    fn region_specs_round_trip_and_load() {
+        let d = tmp("spec");
+        let p = d.join("a.fa");
+        std::fs::write(&p, ">c:1 x\nACGTACGTAA\n>r2\nGGGTTT\n").unwrap();
+        let cache = d.join("cache");
+        let idx = FastaIndex::open(&p, &cache).unwrap();
+        let r = idx
+            .parse_region(&region_spec("c:1", &(2..6), true))
+            .unwrap();
+        assert_eq!(
+            r,
+            Region {
+                rec: 0,
+                range: 2..6,
+                reverse: true
+            }
+        );
+        assert_eq!(idx.parse_region("c:1").unwrap().range, 0..10);
+        assert_eq!(idx.parse_region("r2:2-3").unwrap().range, 1..3);
+        for bad in ["zz:1-2", "r2:0-2", "r2:3-2", "r2:1-7", "r2:a-b"] {
+            assert!(idx.parse_region(bad).is_err(), "{bad}");
+        }
+        let seq = load_regions(&p, &["c:1:3-6:-".into(), "r2".into()], &cache).unwrap();
+        assert_eq!(seq.bytes(), b"GTACGGGTTT");
+        let o = seq.records[0].origin.as_ref().unwrap();
+        assert_eq!(
+            (o.record.as_str(), o.range.clone(), o.reverse),
+            ("c:1", 2..6, true)
+        );
+        assert_eq!(seq.source_path.as_deref(), Some(p.as_path()));
+    }
 
     #[test]
     fn full_last_line_without_newline() {

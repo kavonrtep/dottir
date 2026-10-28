@@ -170,6 +170,18 @@ struct Cli {
     /// How HSPs are drawn.
     #[arg(long, value_name = "MODE", value_parser = ["line", "score", "greyscale", "off"])]
     hsp_mode: Option<String>,
+
+    /// Plot only this region of QUERY: `NAME:START-END` (1-based,
+    /// inclusive), `:-` appended for the reverse complement, or a bare
+    /// record name. Repeat for several regions, plotted in order. QUERY
+    /// must be a FASTA (plain or gzipped); positions stay in its
+    /// coordinates. *Open in new window* on a selection uses this.
+    #[arg(long, value_name = "REGION")]
+    query_region: Vec<String>,
+
+    /// Plot only this region of SUBJECT (as `--query-region`).
+    #[arg(long, value_name = "REGION")]
+    subject_region: Vec<String>,
 }
 
 #[derive(Copy, Clone, Debug, clap::ValueEnum)]
@@ -234,7 +246,7 @@ impl Cli {
         // One positional → self-comparison (subject mirrors query).
         // Two positionals → pairwise as given.
         let (subject, self_comparison) = match (self.query.as_ref(), self.subject) {
-            (Some(q), None) => (Some(q.clone()), true),
+            (Some(q), None) => (Some(q.clone()), self.query_region == self.subject_region),
             (_, sub) => (sub, false),
         };
         StartupConfig {
@@ -255,6 +267,8 @@ impl Cli {
             annot_query: self.annot_query.or_else(|| self.annot_self.clone()),
             annot_subject: self.annot_subject.or(self.annot_self),
             genome: None,
+            query_regions: self.query_region,
+            subject_regions: self.subject_region,
             hsp_paf: self.hsp_paf,
             hsp_mode: self
                 .hsp_mode
