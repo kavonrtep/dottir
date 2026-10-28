@@ -108,11 +108,19 @@ bases per pixel.
 ### Axis tracks
 
 With **Repeat tracks on axes**, a strip along the top (query) and left
-(subject) edge shows, per pixel column/row, the share of low (blue), mid
-(orange) and high-copy (red) bases as a bar growing away from the plot.
-A red mark on the outer edge flags seeds skipped by `--max-occ`. Hovering
-the strip shows the coordinates, median and maximum copy number, class
-percentages and the number of capped positions.
+(subject) edge is the profile of the dots you can see: for each pixel
+column/row, the matching bp of its visible dots divided by the bases the
+column spans — **aligned copies per base**, on a log scale (1 ≈ a tenth
+of the strip, 1000 = full). In a self-comparison unique sequence reads 1
+(the diagonal) and a 50-copy element about 50. The bar is split by the
+dots' class: unique (grey), low (blue), mid (orange), high (red). Hidden
+classes and dots below the white threshold do not count, so the strip
+changes with the class toggles and the sensitivity sliders.
+
+A red mark on the outer edge flags seeds skipped by `--max-occ`; those
+copies are not drawn. Hovering the strip shows the coordinates, the
+matching bp and copies per base, the class split and the copy number of
+the bases themselves (median and maximum).
 
 ## Chains
 

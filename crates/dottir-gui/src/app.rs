@@ -196,8 +196,10 @@ impl Default for LargeSettings {
     }
 }
 
-/// Height (top) / width (left) of the copy-number + capped-seed strip.
+/// Height (top) / width (left) of the dot-profile + capped-seed strip.
 const AXIS_TRACK: f32 = 16.0;
+/// Aligned copies per base at which the axis profile reaches full height.
+const AXIS_TRACK_MAX_COPIES: f32 = 1000.0;
 
 impl LargeSettings {
     fn to_session(&self) -> crate::session::SessionLarge {
@@ -587,6 +589,9 @@ pub struct DottirApp {
     /// Full large-engine result behind the current `plot`, if the large
     /// engine produced it.
     large_plot: Option<LargePlot>,
+    /// Matching bp of the visible dots per pixel column / row and class;
+    /// rebuilt with the texture.
+    axis_profile: Option<AxisProfile>,
     /// Window size resolved by the large engine; reused by exact-engine
     /// detail views so both engines draw the same features.
     locked_window: Option<u32>,
@@ -739,6 +744,7 @@ impl DottirApp {
             large_source: None,
             large_source_key: 0,
             large_plot: None,
+            axis_profile: None,
             locked_window: None,
         };
 
@@ -1809,6 +1815,59 @@ impl DottirApp {
         let handle = ctx.load_texture("dottir-pixelmap", image, TextureOptions::NEAREST);
         self.texture = Some(handle);
         self.texture_dirty = false;
+        self.axis_profile = self
+            .shown_large_plot()
+            .and_then(|lp| AxisProfile::of(lp, self.settings.large.classes, coverage, &lut));
+    }
+}
+
+/// Column (query) and row (subject) sums of the matching bp of every
+/// visible dot, split by repeat class: the marginals of what the plot
+/// shows. Divided by the zoom this is "aligned copies per base".
+struct AxisProfile {
+    q: Vec<[f32; RepeatClass::COUNT]>,
+    s: Vec<[f32; RepeatClass::COUNT]>,
+}
+
+impl AxisProfile {
+    /// `coverage_shading` / `lut` decide which dots are visible, exactly
+    /// as the texture does. `None` when the plot has no coverage.
+    fn of(
+        lp: &LargePlot,
+        classes: ClassMask,
+        coverage_shading: bool,
+        lut: &[u8; 256],
+    ) -> Option<Self> {
+        if !lp.has_coverage() {
+            return None;
+        }
+        let (w, h) = (lp.width as usize, lp.height as usize);
+        let decode: Vec<f32> = (0..=255u8).map(|c| coverage_bases(c) as f32).collect();
+        let mut q = vec![[0f32; RepeatClass::COUNT]; w];
+        let mut s = vec![[0f32; RepeatClass::COUNT]; h];
+        for c in classes.classes() {
+            for r in [false, true] {
+                let i = r as usize * RepeatClass::COUNT + c.index();
+                let cov = &lp.coverage[i];
+                let shade = if coverage_shading {
+                    cov
+                } else {
+                    &lp.channels[i]
+                };
+                if cov.is_empty() || shade.is_empty() {
+                    continue;
+                }
+                for (p, (&cv, &sv)) in cov.iter().zip(shade).enumerate() {
+                    if cv == 0 || lut[sv as usize] == 255 {
+                        continue;
+                    }
+                    let bp = decode[cv as usize];
+                    q[p % w][c.index()] += bp;
+                    s[p / w][c.index()] += bp;
+                }
+            }
+        }
+        Some(Self { q, s })
     }
 }
 
@@ -4046,11 +4105,12 @@ impl DottirApp {
     /// Tick spacing is picked so each adjacent label is at least
     /// `MIN_LABEL_SPACING_PX` apart in screen space, and the value
     /// step is a "nice" power-of-10 multiple (`1, 2, 5 × 10^k`).
-    /// Large mode: repeat-content strips just outside the top (query) and
-    /// left (subject) plot edges. Each pixel column/row shows the share of
-    /// low/mid/high-copy bases as a stacked bar growing away from the
-    /// plot, and a red mark at the outer edge where seeds were capped.
-    /// Returns the tooltip for a hovered bin.
+    /// Large mode: strips just outside the top (query) and left (subject)
+    /// plot edges. Each pixel column/row shows the matching bp of its
+    /// visible dots per base of sequence ("aligned copies per base", log
+    /// scale) as a bar growing away from the plot, split by the dots'
+    /// repeat class, plus a red mark at the outer edge where seeds were
+    /// capped. Returns the tooltip for a hovered bin.
     fn draw_axis_tracks(
         &self,
         ui: &egui::Ui,
@@ -4063,6 +4123,7 @@ impl DottirApp {
             return None;
         }
         let lp = self.shown_large_plot()?;
+        let prof = self.axis_profile.as_ref()?;
         let painter = ui.painter();
         let zoom = lp.zoom as usize;
         let bar = AXIS_TRACK - 5.0;
@@ -4072,10 +4133,10 @@ impl DottirApp {
         // `along` = position along the axis of bin i; `away` = distance
         // from the plot edge. Returns the screen rect for (along, away).
         for query_axis in [true, false] {
-            let (bins, capped, origin) = if query_axis {
-                (&lp.q_depth_bins, &lp.q_capped, lp.origin_q)
+            let (bins, capped, origin, profile) = if query_axis {
+                (&lp.q_depth_bins, &lp.q_capped, lp.origin_q, &prof.q)
             } else {
-                (&lp.s_depth_bins, &lp.s_capped, lp.origin_s)
+                (&lp.s_depth_bins, &lp.s_capped, lp.origin_s, &prof.s)
             };
             let (edge, lo, hi, off) = if query_axis {
                 (
@@ -4103,13 +4164,27 @@ impl DottirApp {
                 }
             };
             let first = ((off * ppp).floor().max(0.0)) as usize;
-            let last = (((off + (hi - lo)) * ppp).ceil() as usize).min(bins.len());
-            for (i, b) in bins.iter().enumerate().take(last).skip(first) {
+            let last = (((off + (hi - lo)) * ppp).ceil() as usize).min(profile.len());
+            for (i, bp) in profile.iter().enumerate().take(last).skip(first) {
+                // Log height: 1 copy/base ≈ 10 %, AXIS_TRACK_MAX_COPIES full.
+                let copies = bp.iter().sum::<f32>() / zoom as f32;
+                let total_h =
+                    ((1.0 + copies).ln() / (1.0 + AXIS_TRACK_MAX_COPIES).ln()).min(1.0) * bar;
+                let total_bp: f32 = bp.iter().sum();
                 let mut from = 1.0;
-                for c in [RepeatClass::Low, RepeatClass::Mid, RepeatClass::High] {
-                    let h = b.class_frac[c.index()] as f32 / 255.0 * bar;
+                for c in RepeatClass::ALL {
+                    let h = if total_bp > 0.0 {
+                        bp[c.index()] / total_bp * total_h
+                    } else {
+                        0.0
+                    };
                     if h > 0.0 {
-                        painter.rect_filled(cell(i, from, from + h), 0.0, CLASS_COLOURS[c.index()]);
+                        let colour = if c == RepeatClass::Unique {
+                            Color32::from_gray(90)
+                        } else {
+                            CLASS_COLOURS[c.index()]
+                        };
+                        painter.rect_filled(cell(i, from, from + h), 0.0, colour);
                         from += h;
                     }
                 }
@@ -4136,11 +4211,12 @@ impl DottirApp {
                     )
                 };
                 let i = ((along - lo + off) * ppp).floor() as usize;
-                if let (true, Some(b)) = (inside, bins.get(i)) {
+                if let (true, Some(b), Some(bp)) = (inside, bins.get(i), profile.get(i)) {
                     tip = Some(depth_bin_text(
                         if query_axis { "Query" } else { "Subject" },
                         origin + i * zoom,
                         zoom,
+                        bp,
                         b,
                         capped.get(i).copied().unwrap_or(0),
                     ));
@@ -4397,25 +4473,45 @@ fn coverage_lut(white_bp: f32, black_bp: f32) -> [u8; 256] {
     lut
 }
 
-fn depth_bin_text(axis: &str, start: usize, zoom: usize, b: &DepthBin, capped: u32) -> String {
-    let pct = |c: RepeatClass| b.class_frac[c.index()] as f32 / 2.55;
+fn depth_bin_text(
+    axis: &str,
+    start: usize,
+    zoom: usize,
+    shown_bp: &[f32; RepeatClass::COUNT],
+    b: &DepthBin,
+    capped: u32,
+) -> String {
+    let total: f32 = shown_bp.iter().sum();
+    let pct = |c: RepeatClass| {
+        if total > 0.0 {
+            shown_bp[c.index()] / total * 100.0
+        } else {
+            0.0
+        }
+    };
     let max = if b.max == u16::MAX {
         "≥ max-occ".to_string()
     } else {
         b.max.to_string()
     };
     let mut t = format!(
-        "{axis} {}–{}\ncopies: median {}, max {max}\nunique {:.0}% · low {:.0}% · mid {:.0}% · high {:.0}%",
+        "{axis} {}–{}\nvisible dots: {} bp matching = {:.1} copies per base\n\
+         of which unique {:.0}% · low {:.0}% · mid {:.0}% · high {:.0}%\n\
+         copy number of these bases: median {}, max {max}",
         format_thousands(start),
         format_thousands(start + zoom),
-        b.median,
+        format_thousands(total.round() as usize),
+        total / zoom as f32,
         pct(RepeatClass::Unique),
         pct(RepeatClass::Low),
         pct(RepeatClass::Mid),
         pct(RepeatClass::High),
+        b.median,
     );
     if capped > 0 {
-        t.push_str(&format!("\n{capped} positions with capped seeds"));
+        t.push_str(&format!(
+            "\n{capped} positions with capped seeds (not drawn)"
+        ));
     }
     t
 }
@@ -5588,10 +5684,61 @@ mod large_display_tests {
             max: u16::MAX,
             class_frac: [0, 51, 153, 51],
         };
-        let t = depth_bin_text("Query", 12_000, 1000, &b, 3);
+        let t = depth_bin_text("Query", 12_000, 1000, &[1000.0, 0.0, 3000.0, 0.0], &b, 3);
         assert!(t.contains("Query 12,000–13,000"), "{t}");
+        assert!(t.contains("4,000 bp matching = 4.0 copies per base"), "{t}");
+        assert!(t.contains("unique 25%"), "{t}");
+        assert!(t.contains("mid 75%"), "{t}");
         assert!(t.contains("median 7, max ≥ max-occ"), "{t}");
-        assert!(t.contains("mid 60%"), "{t}");
         assert!(t.contains("3 positions with capped seeds"), "{t}");
+    }
+}
+
+#[cfg(test)]
+mod axis_profile_tests {
+    use super::*;
+    use dottir_core::large::{compute_large_dotplot, LargeInput};
+
+    #[test]
+    fn profile_is_the_marginal_of_visible_dots() {
+        // Self-comparison of random sequence: only the main diagonal, so
+        // every column carries ~zoom matching bp of unique dots.
+        let mut st = 7u64;
+        let q: Vec<u8> = (0..20_000)
+            .map(|_| {
+                st = st
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                b"ACGT"[(st >> 62) as usize]
+            })
+            .collect();
+        let cfg = LargeConfig {
+            zoom: 500,
+            self_comparison: true,
+            coverage: true,
+            depth: DepthMethod::None,
+            ..LargeConfig::default()
+        };
+        let lp = compute_large_dotplot(&LargeInput::self_comparison(&q, &[]), &cfg).unwrap();
+        let lut = coverage_lut(1.0, 1000.0);
+        let p = AxisProfile::of(&lp, ClassMask::ALL, true, &lut).unwrap();
+        let unique = RepeatClass::Unique.index();
+        for col in &p.q[2..p.q.len() - 2] {
+            let copies = col.iter().sum::<f32>() / 500.0;
+            assert!((0.8..1.3).contains(&copies), "{copies}");
+            assert_eq!(col.iter().sum::<f32>(), col[unique]);
+        }
+        // Hiding every dot (white above anything present) empties it.
+        let none = AxisProfile::of(&lp, ClassMask::ALL, true, &coverage_lut(1e6, 2e6)).unwrap();
+        assert!(none.q.iter().all(|c| c.iter().sum::<f32>() == 0.0));
+        // Hidden classes do not count.
+        let low_only = AxisProfile::of(
+            &lp,
+            ClassMask::from_classes(&[RepeatClass::Low]),
+            true,
+            &lut,
+        )
+        .unwrap();
+        assert!(low_only.s.iter().all(|c| c.iter().sum::<f32>() == 0.0));
     }
 }
