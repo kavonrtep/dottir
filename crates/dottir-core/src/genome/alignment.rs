@@ -203,9 +203,82 @@ pub fn sort_alignments(alns: &mut [Alignment]) {
     });
 }
 
+/// Overlap fraction (of the shorter query span) above which a lower-
+/// scoring alignment is secondary to a primary, as minimap2's default
+/// `--mask-level`.
+pub const MASK_LEVEL: f64 = 0.5;
+
+/// Mark primaries the way minimap2 does without `-P`, for PAFs that have
+/// none (`-P` reports every chain as `tp:A:S`): in descending score
+/// (matches, then block length, then position), an alignment is primary
+/// unless at least `mask_level` of the shorter query span overlaps an
+/// earlier primary of the same query record.
+pub fn assign_primary(alns: &mut [Alignment], mask_level: f64) {
+    use std::collections::BTreeMap;
+    let mut by_score: Vec<usize> = (0..alns.len()).collect();
+    by_score.sort_by(|&i, &j| {
+        let (a, b) = (&alns[i], &alns[j]);
+        (b.matches, b.block_len)
+            .cmp(&(a.matches, a.block_len))
+            .then(
+                (
+                    a.q_rec, a.q_start, a.q_end, a.t_rec, a.t_start, a.t_end, a.reverse,
+                )
+                    .cmp(&(
+                        b.q_rec, b.q_start, b.q_end, b.t_rec, b.t_start, b.t_end, b.reverse,
+                    )),
+            )
+    });
+    // Per query record: primaries keyed by (start, index) → end, and the
+    // longest primary, which bounds how far left an overlap can start.
+    type Primaries = (BTreeMap<(u64, usize), u64>, u64);
+    let mut primaries: BTreeMap<u32, Primaries> = BTreeMap::new();
+    for i in by_score {
+        let a = &alns[i];
+        let (set, longest) = primaries.entry(a.q_rec).or_default();
+        let len = a.q_len();
+        let secondary = set
+            .range(..(a.q_end, 0))
+            .rev()
+            .take_while(|&(&(start, _), _)| start + *longest > a.q_start)
+            .any(|(&(start, _), &end)| {
+                let overlap = end.min(a.q_end).saturating_sub(start.max(a.q_start));
+                overlap > 0 && overlap as f64 >= mask_level * len.min(end - start) as f64
+            });
+        if !secondary {
+            set.insert((a.q_start, i), a.q_end);
+            *longest = (*longest).max(len);
+        }
+        alns[i].primary = !secondary;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn primaries_follow_minimap2_mask_level() {
+        // A long best hit, a repeat copy inside it, a hit half inside it,
+        // one barely overlapping, and a hit on another stretch.
+        let mut alns = vec![
+            aln((1000, 2000), (0, 100), false),
+            aln((0, 10_000), (0, 10_000), false),
+            aln((9_500, 10_500), (50_000, 51_000), true),
+            aln((9_900, 12_000), (60_000, 62_100), false),
+            aln((20_000, 21_000), (70_000, 71_000), false),
+        ];
+        for a in &mut alns {
+            a.primary = false;
+        }
+        assign_primary(&mut alns, MASK_LEVEL);
+        let p: Vec<bool> = alns.iter().map(|a| a.primary).collect();
+        assert_eq!(p, [false, true, false, true, true]);
+        // Input order does not matter.
+        let mut rev: Vec<Alignment> = alns.iter().rev().cloned().collect();
+        assign_primary(&mut rev, MASK_LEVEL);
+        assert_eq!(rev.iter().rev().map(|a| a.primary).collect::<Vec<_>>(), p);
+    }
 
     fn aln(q: (u64, u64), t: (u64, u64), reverse: bool) -> Alignment {
         Alignment {

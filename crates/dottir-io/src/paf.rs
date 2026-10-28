@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 
+use dottir_core::genome::alignment::{assign_primary, MASK_LEVEL};
 use dottir_core::genome::{Alignment, GenomeRecord};
 use flate2::read::MultiGzDecoder;
 use thiserror::Error;
@@ -222,6 +223,11 @@ pub fn read_paf<R: BufRead>(
     }
     qn.finish()?;
     tn.finish()?;
+    // minimap2 -P marks every chain secondary; derive the primaries it
+    // would have chosen so "primary only" still means something.
+    if !out.is_empty() && out.iter().all(|a| !a.primary) {
+        assign_primary(&mut out, MASK_LEVEL);
+    }
     Ok(out)
 }
 

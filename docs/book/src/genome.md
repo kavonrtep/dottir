@@ -64,7 +64,11 @@ adds `-P`, keeping every chain: the same pair gives 597 k alignments in
 chromosomes. In a self-comparison the Col-CC centromeres alone give a
 million. Satellite arrays such as CEN180 stay mostly empty either way;
 dot-plot a region (below) to see them. `--self-all-copies` is accepted as
-an alias.
+an alias. `-P` marks every alignment secondary, so dottir re-derives the
+primaries minimap2 would have picked (best score first; secondary when
+half the shorter query span overlaps a primary): *Primary only* then
+shows the best-placement view again (130 primaries here, against 137
+from the run without `-P`).
 
 **Cache.** Results are kept in `~/.cache/dottir/genome/` (or
 `$XDG_CACHE_HOME/dottir`, `%LOCALAPPDATA%\dottir\cache` on Windows,
