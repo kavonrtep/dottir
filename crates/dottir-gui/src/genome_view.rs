@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 pub const DEFAULT_DRILL_LIMIT_MB: f64 = 150.0;
 const LEFT_MARGIN: f32 = 110.0;
 const TOP_MARGIN: f32 = 28.0;
-const STATUS_H: f32 = 20.0;
+const BOTTOM_MARGIN: f32 = 6.0;
 /// Hover picks the nearest alignment within this many screen pixels.
 const HOVER_PX: f32 = 6.0;
 const CLASS_LABELS: [&str; 4] = ["< 25 %", "25–50 %", "50–75 %", "≥ 75 %"];
@@ -320,6 +320,8 @@ pub struct GenomeView {
     /// Where the context menu was opened, in axis bp.
     context_at: Option<(f64, f64)>,
     pub message: Option<String>,
+    /// Pointer position and counts, for the status bar.
+    pub status: String,
 }
 
 impl GenomeView {
@@ -360,6 +362,7 @@ impl GenomeView {
             cursor: None,
             context_at: None,
             message: None,
+            status: String::new(),
         }
     }
 
@@ -584,7 +587,7 @@ impl GenomeView {
         let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
         let plot = Rect::from_min_max(
             Pos2::new(rect.left() + LEFT_MARGIN, rect.top() + TOP_MARGIN),
-            Pos2::new(rect.right() - 8.0, rect.bottom() - STATUS_H),
+            Pos2::new(rect.right() - 8.0, rect.bottom() - BOTTOM_MARGIN),
         );
         if plot.width() < 20.0 || plot.height() < 20.0 {
             return None;
@@ -727,8 +730,9 @@ impl GenomeView {
                 painter.rect_filled(Rect::from_x_y_ranges(plot.x_range(), a..=b), 0.0, shade);
             }
         }
-        let font = egui::FontId::proportional(11.0);
-        let small = egui::FontId::proportional(10.0);
+        // As the dotplot's axis labels.
+        let font = egui::FontId::monospace(11.0);
+        let small = egui::FontId::monospace(10.0);
         // Vertical grid and record names along the top.
         let mut last_label = f32::NEG_INFINITY;
         for (i, s) in xl.segments.iter().enumerate() {
@@ -867,13 +871,7 @@ impl GenomeView {
                 status = format!("x {xs}   y {ys}   ·   {status}");
             }
         }
-        painter.text(
-            Pos2::new(rect.left() + 4.0, rect.bottom() - 3.0),
-            egui::Align2::LEFT_BOTTOM,
-            status,
-            font,
-            ui.visuals().text_color(),
-        );
+        self.status = status;
 
         response.context_menu(|ui| {
             if let Some(a) = self.context_menu(ui) {
@@ -984,41 +982,69 @@ impl GenomeView {
         action
     }
 
-    /// The side panel: inputs, filters, order, legend, drill-down,
-    /// exports.
+    /// The right-hand panel, laid out like the dotplot's: view, inputs,
+    /// filters, order, legend, drill-down, exports.
     pub fn panel_ui(&mut self, ui: &mut egui::Ui) -> Option<GenomeAction> {
         let mut action = None;
-        ui.heading("Genome comparison");
+        ui.style_mut().spacing.item_spacing = Vec2::new(4.0, 3.0);
+        ui.style_mut().spacing.interact_size.y = 18.0;
+        let small = |s: String| egui::RichText::new(s).size(11.0);
+        let weak = |s: String| {
+            egui::RichText::new(s)
+                .size(11.0)
+                .color(Color32::from_gray(110))
+        };
+
+        heading(ui, "View");
+        ui.horizontal(|ui| {
+            if ui
+                .button("Fit")
+                .on_hover_text("Show both assemblies whole (double-click).")
+                .clicked()
+            {
+                self.fit();
+            }
+            if ui
+                .add_enabled(!self.history.is_empty(), egui::Button::new("Back"))
+                .on_hover_text("Return to the previous view (Esc).")
+                .clicked()
+            {
+                self.back();
+            }
+        });
+        ui.separator();
+
+        heading(ui, "Sequences");
         let d = &self.data;
         let self_comparison = d.self_comparison;
         let approximate = d.alns.first().is_some_and(|a| a.divergence.is_none());
         let asm = |ui: &mut egui::Ui, what: &str, a: &Assembly| {
-            ui.label(format!(
-                "{what}: {}\n    {} records, {}",
+            ui.label(small(format!(
+                "{what}: {}  {} · {} recs",
                 file_name(&a.path),
+                span_text(a.total() as f64),
                 thousands(a.records.len() as u64),
-                span_text(a.total() as f64)
-            ))
+            )))
             .on_hover_text(a.path.display().to_string());
         };
-        asm(ui, "x (reference)", &d.x);
-        if d.self_comparison {
-            ui.label("y: same (self-comparison)");
+        asm(ui, "Reference", &d.x);
+        if self_comparison {
+            ui.label(small("Query: same (self-comparison)".into()));
         } else {
-            asm(ui, "y (query)", &d.y);
+            asm(ui, "Query    ", &d.y);
         }
-        ui.label(format!("Alignments: {}", d.source));
-        ui.label(format!(
-            "{} alignments, {} drawn",
+        ui.label(weak(d.source.clone()));
+        ui.label(weak(format!(
+            "{} alignments · {} drawn",
             thousands(d.alns.len() as u64),
             thousands(self.drawn as u64)
-        ));
+        )));
         ui.separator();
 
-        ui.strong("Filters");
+        heading(ui, "Filters");
         let mut changed = false;
         ui.horizontal(|ui| {
-            ui.label("Min length");
+            ui.label(small("Min length".into()));
             changed |= ui
                 .add(
                     egui::DragValue::new(&mut self.filter.min_len)
@@ -1028,41 +1054,42 @@ impl GenomeView {
                 )
                 .changed();
         });
-        ui.horizontal(|ui| {
-            ui.label("Min identity");
-            let r = ui
-                .add(egui::Slider::new(&mut self.filter.min_identity, 0.0..=1.0).fixed_decimals(2));
-            // Re-filtering a million alignments per slider step stutters;
-            // apply when the drag ends.
-            changed |= r.drag_stopped() || (r.changed() && !r.dragged());
-        });
+        ui.label(small("Min identity".into()));
+        let r =
+            ui.add(egui::Slider::new(&mut self.filter.min_identity, 0.0..=1.0).fixed_decimals(2));
+        // Re-filtering a million alignments per slider step stutters;
+        // apply when the drag ends.
+        changed |= r.drag_stopped() || (r.changed() && !r.dragged());
         changed |= ui
-            .checkbox(&mut self.filter.primary_only, "Primary alignments only")
+            .checkbox(&mut self.filter.primary_only, small("Primary only".into()))
             .changed();
         changed |= ui
-            .checkbox(&mut self.filter.remove_noise, "Remove noise (D-GENIES)")
+            .checkbox(
+                &mut self.filter.remove_noise,
+                small("Remove noise (D-GENIES)".into()),
+            )
             .on_hover_text(
                 "With more than 1000 alignments, hide those shorter than \
                  the first sparse length bin after the most populated one",
             )
             .changed();
         if let Some(t) = self.arranged.noise {
-            ui.weak(format!("    noise below {}", span_text(t)));
+            ui.label(weak(format!("noise below {}", span_text(t))));
         }
         ui.separator();
 
-        ui.strong("Order");
+        heading(ui, "Order");
         changed |= ui
             .add_enabled(
                 !self_comparison,
-                egui::Checkbox::new(&mut self.sort, "Sort query along reference"),
+                egui::Checkbox::new(&mut self.sort, small("Sort query along reference".into())),
             )
             .changed();
         let n_flipped = self.flips.iter().filter(|&&f| f).count();
         if ui
             .add_enabled(
                 n_flipped > 0,
-                egui::Button::new(format!("Reset flips ({n_flipped})")),
+                egui::Button::new(format!("Reset flips ({n_flipped})")).small(),
             )
             .on_hover_text("Right-click a record in the plot to flip it")
             .clicked()
@@ -1070,8 +1097,27 @@ impl GenomeView {
             self.flips.fill(false);
             changed = true;
         }
+        if changed {
+            self.rearrange();
+        }
+        ui.separator();
+
+        heading(ui, "Identity");
+        for (k, c) in IDENTITY_COLOURS.iter().enumerate() {
+            ui.horizontal(|ui| {
+                let (r, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
+                ui.painter()
+                    .rect_filled(r, 2.0, Color32::from_rgb(c[0], c[1], c[2]));
+                ui.label(small(CLASS_LABELS[k].into()));
+            });
+        }
+        if approximate {
+            ui.label(weak(
+                "Approximate: no de:f tags (aligner -c for exact)".into(),
+            ));
+        }
         ui.horizontal(|ui| {
-            ui.label("Line width");
+            ui.label(small("Line width".into()));
             if ui
                 .add(egui::Slider::new(&mut self.line_width, 1..=5).suffix(" px"))
                 .changed()
@@ -1079,35 +1125,18 @@ impl GenomeView {
                 self.version += 1;
             }
         });
-        if changed {
-            self.rearrange();
-        }
         ui.separator();
 
-        ui.strong("Identity");
-        for (k, c) in IDENTITY_COLOURS.iter().enumerate() {
-            ui.horizontal(|ui| {
-                let (r, _) = ui.allocate_exact_size(Vec2::new(22.0, 10.0), Sense::hover());
-                ui.painter()
-                    .rect_filled(r, 1.0, Color32::from_rgb(c[0], c[1], c[2]));
-                ui.label(CLASS_LABELS[k]);
-            });
-        }
-        if approximate {
-            ui.weak("Approximate (no de:f tags; run the aligner with -c for exact identities)");
-        }
-        ui.separator();
-
-        ui.strong("Dot-plot");
+        heading(ui, "Dot-plot");
         ui.horizontal(|ui| {
-            ui.label("Up to");
+            ui.label(small("Up to".into()));
             ui.add(
                 egui::DragValue::new(&mut self.drill_limit_mb)
                     .speed(1.0)
                     .range(1.0..=2000.0)
                     .suffix(" Mb"),
             );
-            ui.label("per axis");
+            ui.label(small("per axis".into()));
         });
         if ui
             .add_enabled(
@@ -1124,37 +1153,75 @@ impl GenomeView {
             action = Some(GenomeAction::DrillDown { x, y });
         }
         if !self.view_fits_drill() {
-            ui.weak(format!(
-                "Zoom in to at most {} per axis (wheel, or Shift/middle-drag a rectangle)",
+            ui.label(weak(format!(
+                "Zoom in to at most {} per axis",
                 span_text(self.drill_limit())
-            ));
+            )));
         }
         ui.separator();
 
-        ui.strong("Export");
-        if ui.button("Plot (PNG)…").clicked() {
-            self.export(Export::Png);
-        }
-        if ui.button("Association table (TSV)…").clicked() {
-            self.export(Export::Association);
-        }
-        if ui
-            .add_enabled(
-                !self_comparison,
-                egui::Button::new("Query in plot order (FASTA)…"),
-            )
-            .clicked()
-        {
-            self.export(Export::SortedQuery);
-        }
-        if ui.button("Drawn alignments (PAF)…").clicked() {
-            self.export(Export::Paf);
-        }
+        heading(ui, "Export");
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .small_button("PNG…")
+                .on_hover_text("The whole plot")
+                .clicked()
+            {
+                self.export(Export::Png);
+            }
+            if ui
+                .small_button("Association…")
+                .on_hover_text("Best reference record per query record (TSV)")
+                .clicked()
+            {
+                self.export(Export::Association);
+            }
+            if ui
+                .add_enabled(!self_comparison, egui::Button::new("Sorted query…").small())
+                .on_hover_text("Query FASTA in plot order, reverse-complemented as shown")
+                .clicked()
+            {
+                self.export(Export::SortedQuery);
+            }
+            if ui
+                .small_button("PAF…")
+                .on_hover_text("The alignments drawn")
+                .clicked()
+            {
+                self.export(Export::Paf);
+            }
+        });
         if let Some(m) = &self.message {
-            ui.separator();
-            ui.label(m);
+            ui.label(weak(m.clone()));
         }
         action
+    }
+
+    /// Save the whole plot as PNG (also *File → Save PNG*).
+    pub fn export_png(&mut self) {
+        self.export(Export::Png);
+    }
+
+    /// Menu-bar labels of the two inputs, as the dotplot shows them.
+    pub fn input_labels(&self) -> (String, String) {
+        let label = |a: &Assembly| {
+            format!(
+                "{} ({} bp, {} records)",
+                file_name(&a.path),
+                thousands(a.total()),
+                a.records.len()
+            )
+        };
+        let q = if self.data.self_comparison {
+            "same (self-comparison)".to_string()
+        } else {
+            label(&self.data.y)
+        };
+        (label(&self.data.x), q)
+    }
+
+    pub fn can_go_back(&self) -> bool {
+        !self.history.is_empty()
     }
 
     fn export(&mut self, what: Export) {
@@ -1249,6 +1316,15 @@ enum Export {
     Association,
     SortedQuery,
     Paf,
+}
+
+fn heading(ui: &mut egui::Ui, text: &str) {
+    ui.label(
+        egui::RichText::new(text)
+            .strong()
+            .size(13.0)
+            .color(Color32::from_gray(50)),
+    );
 }
 
 /// Clip segment `p0`–`p1` to the box `[-m, w + m] × [-m, h + m]`

@@ -2500,102 +2500,32 @@ impl DottirApp {
         self.crosshair = Some((q_residue as u32, s_residue as u32));
     }
 
-    /// A frame of the genome view: menu, side panel, plot.
+    /// A frame of the genome view: the dotplot's menu, status bar and
+    /// right-hand panel layout around the genome plot.
     fn update_genome(&mut self, ctx: &Context) {
         if ctx.input(|i| i.key_pressed(egui::Key::Escape) || i.key_pressed(egui::Key::Backspace)) {
             if let Some(g) = &mut self.genome {
                 g.back();
             }
         }
-        egui::TopBottomPanel::top("genome-menu").show(ctx, |ui| {
-            egui::menu::bar(ui, |ui| {
-                ui.menu_button("File", |ui| {
-                    if ui.button("Open genome comparison…").clicked() {
-                        ui.close_menu();
-                        self.open_genome_dialog();
-                    }
-                    if ui.button("Open sequences (dotplot)…").clicked() {
-                        ui.close_menu();
-                        self.genome_active = false;
-                        pick_and_load(self, SeqRole::Query);
-                    }
-                    ui.separator();
-                    if ui.button("Save session…").clicked() {
-                        ui.close_menu();
-                        save_session(self);
-                    }
-                    if ui.button("Open session…").clicked() {
-                        ui.close_menu();
-                        open_session(self, ctx);
-                    }
-                    ui.separator();
-                    if ui.button("Quit").clicked() {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                    }
-                });
-                ui.menu_button("View", |ui| {
-                    if ui.button("Fit (double-click)").clicked() {
-                        ui.close_menu();
-                        if let Some(g) = &mut self.genome {
-                            g.fit();
-                        }
-                    }
-                    if ui.button("Back (Esc)").clicked() {
-                        ui.close_menu();
-                        if let Some(g) = &mut self.genome {
-                            g.back();
-                        }
-                    }
-                    if ui
-                        .add_enabled(self.query.is_some(), egui::Button::new("Dot-plot view"))
-                        .clicked()
-                    {
-                        ui.close_menu();
-                        self.genome_active = false;
-                    }
-                    ui.separator();
-                    let theme_label = if self.light_theme {
-                        "Switch to dark theme"
-                    } else {
-                        "Switch to light theme"
-                    };
-                    if ui.button(theme_label).clicked() {
-                        self.light_theme = !self.light_theme;
-                        ctx.set_visuals(if self.light_theme {
-                            egui::Visuals::light()
-                        } else {
-                            egui::Visuals::dark()
-                        });
-                    }
-                    ui.separator();
-                    ui.menu_button("Mouse…", |ui| {
-                        for (keys, desc) in [
-                            ("Wheel", "zoom at the pointer"),
-                            ("L-drag", "pan"),
-                            ("Shift/M-drag", "zoom into rectangle"),
-                            ("Double-click", "fit"),
-                            ("R-click", "dot-plot a region, flip a record"),
-                            ("Esc/Bsp", "back"),
-                        ] {
-                            ui.horizontal(|ui| {
-                                ui.label(
-                                    egui::RichText::new(format!("{keys:<13}"))
-                                        .font(egui::FontId::monospace(11.0)),
-                                );
-                                ui.label(desc);
-                            });
-                        }
-                    });
-                });
-            });
-        });
+        self.draw_menu(ctx);
         let Some(g) = &mut self.genome else {
             return;
         };
+        egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
+            ui.horizontal(|ui| match &self.last_error {
+                Some(err) => {
+                    ui.colored_label(Color32::from_rgb(220, 90, 70), err);
+                }
+                None => {
+                    ui.label(format!("genome mode · {}", g.status));
+                }
+            });
+        });
         let mut action = None;
-        egui::SidePanel::left("genome-panel")
-            .resizable(true)
-            .default_width(250.0)
+        egui::SidePanel::right("side_panel")
+            .resizable(false)
+            .default_width(220.0)
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     action = g.panel_ui(ui);
@@ -2763,6 +2693,9 @@ impl DottirApp {
             // use the default body size.
             ui.style_mut().spacing.item_spacing.x = 6.0;
             ui.style_mut().spacing.button_padding = Vec2::new(4.0, 2.0);
+            // Genome view: the same menu, with Fit / Back / Save PNG acting
+            // on it and dotplot-only items disabled.
+            let genome = self.genome_active && self.genome.is_some();
             egui::menu::bar(ui, |ui| {
                 ui.menu_button("File", |ui| {
                     if ui.button("Open genome comparison…").clicked() {
@@ -2771,16 +2704,21 @@ impl DottirApp {
                     }
                     if ui.button("Open query sequence (FASTA/GFF3)…").clicked() {
                         ui.close_menu();
+                        self.genome_active = false;
                         pick_and_load(self, SeqRole::Query);
                     }
                     if ui.button("Open subject sequence (FASTA/GFF3)…").clicked() {
                         ui.close_menu();
+                        self.genome_active = false;
                         pick_and_load(self, SeqRole::Subject);
                     }
                     ui.separator();
                     if self.settings.self_comparison {
                         if ui
-                            .add_enabled(self.query.is_some(), egui::Button::new("Load GFF3/BED…"))
+                            .add_enabled(
+                                !genome && self.query.is_some(),
+                                egui::Button::new("Load GFF3/BED…"),
+                            )
                             .clicked()
                         {
                             ui.close_menu();
@@ -2789,7 +2727,7 @@ impl DottirApp {
                     } else {
                         if ui
                             .add_enabled(
-                                self.query.is_some(),
+                                !genome && self.query.is_some(),
                                 egui::Button::new("Load GFF3/BED for query…"),
                             )
                             .clicked()
@@ -2799,7 +2737,7 @@ impl DottirApp {
                         }
                         if ui
                             .add_enabled(
-                                self.subject.is_some(),
+                                !genome && self.subject.is_some(),
                                 egui::Button::new("Load GFF3/BED for subject…"),
                             )
                             .clicked()
@@ -2811,9 +2749,16 @@ impl DottirApp {
                     ui.separator();
                     if ui.button("Save PNG…").clicked() {
                         ui.close_menu();
-                        save_png(self);
+                        match (genome, &mut self.genome) {
+                            (true, Some(g)) => g.export_png(),
+                            _ => save_png(self),
+                        }
                     }
-                    if ui.button("Save SVG…").clicked() {
+                    if ui
+                        .add_enabled(!genome, egui::Button::new("Save SVG…"))
+                        .on_disabled_hover_text("Not yet available for genome plots")
+                        .clicked()
+                    {
                         ui.close_menu();
                         save_svg(self);
                     }
@@ -2832,18 +2777,48 @@ impl DottirApp {
                     }
                 });
                 ui.menu_button("View", |ui| {
-                    if self.genome.is_some() && ui.button("Genome view").clicked() {
+                    if genome {
+                        if ui
+                            .add_enabled(self.query.is_some(), egui::Button::new("Dot-plot view"))
+                            .clicked()
+                        {
+                            ui.close_menu();
+                            self.genome_active = false;
+                        }
+                    } else if self.genome.is_some() && ui.button("Genome view").clicked() {
                         ui.close_menu();
                         self.genome_active = true;
                     }
-                    ui.menu_button("Sort records", |ui| self.record_sort_menu(ui));
                     if ui.button("Fit (reset to canonical zoom)").clicked() {
-                        self.action_fit();
+                        ui.close_menu();
+                        match (genome, &mut self.genome) {
+                            (true, Some(g)) => g.fit(),
+                            _ => self.action_fit(),
+                        }
                     }
-                    if ui.button("Back (Esc)").clicked() {
-                        self.action_back();
+                    let can_back = match (genome, &self.genome) {
+                        (true, Some(g)) => g.can_go_back(),
+                        _ => !self.history.is_empty(),
+                    };
+                    if ui
+                        .add_enabled(can_back, egui::Button::new("Back (Esc)"))
+                        .clicked()
+                    {
+                        ui.close_menu();
+                        match (genome, &mut self.genome) {
+                            (true, Some(g)) => g.back(),
+                            _ => self.action_back(),
+                        }
                     }
-                    if ui.button("Reset greyramp").clicked() {
+                    ui.add_enabled_ui(!genome, |ui| {
+                        ui.menu_button("Sort records", |ui| self.record_sort_menu(ui))
+                    })
+                    .response
+                    .on_disabled_hover_text("In the genome view: Sort query along reference");
+                    if ui
+                        .add_enabled(!genome, egui::Button::new("Reset greyramp"))
+                        .clicked()
+                    {
                         self.greyramp = Greyramp::default();
                         self.texture_dirty = true;
                     }
@@ -2867,7 +2842,10 @@ impl DottirApp {
                     } else {
                         "Show alignment view"
                     };
-                    if ui.button(dock_label).clicked() {
+                    if ui
+                        .add_enabled(!genome, egui::Button::new(dock_label))
+                        .clicked()
+                    {
                         self.align_dock_visible = !self.align_dock_visible;
                     }
                     ui.separator();
@@ -2875,7 +2853,15 @@ impl DottirApp {
                     // the keyboard map without reading the docs.
                     ui.menu_button("Keyboard shortcuts…", |ui| {
                         let style = egui::FontId::monospace(11.0);
-                        for (keys, desc) in [
+                        let genome_keys = [
+                            ("Wheel", "zoom at the pointer"),
+                            ("L-drag", "pan"),
+                            ("M-drag", "zoom into rectangle (or Shift-drag)"),
+                            ("Dbl-click", "fit"),
+                            ("R-click", "dot-plot a region, flip a record"),
+                            ("Esc/Bsp", "back (pop view history)"),
+                        ];
+                        let dotplot_keys = [
                             (
                                 "← → ↑ ↓",
                                 "nudge crosshair 1 residue (Shift ×10, Ctrl ×100)",
@@ -2887,7 +2873,10 @@ impl DottirApp {
                             ("L-drag", "pan"),
                             ("M-drag", "zoom into rectangle (dotter classic)"),
                             ("Esc/Bsp", "back (pop view history)"),
-                        ] {
+                        ];
+                        let keys: &[(&str, &str)] =
+                            if genome { &genome_keys } else { &dotplot_keys };
+                        for &(keys, desc) in keys {
                             ui.horizontal(|ui| {
                                 ui.label(
                                     egui::RichText::new(format!("{keys:<10}"))
@@ -2899,14 +2888,27 @@ impl DottirApp {
                         }
                     });
                     ui.separator();
-                    if ui.button("Settings…").clicked() {
+                    if ui
+                        .add_enabled(!genome, egui::Button::new("Settings…"))
+                        .clicked()
+                    {
                         self.show_settings = true;
                     }
                 });
                 ui.separator();
-                ui.label(format_seq_label("query", self.query.as_ref()));
-                ui.label("·");
-                ui.label(format_seq_label("subject", self.subject.as_ref()));
+                match (genome, &self.genome) {
+                    (true, Some(g)) => {
+                        let (r, q) = g.input_labels();
+                        ui.label(format!("reference: {r}"));
+                        ui.label("·");
+                        ui.label(format!("query: {q}"));
+                    }
+                    _ => {
+                        ui.label(format_seq_label("query", self.query.as_ref()));
+                        ui.label("·");
+                        ui.label(format_seq_label("subject", self.subject.as_ref()));
+                    }
+                }
             });
         });
     }

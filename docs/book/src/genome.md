@@ -135,11 +135,14 @@ dottir-gui reference.fa assembly.fa --paf aln.paf     # or read a PAF
 or *File → Open genome comparison…*. Indexing and alignment run in the
 background with a progress bar and *Cancel*; cached results open at once.
 
-The side panel has the same filters as the CLI (applied instantly, no
-re-alignment), *Sort query along reference*, line width, the identity
-legend and exports (plot PNG, association table, query FASTA in plot
-order, drawn alignments as PAF). The plot is redrawn at screen resolution
-for every view, so lines stay sharp at any zoom.
+The layout is the dotplot's: menu bar with the two inputs, controls on
+the right, pointer position in the status bar. *Fit* and *Back* (also in
+*View*, and *File → Save PNG*) act on the genome view. The right panel
+has the same filters as the CLI (applied instantly, no re-alignment),
+*Sort query along reference*, line width, the identity legend and exports
+(plot PNG, association table, query FASTA in plot order, drawn alignments
+as PAF). Dotplot-only menu items are disabled. The plot is redrawn at
+screen resolution for every view, so lines stay sharp at any zoom.
 
 | Mouse | |
 |-------|-|
@@ -157,7 +160,8 @@ opens them in the usual dotplot, where the large and exact engines take
 over — with the repeats the aligner skipped. Regions keep the orientation
 shown in the genome view (flipped records are reverse-complemented), and
 the status bar reports positions in the original records. Repeat classes
-there are computed from the regions alone. *View → Genome view* returns.
+there are computed from the regions alone. *View → Genome view* returns,
+and *View → Dot-plot view* goes back the other way.
 
 Sessions store the comparison (inputs, PAF or aligner settings), filters,
 sorting and flips; re-opening a session re-runs the aligner from its
