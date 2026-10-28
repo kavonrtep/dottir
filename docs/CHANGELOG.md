@@ -97,6 +97,9 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     where runs meet at chunk boundaries (coverage was double-counted there).
 * FASTA parsing records soft-masked (lowercase) runs
   (`FastaRecord::soft_masked`, `Sequence::soft_mask`).
+* `--export-alignment-at Q,S` (`--alignment-window`, `--alignment-format
+  fasta|stockholm|text`) prints the residues around a dotplot position;
+  `-o` becomes optional when only exporting (plan D5).
 
 ### Changed
 

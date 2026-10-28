@@ -458,8 +458,12 @@ pub fn run(args: &BatchArgs) -> Result<()> {
         ("dottir-bp-per-px", bp_per_px.to_string()),
     ];
     let chunk_refs: Vec<(&str, &str)> = chunks.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let output = args
+        .output
+        .as_ref()
+        .context("genome mode needs -o OUTPUT.png")?;
     dottir_io::genome_export::write_genome_png(
-        &args.output,
+        output,
         &raster,
         &x_layout,
         &x.records,
@@ -467,8 +471,8 @@ pub fn run(args: &BatchArgs) -> Result<()> {
         &y.records,
         &chunk_refs,
     )
-    .with_context(|| format!("writing {}", args.output.display()))?;
-    tracing::info!("wrote {}", args.output.display());
+    .with_context(|| format!("writing {}", output.display()))?;
+    tracing::info!("wrote {}", output.display());
 
     if !args.no_sidecar {
         let info = |a: &Assembly| -> Result<InputInfo> {
@@ -539,7 +543,7 @@ pub fn run(args: &BatchArgs) -> Result<()> {
                 line_width: g.line_width,
             }),
         };
-        let path = crate::sidecar_path(&args.output);
+        let path = crate::sidecar_path(output);
         std::fs::write(&path, sidecar.to_toml()?)?;
         tracing::info!("wrote sidecar {}", path.display());
     }

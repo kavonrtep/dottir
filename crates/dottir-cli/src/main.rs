@@ -9,6 +9,7 @@
 //! `dottir_io::input`), so an annotated sequence can be supplied as a
 //! single self-contained file.
 
+mod align_export;
 mod find_peaks;
 mod genome_batch;
 mod large_batch;
@@ -69,9 +70,18 @@ struct BatchArgs {
     #[arg(value_name = "SUBJECT")]
     subject: Option<PathBuf>,
     /// Output PNG path. The params sidecar is written to
-    /// `<output>.params.toml` alongside it.
-    #[arg(short = 'o', long, value_name = "PATH")]
-    output: PathBuf,
+    /// `<output>.params.toml` alongside it. Optional with
+    /// `--export-alignment-at`.
+    #[arg(
+        short = 'o',
+        long,
+        value_name = "PATH",
+        required_unless_present = "export_alignment_at"
+    )]
+    output: Option<PathBuf>,
+
+    #[command(flatten)]
+    align_export: align_export::AlignExportArgs,
 
     /// BLAST mode.
     #[arg(long, value_enum, default_value_t = ModeArg::Blastn)]
@@ -289,6 +299,21 @@ fn run_batch(args: BatchArgs) -> Result<()> {
             .context("sorting records")?;
             (q, s, Some(info))
         }
+    };
+    if let Some(at) = &args.align_export.export_alignment_at {
+        if mode == BlastMode::Blastx {
+            anyhow::bail!("--export-alignment-at: not available for BLASTX (DNA vs protein)");
+        }
+        let text = align_export::export(
+            &args.align_export,
+            at,
+            &query_input.sequence,
+            &subject_input.sequence,
+        )?;
+        print!("{text}");
+    }
+    let Some(output) = args.output.clone() else {
+        return Ok(());
     };
     let query = query_input.sequence.clone();
     let subject = subject_input.sequence.clone();
@@ -534,7 +559,7 @@ fn run_batch(args: BatchArgs) -> Result<()> {
         50
     };
     png_export::write_grayscale_png_with_axes(
-        &args.output,
+        &output,
         png_w,
         png_h,
         query.len() as u32,
@@ -546,7 +571,7 @@ fn run_batch(args: BatchArgs) -> Result<()> {
         &text_chunk_refs,
         true, // raw kernel output → invert for "white bg, dark hits"
     )?;
-    tracing::info!("wrote {}", args.output.display());
+    tracing::info!("wrote {}", output.display());
 
     if let Some(svg_path) = &args.svg {
         dottir_io::svg_export::write_svg(
@@ -598,7 +623,7 @@ fn run_batch(args: BatchArgs) -> Result<()> {
     }
 
     if !args.no_sidecar {
-        let sidecar_path = sidecar_path(&args.output);
+        let sidecar_path = sidecar_path(&output);
         let sidecar = ParamsSidecar {
             dottir: DottirInfo {
                 version: dottir_version.to_string(),

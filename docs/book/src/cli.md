@@ -10,7 +10,7 @@ dottir batch <QUERY> [SUBJECT] -o <OUT.png> [FLAGS]
 |----------|-------------|
 | `QUERY` | Sequence path; horizontal axis of the dotplot. |
 | `SUBJECT` | Sequence path; vertical axis. **Omit for a self-comparison** — subject is set to query and the mirror post-process is enabled. |
-| `-o, --output` | Output PNG path. A `<output>.params.toml` sidecar is written next to it. |
+| `-o, --output` | Output PNG path. A `<output>.params.toml` sidecar is written next to it. Optional with `--export-alignment-at`. |
 
 Both inputs may be gzipped (`.gz`); the reader auto-detects from the
 file's magic bytes.
@@ -72,6 +72,9 @@ Large-sequence flags (`--engine`, `--seed-pattern`, `--hide-classes`,
 | `--memory-limit-bytes N` | `512 MiB` | Refuse pixelmaps bigger than this. |
 | `--auto-zoom MAX_DIM` | off | Auto-pick `--zoom` so the larger output dim is ≤ this. |
 | `--no-sidecar` | off | Skip the `.params.toml` sidecar. |
+| `--export-alignment-at Q,S` | — | Print the residues around query position Q and subject position S (1-based, along the whole input or `record:pos`) to stdout; the window stays inside the two records. Without `-o` nothing is plotted. Not for BLASTX. |
+| `--alignment-window N` | `30` | Residues on each side of the position. |
+| `--alignment-format {fasta,stockholm,text}` | `fasta` | Format of the exported window. |
 
 ## Examples
 
@@ -87,6 +90,13 @@ BLASTP between two protein FASTAs at a fixed window:
 ```sh
 dottir batch query.fa target.fa -o p.png \
     --mode blastp --matrix BLOSUM45 -W 12
+```
+
+The residues around a dot, without computing a plot:
+
+```sh
+dottir batch chr4.fa chr4_alt.fa --export-alignment-at chr4:120500,ctg7:3310 \
+    --alignment-window 40 --alignment-format text
 ```
 
 ## Output
