@@ -147,6 +147,14 @@ pub struct SessionLarge {
     pub seed_sample: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub depth_sample: Option<u32>,
+    /// GFF3/BED repeat annotations raising the query's / subject's bases
+    /// to `high`, and the feature types used from them (empty = all).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repeat_annot_query: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repeat_annot_subject: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub repeat_types: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -345,6 +353,9 @@ mod tests {
                 axis_tracks: Some(true),
                 seed_sample: Some(0),
                 depth_sample: Some(4),
+                repeat_annot_query: Some("/tmp/rm.gff3".into()),
+                repeat_annot_subject: None,
+                repeat_types: "repeat_region".into(),
             }),
             sorted_records: vec!["vertical".into()],
             hsps: Some(SessionHsps {

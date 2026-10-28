@@ -56,8 +56,6 @@ See [Architecture decisions](./adr.md) for context. Status is tracked in
   −4, and `-r`/`-v` of a sequence against itself is computed in full
   rather than mirrored. Otherwise pixelmaps are identical to C dotter's
   (15 pinned cases).
-* GFF3 repeat annotations as repeat-class floors in the GUI (the CLI has
-  `--repeat-annot`; the GUI uses soft-masking).
 
 ## How to read this book
 

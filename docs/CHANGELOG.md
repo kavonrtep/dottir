@@ -97,6 +97,11 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     where runs meet at chunk boundaries (coverage was double-counted there).
 * FASTA parsing records soft-masked (lowercase) runs
   (`FastaRecord::soft_masked`, `Sequence::soft_mask`).
+* **GUI: repeat annotations for large sequences.** *Settings → Large
+  sequences → Repeats (query/subject)* takes a GFF3/BED of known repeats
+  (e.g. RepeatMasker) whose bases count as `high`, with a feature-type
+  filter; also `dottir-gui --repeat-annot/--repeat-annot-subject/
+  --repeat-types`, saved in sessions and passed to *Open in new window*.
 * **BLASTX in the GUI alignment view**: the query translated in its
   best-scoring frame around the crosshair (`F1`–`F3`), instead of "not yet
   supported".

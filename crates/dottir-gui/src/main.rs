@@ -176,6 +176,21 @@ struct Cli {
     #[arg(long, value_name = "MODE", value_parser = ["line", "score", "greyscale", "off"])]
     hsp_mode: Option<String>,
 
+    /// Large sequences: GFF3/BED of known repeats on the query (and the
+    /// subject in a self-comparison); their bases count as `high`. Also in
+    /// *Settings → Large sequences*.
+    #[arg(long, value_name = "PATH")]
+    repeat_annot: Option<PathBuf>,
+
+    /// Large sequences: GFF3/BED of known repeats on the subject.
+    #[arg(long, value_name = "PATH")]
+    repeat_annot_subject: Option<PathBuf>,
+
+    /// Feature types (GFF3 column 3, comma-separated) used from the repeat
+    /// annotations; all features when omitted.
+    #[arg(long, value_name = "TYPES")]
+    repeat_types: Option<String>,
+
     /// Plot only this region of QUERY: `NAME:START-END` (1-based,
     /// inclusive), `:-` appended for the reverse complement, or a bare
     /// record name. Repeat for several regions, plotted in order. QUERY
@@ -276,6 +291,8 @@ impl Cli {
             query_regions: self.query_region,
             subject_regions: self.subject_region,
             hsp_paf: self.hsp_paf,
+            repeat_annot: [self.repeat_annot, self.repeat_annot_subject],
+            repeat_types: self.repeat_types.unwrap_or_default(),
             hsp_mode: self
                 .hsp_mode
                 .as_deref()

@@ -59,6 +59,13 @@ class of its two bases. In addition:
   filtered by `--repeat-types LTR,...`) are `high`. A GFF3-with-FASTA input
   supplies its own features when `--repeat-types` is given.
 
+In the GUI both are under *Settings → Large sequences*: the soft-masking
+checkbox, and *Repeats (query/subject): Choose…* with an optional
+*Feature types* filter (applied when you leave the field). `dottir-gui`
+takes the same `--repeat-annot`, `--repeat-annot-subject` and
+`--repeat-types` flags. Annotations loaded as tracks (*File → Load
+GFF3/BED…*) are only drawn; they don't change the classes.
+
 Seeds occurring more than `--max-occ` times (1000) are skipped to bound run
 time — typically satellites. They count as `high`, and the number of capped
 positions is reported in the log and the params sidecar.

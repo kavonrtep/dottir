@@ -213,8 +213,6 @@ does the same for batch plots (not for BLASTX, whose columns are codons).
 
 See the [ADR index](./adr.md) and `docs/IMPROVEMENTS_PLAN.md`:
 
-* GFF3 repeat annotations as repeat-class floors for large sequences (the
-  CLI has `--repeat-annot`; the GUI uses soft-masking).
 * The original Dotter's exon/intron view and Blixem integration (spec §5).
 
 ## Genome comparisons

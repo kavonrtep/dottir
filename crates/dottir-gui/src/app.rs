@@ -46,6 +46,10 @@ pub struct StartupConfig {
     /// PAF drawn over the plot, and how.
     pub hsp_paf: Option<PathBuf>,
     pub hsp_mode: Option<HspMode>,
+    /// Repeat annotations for large mode (query, subject) and the feature
+    /// types used from them (comma-separated; empty = all).
+    pub repeat_annot: [Option<PathBuf>; 2],
+    pub repeat_types: String,
     /// Plot only these regions (`name:start-end[:-]`) of the inputs.
     pub query_regions: Vec<String>,
     pub subject_regions: Vec<String>,
@@ -70,6 +74,8 @@ impl Default for StartupConfig {
             sort_records: None,
             hsp_paf: None,
             hsp_mode: None,
+            repeat_annot: [None, None],
+            repeat_types: String::new(),
             query_regions: Vec::new(),
             subject_regions: Vec::new(),
         }
@@ -175,6 +181,11 @@ struct LargeSettings {
     thresholds: ClassThresholds,
     /// Soft-masked (lowercase) bases count as at least `mid`.
     softmask_as_repeat: bool,
+    /// GFF3/BED repeat annotations (query, subject): their features
+    /// count as `high`. In a self-comparison the query's applies.
+    repeat_annot: [Option<PathBuf>; 2],
+    /// Comma-separated feature types used from them; empty = all.
+    repeat_types: String,
     memory_limit_bytes: u64,
     /// Seed sampling for the plot / the seed depth pass; `None` = auto.
     seed_sample: Option<u32>,
@@ -206,6 +217,8 @@ impl Default for LargeSettings {
             depth_k: 21,
             thresholds: ClassThresholds::default(),
             softmask_as_repeat: true,
+            repeat_annot: [None, None],
+            repeat_types: String::new(),
             memory_limit_bytes: 6 << 30,
             seed_sample: None,
             depth_sample: None,
@@ -275,6 +288,9 @@ impl LargeSettings {
             axis_tracks: Some(self.show_axis_tracks),
             seed_sample: Some(self.seed_sample.unwrap_or(0)),
             depth_sample: Some(self.depth_sample.unwrap_or(0)),
+            repeat_annot_query: self.repeat_annot[0].clone(),
+            repeat_annot_subject: self.repeat_annot[1].clone(),
+            repeat_types: self.repeat_types.clone(),
         }
     }
 
@@ -332,7 +348,19 @@ impl LargeSettings {
             show_axis_tracks: s.axis_tracks.unwrap_or(d.show_axis_tracks),
             seed_sample: s.seed_sample.filter(|&r| r > 0),
             depth_sample: s.depth_sample.filter(|&r| r > 0),
+            repeat_annot: [s.repeat_annot_query.clone(), s.repeat_annot_subject.clone()],
+            repeat_types: s.repeat_types.clone(),
         }
+    }
+
+    /// The `repeat_types` list; empty = every feature type.
+    fn repeat_type_list(&self) -> Vec<String> {
+        self.repeat_types
+            .split(',')
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(String::from)
+            .collect()
     }
 
     fn depth_method(&self) -> DepthMethod {
@@ -620,6 +648,8 @@ pub struct DottirApp {
     large_source: Option<Arc<crate::compute_worker::LargeSource>>,
     /// Bumped whenever `large_source` is rebuilt, so the worker re-indexes.
     large_source_key: u64,
+    /// `repeat_types` as the current large source used it.
+    repeat_types_used: String,
     /// Full large-engine result behind the current `plot`, if the large
     /// engine produced it.
     large_plot: Option<LargePlot>,
@@ -813,6 +843,7 @@ impl DottirApp {
             annot_alpha: 0.35,
             large_source: None,
             large_source_key: 0,
+            repeat_types_used: String::new(),
             large_plot: None,
             axis_profile: None,
             locked_window: None,
@@ -853,6 +884,8 @@ impl DottirApp {
         if let Some(p) = startup.annot_subject {
             app.load_annotation(SeqRole::Subject, p);
         }
+        app.settings.large.repeat_annot = startup.repeat_annot;
+        app.settings.large.repeat_types = startup.repeat_types;
         if let Some(m) = startup.hsp_mode {
             app.hsp_mode = m;
         }
@@ -1538,22 +1571,31 @@ impl DottirApp {
         let s = self.subject.as_ref()?;
         let is_self = self.settings.self_comparison && q.bytes() == s.bytes();
         let ls = &self.settings.large;
-        let floor = |seq: &Sequence| {
-            ls.softmask_as_repeat
-                .then(|| {
-                    dottir_io::large::soft_mask_floor(seq, ls.thresholds.floor_of(RepeatClass::Mid))
-                })
-                .flatten()
+        self.repeat_types_used = ls.repeat_types.clone();
+        let mut errors = Vec::new();
+        let mut floor = |seq: &Sequence, annot: Option<&PathBuf>| {
+            let (f, err) = repeat_floor(seq, ls, annot.map(PathBuf::as_path));
+            errors.extend(err);
+            f
         };
+        let q_floor = floor(q, ls.repeat_annot[0].as_ref());
+        let s_floor = if is_self {
+            None
+        } else {
+            floor(s, ls.repeat_annot[1].as_ref())
+        };
+        if !errors.is_empty() {
+            self.last_error = Some(errors.join("; "));
+        }
         self.large_source_key += 1;
         let src = Arc::new(crate::compute_worker::LargeSource {
             key: self.large_source_key,
             query: Arc::from(q.bytes()),
             q_breaks: q.breaks(),
-            q_floor: floor(q),
+            q_floor,
             subject: (!is_self).then(|| Arc::from(s.bytes())),
             s_breaks: s.breaks(),
-            s_floor: if is_self { None } else { floor(s) },
+            s_floor,
         });
         self.large_source = Some(src.clone());
         Some(src)
@@ -1933,6 +1975,21 @@ impl DottirApp {
             args.push(h.path.clone().into());
             args.push("--hsp-mode".into());
             args.push(self.hsp_mode.name().into());
+        }
+        let ls = &set.large;
+        for (p, flag) in ls
+            .repeat_annot
+            .iter()
+            .zip(["--repeat-annot", "--repeat-annot-subject"])
+        {
+            if let Some(p) = p {
+                args.push(flag.into());
+                args.push(p.clone().into());
+            }
+        }
+        if !ls.repeat_types.trim().is_empty() {
+            args.push("--repeat-types".into());
+            args.push(ls.repeat_types.clone().into());
         }
         for (annot, flag) in [
             (&self.query_annot, "--gff-query"),
@@ -4237,6 +4294,53 @@ impl DottirApp {
                 "Soft-masked (lowercase) bases are repeats",
             )
             .changed();
+        let is_self = self.settings.self_comparison;
+        let ls = &mut self.settings.large;
+        for (i, label) in [(0, "Repeats (query):"), (1, "Repeats (subject):")] {
+            if i == 1 && is_self {
+                continue;
+            }
+            ui.horizontal(|ui| {
+                ui.label(label);
+                let name = ls.repeat_annot[i]
+                    .as_ref()
+                    .and_then(|p| p.file_name())
+                    .map_or("none".to_string(), |n| n.to_string_lossy().into_owned());
+                ui.label(egui::RichText::new(name).monospace())
+                    .on_hover_text(
+                        "GFF3/BED of known repeats (e.g. RepeatMasker): their bases \
+                         count as high-copy repeats, like --repeat-annot",
+                    );
+                if ui.small_button("Choose…").clicked() {
+                    if let Some(p) = rfd::FileDialog::new()
+                        .set_title("Repeat annotation")
+                        .add_filter("GFF3 / BED", &["gff", "gff3", "bed", "gz"])
+                        .pick_file()
+                    {
+                        ls.repeat_annot[i] = Some(p);
+                        changed = true;
+                    }
+                }
+                if ls.repeat_annot[i].is_some() && ui.small_button("×").clicked() {
+                    ls.repeat_annot[i] = None;
+                    changed = true;
+                }
+            });
+        }
+        if ls.repeat_annot.iter().any(Option::is_some) {
+            ui.horizontal(|ui| {
+                ui.label("Feature types:");
+                let r = ui
+                    .add(
+                        egui::TextEdit::singleline(&mut ls.repeat_types)
+                            .hint_text("all")
+                            .desired_width(140.0),
+                    )
+                    .on_hover_text("Comma-separated GFF3 types (column 3); empty = all features");
+                // Applied on leaving the field: each change re-indexes.
+                changed |= r.lost_focus() && ls.repeat_types != self.repeat_types_used;
+            });
+        }
         ui.horizontal(|ui| {
             ui.label("Memory cap (MiB):");
             let mut mib = (ls.memory_limit_bytes >> 20) as u32;
@@ -5952,6 +6056,34 @@ fn build_align_columns(
     }
 }
 
+/// Large-mode depth floor for one sequence: soft-masked bases at least
+/// `mid`, features of the repeat annotation (filtered by type) `high`.
+/// The error, if the annotation can't be read, leaves it out.
+fn repeat_floor(
+    seq: &Sequence,
+    ls: &LargeSettings,
+    annot: Option<&std::path::Path>,
+) -> (Option<Vec<u16>>, Option<String>) {
+    let soft = ls
+        .softmask_as_repeat
+        .then(|| dottir_io::large::soft_mask_floor(seq, ls.thresholds.floor_of(RepeatClass::Mid)))
+        .flatten();
+    let (annot, err) = match annot.map(|p| (p, dottir_io::AnnotSet::load(p))) {
+        None => (None, None),
+        Some((_, Ok(a))) => {
+            let high = ls.thresholds.floor_of(RepeatClass::High);
+            let types = ls.repeat_type_list();
+            let f = dottir_io::large::annotation_floor(seq, &a, &types, high).0;
+            (Some(f), None)
+        }
+        Some((p, Err(e))) => (
+            None,
+            Some(format!("repeat annotation {}: {e}", p.display())),
+        ),
+    };
+    (dottir_io::large::merge_floors(soft, annot), err)
+}
+
 /// BLASTX alignment columns: the query translated around base `q_centre`
 /// in the reading frame (of the three codons covering it) that scores
 /// best against subject residues `s_centre ± half`.
@@ -7409,5 +7541,42 @@ mod blastx_view_tests {
         // Near the start, codons before the sequence are out of bounds.
         let b = build_blastx_columns(q, s, 1, 0, 1, 3, Some(&m));
         assert_eq!(b.cols[0].class, MatchClass::OutOfBounds);
+    }
+}
+
+#[cfg(test)]
+mod repeat_floor_tests {
+    use super::*;
+
+    #[test]
+    fn annotation_and_soft_mask_floors_merge() {
+        let seq = Sequence::from_records(
+            dottir_io::fasta::parse_fasta(">c\nACGTacgtACGTACGTACGT\n").unwrap(),
+            None,
+        );
+        let dir = std::env::temp_dir().join(format!("dottir_rfloor_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bed = dir.join("rm.bed");
+        std::fs::write(&bed, "c\t10\t15\tLTR\n").unwrap();
+        let mut ls = LargeSettings::default();
+        let (mid, high) = (
+            ls.thresholds.floor_of(RepeatClass::Mid),
+            ls.thresholds.floor_of(RepeatClass::High),
+        );
+        let (f, err) = repeat_floor(&seq, &ls, Some(&bed));
+        assert!(err.is_none());
+        let f = f.unwrap();
+        assert_eq!(&f[4..8], &[mid; 4]);
+        assert_eq!(&f[10..15], &[high; 5]);
+        assert_eq!(f[8], 0);
+        // A type filter that matches nothing leaves only the soft mask.
+        ls.repeat_types = "repeat_region".into();
+        let f = repeat_floor(&seq, &ls, Some(&bed)).0.unwrap();
+        assert_eq!(f[12], 0);
+        // An unreadable file is reported and ignored.
+        ls.softmask_as_repeat = false;
+        let (f, err) = repeat_floor(&seq, &ls, Some(&dir.join("missing.gff3")));
+        assert!(f.is_none() && err.is_some());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
