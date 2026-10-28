@@ -54,28 +54,35 @@ pub fn open_maybe_gz(path: &Path) -> std::io::Result<Box<dyn BufRead>> {
 }
 
 /// Read a PAF file against the query and target record lists.
+///
+/// Alignments shorter than `min_len` (the longer of the two spans, as
+/// the display filter measures) are not kept, so a huge PAF (e.g.
+/// minimap2 `-P` on large genomes) need not fit in memory; their record
+/// names are still checked.
 pub fn read_paf_file(
     path: &Path,
     query: &[GenomeRecord],
     target: &[GenomeRecord],
+    min_len: u64,
 ) -> Result<Vec<Alignment>, PafError> {
-    read_paf(open_maybe_gz(path)?, query, target)
+    read_paf_impl(open_maybe_gz(path)?, query, target, true, min_len).map(|(a, _)| a)
 }
 
 /// Read a PAF for a plot with `vertical` records on the query side and
 /// `horizontal` ones on the target side. A PAF made the other way round
 /// (its query names unknown, but valid when swapped) is read swapped; the
-/// flag says so.
+/// flag says so. `min_len` as in [`read_paf_file`].
 pub fn read_paf_oriented(
     path: &Path,
     vertical: &[GenomeRecord],
     horizontal: &[GenomeRecord],
+    min_len: u64,
 ) -> Result<(Vec<Alignment>, bool), PafError> {
-    match read_paf_file(path, vertical, horizontal) {
+    match read_paf_file(path, vertical, horizontal, min_len) {
         Ok(a) => Ok((a, false)),
         // Shared names (chr1 in both) fail on lengths, not names.
         Err(first @ (PafError::UnknownRecords { .. } | PafError::LengthMismatch { .. })) => {
-            match read_paf_file(path, horizontal, vertical) {
+            match read_paf_file(path, horizontal, vertical, min_len) {
                 Ok(a) => Ok((a.iter().map(Alignment::swapped).collect(), true)),
                 Err(_) => Err(first),
             }
@@ -150,7 +157,7 @@ pub fn read_paf<R: BufRead>(
     query: &[GenomeRecord],
     target: &[GenomeRecord],
 ) -> Result<Vec<Alignment>, PafError> {
-    read_paf_impl(reader, query, target, true).map(|(a, _)| a)
+    read_paf_impl(reader, query, target, true, 0).map(|(a, _)| a)
 }
 
 /// Like [`read_paf_oriented`], but lines naming records outside the
@@ -163,8 +170,9 @@ pub fn read_paf_subset_oriented(
     vertical: &[GenomeRecord],
     horizontal: &[GenomeRecord],
 ) -> Result<(Vec<Alignment>, u64, bool), PafError> {
-    let read =
-        |q: &[GenomeRecord], t: &[GenomeRecord]| read_paf_impl(open_maybe_gz(path)?, q, t, false);
+    let read = |q: &[GenomeRecord], t: &[GenomeRecord]| {
+        read_paf_impl(open_maybe_gz(path)?, q, t, false, 0)
+    };
     match (read(vertical, horizontal), read(horizontal, vertical)) {
         (Ok((a, _)), Ok((b, m))) if b.len() > a.len() => {
             Ok((b.iter().map(Alignment::swapped).collect(), m, true))
@@ -180,6 +188,7 @@ fn read_paf_impl<R: BufRead>(
     query: &[GenomeRecord],
     target: &[GenomeRecord],
     strict: bool,
+    min_len: u64,
 ) -> Result<(Vec<Alignment>, u64), PafError> {
     let mut qn = Names::new("query", query);
     let mut tn = Names::new("target", target);
@@ -240,6 +249,9 @@ fn read_paf_impl<R: BufRead>(
             skipped += 1;
             continue;
         };
+        if (q_end - q_start).max(t_end - t_start) < min_len {
+            continue;
+        }
         out.push(Alignment {
             q_rec,
             q_start,
@@ -331,7 +343,7 @@ q2\t500\t0\t500\t-\tt1\t2000\t1000\t1500\t480\t500\t0\ttp:A:S\tde:f:0.0123
         std::fs::write(&p, "chr1\t100\t0\t80\t+\tchr1\t80\t0\t80\t78\t80\t60\n").unwrap();
         let vertical = recs(&[("chr1", 80)]);
         let horizontal = recs(&[("chr1", 100)]);
-        let (a, swapped) = read_paf_oriented(&p, &vertical, &horizontal).unwrap();
+        let (a, swapped) = read_paf_oriented(&p, &vertical, &horizontal, 0).unwrap();
         assert!(swapped);
         assert_eq!((a[0].q_end, a[0].t_end), (80, 80));
         assert_eq!(
@@ -341,9 +353,30 @@ q2\t500\t0\t500\t-\tt1\t2000\t1000\t1500\t480\t500\t0\ttp:A:S\tde:f:0.0123
         // Valid neither way: the first error is kept.
         let other = recs(&[("chr1", 90)]);
         assert!(matches!(
-            read_paf_oriented(&p, &other, &other),
+            read_paf_oriented(&p, &other, &other, 0),
             Err(PafError::LengthMismatch { .. })
         ));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn short_alignments_are_dropped_on_read_but_names_still_checked() {
+        let d = std::env::temp_dir().join(format!("dottir_paf_minlen_{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let p = d.join("a.paf");
+        std::fs::write(
+            &p,
+            "q\t1000\t0\t900\t+\tt\t1000\t0\t880\t850\t900\t60\n\
+             q\t1000\t0\t50\t+\tt\t1000\t500\t560\t50\t60\t60\n",
+        )
+        .unwrap();
+        let (q, t) = (recs(&[("q", 1000)]), recs(&[("t", 1000)]));
+        assert_eq!(read_paf_file(&p, &q, &t, 0).unwrap().len(), 2);
+        // The second is 60 long on the target side.
+        assert_eq!(read_paf_file(&p, &q, &t, 60).unwrap().len(), 2);
+        assert_eq!(read_paf_file(&p, &q, &t, 61).unwrap().len(), 1);
+        std::fs::write(&p, "q\t1000\t0\t50\t+\tzz\t1000\t0\t50\t50\t50\t60\n").unwrap();
+        assert!(read_paf_file(&p, &q, &t, 1000).is_err(), "unknown name");
         let _ = std::fs::remove_dir_all(&d);
     }
 

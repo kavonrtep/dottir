@@ -78,6 +78,13 @@ pub struct GenomeArgs {
     #[arg(long, value_name = "BP", default_value_t = 0)]
     pub min_aln_len: u64,
 
+    /// Do not even read alignments shorter than this (bp, longer span):
+    /// keeps memory bounded for huge PAFs (`-P` on multi-gigabase
+    /// genomes). Unlike `--min-aln-len`, these alignments are gone for
+    /// the noise filter, sorting and primary derivation too.
+    #[arg(long, value_name = "BP", default_value_t = 0)]
+    pub paf_min_len: u64,
+
     /// Drop alignments below this identity (0–1; matches / block length,
     /// or 1 − de:f when present).
     #[arg(long, value_name = "FRACTION", default_value_t = 0.0)]
@@ -231,9 +238,14 @@ fn open_assembly(path: &Path, cache: &Path) -> Result<Assembly> {
 
 /// Read the PAF with its query on the vertical axis, swapping a PAF made
 /// the other way round.
-fn read_oriented(paf: &Path, x: &[GenomeRecord], y: &[GenomeRecord]) -> Result<Vec<Alignment>> {
-    let (alns, swapped) =
-        read_paf_oriented(paf, y, x).with_context(|| format!("reading {}", paf.display()))?;
+fn read_oriented(
+    paf: &Path,
+    x: &[GenomeRecord],
+    y: &[GenomeRecord],
+    min_len: u64,
+) -> Result<Vec<Alignment>> {
+    let (alns, swapped) = read_paf_oriented(paf, y, x, min_len)
+        .with_context(|| format!("reading {}", paf.display()))?;
     if swapped {
         tracing::info!("PAF query names match the first input; swapping axes");
     }
@@ -366,7 +378,7 @@ fn run_aligner(
             out.paf.display()
         );
     }
-    let alns = read_paf_file(&out.paf, &y.records, &x.records)
+    let alns = read_paf_file(&out.paf, &y.records, &x.records, g.paf_min_len)
         .with_context(|| format!("reading {}", out.paf.display()))?;
     let source = Source {
         paf_path: None,
@@ -403,7 +415,7 @@ pub fn run(args: &BatchArgs) -> Result<()> {
 
     let (alns, source) = match &g.paf {
         Some(paf) => {
-            let alns = read_oriented(paf, &x.records, &y.records)?;
+            let alns = read_oriented(paf, &x.records, &y.records, g.paf_min_len)?;
             let source = Source {
                 paf_path: Some(paf.clone()),
                 paf_sha256: sha256_file(paf)?,
@@ -571,6 +583,7 @@ pub fn run(args: &BatchArgs) -> Result<()> {
                 aligner_args: source.aligner_args.clone(),
                 chunk_size: source.chunk_size,
                 min_aln_len: g.min_aln_len,
+                paf_min_len: g.paf_min_len,
                 min_identity: g.min_identity,
                 primary_only: g.primary_only,
                 remove_noise: g.remove_noise,

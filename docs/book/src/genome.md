@@ -93,6 +93,7 @@ within one plot rather than across aligner settings.
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `--min-aln-len` | 0 | hide alignments shorter than this (bp) |
+| `--paf-min-len` | 0 | do not read alignments shorter than this (bp): bounds memory for huge PAFs; they are also gone for the noise filter, sorting and primary derivation. GUI: *Skip alignments shorter than* in *Open genome comparison* |
 | `--min-identity` | 0 | hide alignments below this identity (0–1) |
 | `--primary-only` | off | hide secondary alignments |
 | `--remove-noise` | off | the D-GENIES noise filter (below) |

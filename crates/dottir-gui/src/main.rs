@@ -155,6 +155,11 @@ struct Cli {
     #[arg(long, alias = "self-all-copies")]
     all_copies: bool,
 
+    /// Genome mode: do not read alignments shorter than this (bp), to
+    /// keep memory bounded for huge PAFs.
+    #[arg(long, value_name = "BP", default_value_t = 0)]
+    paf_min_len: u64,
+
     /// Reorder and reverse-complement the subject's (`vertical`) or the
     /// query's (`horizontal`) records along the other sequence after
     /// loading (the D-GENIES contig sort; DNA, two inputs). Also in
@@ -237,6 +242,7 @@ impl Cli {
                         preset: self.preset,
                         aligner_args: self.aligner_args.unwrap_or_default(),
                         all_copies: self.all_copies,
+                        paf_min_len: self.paf_min_len,
                     }),
                     ..StartupConfig::default()
                 };

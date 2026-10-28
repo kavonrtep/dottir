@@ -97,6 +97,11 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     where runs meet at chunk boundaries (coverage was double-counted there).
 * FASTA parsing records soft-masked (lowercase) runs
   (`FastaRecord::soft_masked`, `Sequence::soft_mask`).
+* **Genome mode: `--paf-min-len BP`** (GUI: *Skip alignments shorter
+  than* in *Open genome comparison*) drops short alignments while the PAF
+  is read — PAF files and aligner output — so huge `-P` PAFs of large
+  genomes fit in memory (Col-CC self `-P`, 1.0 M lines: 192 → 100 MB at
+  5 kb). Recorded in the sidecar.
 * **Genome mode: sort the reference along the query**: `--sort-reference`
   (exclusive with `--sort-query`) and *Sort reference along query* in the
   genome view's *Order*; kept in sessions (`sort_reference`) and in the

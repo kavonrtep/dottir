@@ -46,6 +46,9 @@ pub struct GenomeInputs {
     /// Keep every chain (`-P`).
     #[serde(alias = "self_all_copies")]
     pub all_copies: bool,
+    /// Alignments shorter than this (bp) are not read (huge PAFs).
+    #[serde(default)]
+    pub paf_min_len: u64,
 }
 
 impl Default for GenomeInputs {
@@ -58,6 +61,7 @@ impl Default for GenomeInputs {
             preset: "asm20".into(),
             aligner_args: String::new(),
             all_copies: false,
+            paf_min_len: 0,
         }
     }
 }
@@ -196,8 +200,9 @@ fn load(
         Some(paf) => {
             status.stage(format!("Reading {}", file_name(paf)));
             repaint();
-            let (alns, swapped) = read_paf_oriented(paf, &y.records, &x.records)
-                .map_err(|e| format!("{}: {e}", paf.display()))?;
+            let (alns, swapped) =
+                read_paf_oriented(paf, &y.records, &x.records, inputs.paf_min_len)
+                    .map_err(|e| format!("{}: {e}", paf.display()))?;
             let note = if swapped { ", axes swapped" } else { "" };
             (alns, format!("PAF {}{note}", file_name(paf)))
         }
@@ -247,7 +252,7 @@ fn load(
                 })?;
             status.stage("Reading alignments");
             repaint();
-            let alns = read_paf_file(&out.paf, &y.records, &x.records)
+            let alns = read_paf_file(&out.paf, &y.records, &x.records, inputs.paf_min_len)
                 .map_err(|e| format!("{}: {e}", out.paf.display()))?;
             let cached = if out.cached { ", cached" } else { "" };
             let all = if inputs.all_copies { " -P" } else { "" };

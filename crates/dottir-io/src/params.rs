@@ -61,6 +61,9 @@ pub struct GenomeParamsInfo {
     pub aligner_args: Option<Vec<String>>,
     pub chunk_size: Option<u64>,
     pub min_aln_len: u64,
+    /// Alignments shorter than this were not read at all.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub paf_min_len: u64,
     pub min_identity: f64,
     pub primary_only: bool,
     pub remove_noise: bool,
@@ -204,6 +207,10 @@ pub fn hostname() -> String {
                 .map(|s| s.trim().to_string())
                 .unwrap_or_else(|| "unknown".to_string())
         })
+}
+
+fn is_zero(v: &u64) -> bool {
+    *v == 0
 }
 
 #[cfg(test)]

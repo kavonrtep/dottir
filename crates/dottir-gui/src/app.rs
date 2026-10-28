@@ -3080,6 +3080,20 @@ impl DottirApp {
                         );
                     ui.weak("Results are cached; reopening the same comparison is quick.");
                 }
+                ui.horizontal(|ui| {
+                    ui.label("Skip alignments shorter than");
+                    ui.add(
+                        egui::DragValue::new(&mut inputs.paf_min_len)
+                            .range(0..=1_000_000)
+                            .speed(100)
+                            .suffix(" bp"),
+                    )
+                    .on_hover_text(
+                        "Not read at all, to keep memory bounded for huge PAFs \
+                         (e.g. -P on multi-gigabase genomes). The panel's minimum \
+                         length hides alignments without dropping them.",
+                    );
+                });
                 if let Some(e) = error {
                     ui.separator();
                     ui.colored_label(Color32::from_rgb(200, 40, 40), e.as_str());
