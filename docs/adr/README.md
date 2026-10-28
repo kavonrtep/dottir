@@ -12,7 +12,7 @@ over Y because…" live here. Format: [MADR](https://adr.github.io/madr/).
 | 0005 | Annotation overlay as full-span bands | Accepted |
 | 0006 | GFF3 with embedded sequences as input | Accepted |
 | 0007 | Seed-based large-sequence mode | Accepted |
-| 0008 | Genome mode from external alignments | Proposed |
+| 0008 | Genome mode from external alignments | Accepted |
 
 Add a new ADR whenever the change is one of:
 

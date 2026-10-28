@@ -302,6 +302,42 @@ exact engine; §4.1 continues to govern that engine and its C-dotter goldens.
 10. **Performance** (8-core desktop, synthetic repeat-rich genomes): 100 Mb
     self-comparison at 4000 px in ≤ 5 min and ≤ 3 GB RSS.
 
+### 4.7 Genome mode (ADR 0008)
+
+A third engine for whole assemblies (multi-chromosome, Gb scale) that draws
+alignments from an external aligner instead of scoring matrix cells. It is
+repeat-blind by construction; repeats are studied by zooming into large
+mode.
+
+1. **Alignment source**: a PAF file (`--paf`) or an external
+   minimap2-compatible program (`--aligner auto|mm2plus|minimap2|PATH`;
+   `auto` prefers mm2plus). dottir MUST NOT link or reimplement an aligner
+   (§5).
+2. **Chunked runs**: query records are aligned in chunks (default 10 Mb);
+   pieces of one alignment split at a cut SHOULD be re-joined when
+   co-linear across it. Results MAY be cached; the cache key MUST cover
+   both inputs' SHA-256, the aligner version and its full argument list.
+3. **Self-comparison** uses `-D --dual=no`; off-diagonal alignments are
+   mirrored and the main diagonal drawn synthetically.
+4. **Identity** is `1 − de:f` when present, else PAF column 10 / column 11,
+   coloured in bins < 25 / 25–50 / 50–75 / > 75 % (D-GENIES).
+5. **Filters**: minimum length, minimum identity, primary only, and the
+   D-GENIES length-histogram noise filter. Filters are display-only in the
+   GUI.
+6. **Ordering**: query records MAY be sorted along the reference (record
+   with most aligned bp, length-weighted median position, majority strand);
+   ties MUST be broken by record name.
+7. **Determinism**: the raster MUST be independent of PAF record order and
+   of aligner thread count, given identical PAF content.
+8. **Memory**: sequences MUST be read by region through a FASTA index, not
+   loaded whole.
+9. **Provenance**: exports MUST record `mode = genome`, the aligner name,
+   version and arguments (or the PAF path and SHA-256), chunk size,
+   filters and sort state.
+10. **Engine selection**: `--engine auto` selects genome mode when
+    query × subject ≥ `--genome-threshold-cells` (default 10¹⁷) and an
+    aligner is available.
+
 ## 5. Out of scope (explicitly excluded)
 
 - The exon / intron view from the original. Can be added later if a need emerges; not
@@ -310,6 +346,8 @@ exact engine; §4.1 continues to govern that engine and its C-dotter goldens.
 - `libpfetch` (Sanger-internal online sequence fetching).
 - The original's bespoke feature-file format; replaced by GFF3.
 - Network / cloud functionality.
+- A built-in aligner. Genome mode (§4.7) runs an external one or reads its
+  PAF.
 - Base-level alignment of large-mode chains (gapped extension, CIGAR). Basic
   co-linear chaining is in scope as a display aid (§4.6.6); use minimap2 PAF
   overlays for alignments.

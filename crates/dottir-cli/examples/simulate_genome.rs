@@ -10,6 +10,12 @@
 //! segmental duplications), `OUT_PREFIX.b.fa` (genome B: A rearranged —
 //! inversions, a translocation — and diverged by `DIVERGENCE_PCT`), and
 //! `OUT_PREFIX.truth.bed` with the planted events in A coordinates.
+//!
+//! For genome mode it also writes `OUT_PREFIX.contigs.fa`: B cut into
+//! contigs of 20–200 % of `len / (10 · RECORDS)`, 1 % diverged, shuffled,
+//! a third reverse-complemented, plus unplaced random contigs; and
+//! `OUT_PREFIX.contigs.tsv` (contig, B record, start, end, strand; `*` for
+//! unplaced). Sorting the contigs along B must recover the B order.
 
 use std::io::Write;
 
@@ -175,8 +181,42 @@ fn main() -> std::io::Result<()> {
             .map(|(i, c)| (format!("{name}{}", i + 1), c.to_vec()))
             .collect()
     };
+    let b_recs = split(&b, "chrB");
     write_fasta(&format!("{prefix}.a.fa"), &split(&a, "chrA"))?;
-    write_fasta(&format!("{prefix}.b.fa"), &split(&b, "chrB"))?;
+    write_fasta(&format!("{prefix}.b.fa"), &b_recs)?;
+
+    let mean = (len / (10 * n_rec)).max(1000) as u64;
+    let mut contigs = Vec::new();
+    for (rec, seq) in &b_recs {
+        let mut at = 0usize;
+        while at < seq.len() {
+            let l = (mean / 5 + rng.below(mean * 9 / 5)) as usize;
+            let end = (at + l).min(seq.len());
+            let rev = rng.below(3) == 0;
+            let mut c = rng.mutate(&seq[at..end], 1.0);
+            if rev {
+                c = revcomp(&c);
+            }
+            let strand = if rev { '-' } else { '+' };
+            contigs.push((format!("{rec}\t{at}\t{end}\t{strand}"), c));
+            at = end;
+        }
+    }
+    for _ in 0..(contigs.len() / 10).max(1) {
+        let l = (mean / 10 + rng.below(mean / 5)) as usize;
+        contigs.push(("*\t*\t*\t*".to_string(), rng.dna(l)));
+    }
+    for i in (1..contigs.len()).rev() {
+        contigs.swap(i, rng.below(i as u64 + 1) as usize);
+    }
+    let mut t = std::fs::File::create(format!("{prefix}.contigs.tsv"))?;
+    let mut named = Vec::with_capacity(contigs.len());
+    for (i, (truth, seq)) in contigs.into_iter().enumerate() {
+        let id = format!("ctg{:05}", i + 1);
+        writeln!(t, "{id}\t{truth}")?;
+        named.push((id, seq));
+    }
+    write_fasta(&format!("{prefix}.contigs.fa"), &named)?;
     let mut t = std::fs::File::create(format!("{prefix}.truth.bed"))?;
     for line in truth {
         writeln!(t, "genomeA\t{line}")?;

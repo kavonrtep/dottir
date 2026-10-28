@@ -1,6 +1,6 @@
 # ADR 0008 — Genome mode: whole-assembly dotplots from external alignments
 
-* Status: Proposed
+* Status: Accepted (2026-10-28)
 * Date: 2026-10-28
 * Deciders: petr
 * Spec reference: §5 (out of scope: built-in aligner), §10.7 (HSP source:
