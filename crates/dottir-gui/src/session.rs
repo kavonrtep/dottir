@@ -57,6 +57,10 @@ pub struct SessionGenome {
     pub primary_only: bool,
     pub remove_noise: bool,
     pub sort_query: bool,
+    /// Reference records sorted along the query (exclusive with
+    /// `sort_query`).
+    #[serde(default)]
+    pub sort_reference: bool,
     /// Vertical records flipped by hand, by name.
     pub flipped: Vec<String>,
     pub line_width: u32,
@@ -72,7 +76,8 @@ impl SessionGenome {
             min_identity: v.filter.min_identity,
             primary_only: v.filter.primary_only,
             remove_noise: v.filter.remove_noise,
-            sort_query: v.sort,
+            sort_query: v.sort == Some(dottir_core::genome::SortAxis::Vertical),
+            sort_reference: v.sort == Some(dottir_core::genome::SortAxis::Horizontal),
             flipped: v
                 .flips
                 .iter()
@@ -91,7 +96,12 @@ impl SessionGenome {
         v.filter.min_identity = self.min_identity.clamp(0.0, 1.0);
         v.filter.primary_only = self.primary_only;
         v.filter.remove_noise = self.remove_noise;
-        v.sort = self.sort_query;
+        use dottir_core::genome::SortAxis;
+        v.sort = match (self.sort_query, self.sort_reference) {
+            (true, _) => Some(SortAxis::Vertical),
+            (false, true) => Some(SortAxis::Horizontal),
+            _ => None,
+        };
         v.line_width = self.line_width.clamp(1, 5);
         v.drill_limit_mb = self.drill_limit_mb.max(1.0);
         for name in &self.flipped {
@@ -354,6 +364,7 @@ mod tests {
                 primary_only: true,
                 remove_noise: false,
                 sort_query: false,
+                sort_reference: true,
                 flipped: vec!["ctg2".into()],
                 line_width: 2,
                 drill_limit_mb: 150.0,

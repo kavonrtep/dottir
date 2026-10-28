@@ -67,6 +67,9 @@ pub struct GenomeParamsInfo {
     /// Line length below which alignments were dropped as noise.
     pub noise_threshold: Option<f64>,
     pub sorted_query: bool,
+    /// Reference records sorted along the query instead.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sorted_reference: bool,
     pub alignments: usize,
     pub alignments_drawn: usize,
     pub bp_per_px: u64,

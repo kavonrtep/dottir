@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use dottir_core::genome::raster::{identity_class, identity_code};
 use dottir_core::genome::{
-    arrange, Alignment, Arranged, AxisLayout, FilterConfig, GenomeRecord, RasterConfig,
+    arrange, Alignment, Arranged, AxisLayout, FilterConfig, GenomeRecord, RasterConfig, SortAxis,
 };
 use dottir_io::aligner::{align, AlignRequest, Aligner, AlignerError};
 use dottir_io::faidx::{plain_fasta, FastaIndex, Region};
@@ -304,7 +304,8 @@ pub struct GenomeView {
     pub data: GenomeData,
     pub inputs: GenomeInputs,
     pub filter: FilterConfig,
-    pub sort: bool,
+    /// Which axis's records are sorted along the other, if any.
+    pub sort: Option<SortAxis>,
     /// Per vertical record: flipped by the user (on top of sorting).
     pub flips: Vec<bool>,
     pub line_width: u32,
@@ -336,7 +337,7 @@ impl GenomeView {
             &data.x.records,
             &data.y.records,
             &filter,
-            false,
+            None,
             &[],
         );
         let drawn = arranged.keep.iter().filter(|&&k| k).count();
@@ -351,7 +352,7 @@ impl GenomeView {
             data,
             inputs,
             filter,
-            sort: false,
+            sort: None,
             line_width: 2,
             drill_limit_mb: DEFAULT_DRILL_LIMIT_MB,
             arranged,
@@ -378,7 +379,7 @@ impl GenomeView {
             &d.x.records,
             &d.y.records,
             &self.filter,
-            self.sort && !d.self_comparison,
+            self.sort.filter(|_| !d.self_comparison),
             &self.flips,
         );
         self.drawn = self.arranged.keep.iter().filter(|&&k| k).count();
@@ -1107,12 +1108,26 @@ impl GenomeView {
         ui.separator();
 
         heading(ui, "Order");
-        changed |= ui
-            .add_enabled(
-                !self_comparison,
-                egui::Checkbox::new(&mut self.sort, small("Sort query along reference".into())),
-            )
-            .changed();
+        ui.add_enabled_ui(!self_comparison, |ui| {
+            for (value, label, tip) in [
+                (None, "File order", "Records as in the inputs"),
+                (
+                    Some(SortAxis::Vertical),
+                    "Sort query along reference",
+                    "Order and orient the vertical records along the reference (D-GENIES)",
+                ),
+                (
+                    Some(SortAxis::Horizontal),
+                    "Sort reference along query",
+                    "Order and orient the reference records along the vertical assembly",
+                ),
+            ] {
+                changed |= ui
+                    .radio_value(&mut self.sort, value, small(label.into()))
+                    .on_hover_text(tip)
+                    .changed();
+            }
+        });
         let n_flipped = self.flips.iter().filter(|&&f| f).count();
         if ui
             .add_enabled(
@@ -1536,7 +1551,7 @@ mod tests {
             source: "test".into(),
         };
         let mut v = GenomeView::new(data, GenomeInputs::default());
-        v.sort = sort;
+        v.sort = sort.then_some(SortAxis::Vertical);
         v.rearrange();
         v
     }

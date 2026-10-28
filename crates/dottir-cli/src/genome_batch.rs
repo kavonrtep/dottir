@@ -11,7 +11,7 @@ use dottir_core::genome::alignment::sort_alignments;
 use dottir_core::genome::order::Placement;
 use dottir_core::genome::{
     arrange, rasterize, Alignment, Arranged, AxisLayout, FilterConfig, GenomeRecord, RasterConfig,
-    GENOME_FORMAT_VERSION,
+    SortAxis, GENOME_FORMAT_VERSION,
 };
 use dottir_io::aligner::{align, AlignRequest, Aligner};
 use dottir_io::faidx::{plain_fasta, FastaIndex};
@@ -96,6 +96,11 @@ pub struct GenomeArgs {
     /// horizontal one (D-GENIES contig sorting).
     #[arg(long)]
     pub sort_query: bool,
+
+    /// Sort and orient the horizontal assembly's records along the
+    /// vertical one instead.
+    #[arg(long, conflicts_with = "sort_query")]
+    pub sort_reference: bool,
 
     /// Line thickness in pixels.
     #[arg(long, value_name = "PX", default_value_t = 2)]
@@ -376,9 +381,14 @@ fn run_aligner(
 pub fn run(args: &BatchArgs) -> Result<()> {
     let g = &args.genome;
     let self_comparison = args.subject.is_none();
-    if self_comparison && g.sort_query {
-        bail!("--sort-query needs two inputs");
+    if self_comparison && (g.sort_query || g.sort_reference) {
+        bail!("--sort-query / --sort-reference need two inputs");
     }
+    let sort = match (g.sort_query, g.sort_reference) {
+        (true, _) => Some(SortAxis::Vertical),
+        (false, true) => Some(SortAxis::Horizontal),
+        _ => None,
+    };
     let cache = dottir_io::cache::cache_dir();
     let x = open_assembly(&args.query, &cache)?;
     let y = match &args.subject {
@@ -417,7 +427,7 @@ pub fn run(args: &BatchArgs) -> Result<()> {
         x: x_layout,
         y: y_layout,
         placements,
-    } = arrange(&alns, &x.records, &y.records, &cfg, g.sort_query, &[]);
+    } = arrange(&alns, &x.records, &y.records, &cfg, sort, &[]);
     let drawn: Vec<&Alignment> = alns
         .iter()
         .zip(&keep)
@@ -436,6 +446,13 @@ pub fn run(args: &BatchArgs) -> Result<()> {
             y_layout.segments.len(),
             y_layout.segments.iter().filter(|s| s.reverse).count(),
             placements.iter().filter(|p| p.is_none()).count()
+        );
+    }
+    if g.sort_reference {
+        tracing::info!(
+            "sorted {} reference records, {} reversed",
+            x_layout.segments.len(),
+            x_layout.segments.iter().filter(|s| s.reverse).count(),
         );
     }
     write_exports(g, &x, &y, &y_layout, &placements, &alns, &drawn)?;
@@ -559,6 +576,7 @@ pub fn run(args: &BatchArgs) -> Result<()> {
                 remove_noise: g.remove_noise,
                 noise_threshold: noise,
                 sorted_query: g.sort_query,
+                sorted_reference: g.sort_reference,
                 alignments: alns.len(),
                 alignments_drawn: drawn.len(),
                 bp_per_px,

@@ -97,6 +97,10 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     where runs meet at chunk boundaries (coverage was double-counted there).
 * FASTA parsing records soft-masked (lowercase) runs
   (`FastaRecord::soft_masked`, `Sequence::soft_mask`).
+* **Genome mode: sort the reference along the query**: `--sort-reference`
+  (exclusive with `--sort-query`) and *Sort reference along query* in the
+  genome view's *Order*; kept in sessions (`sort_reference`) and in the
+  sidecar (`sorted_reference`). `arrange` takes an `Option<SortAxis>`.
 * **Chain exports** (plan L5): `--chains-out FILE.bedpe` writes BEDPE;
   `--svg` draws the chains as vector lines; GUI *Save chains…* (PAF or
   BEDPE) and chain lines in *Save SVG* when shown.

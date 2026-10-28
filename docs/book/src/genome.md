@@ -116,6 +116,13 @@ position of its alignments there. A record is reverse-complemented when its
 long alignments run against the reference. Records without alignments go
 last. Reversed records are labelled with a trailing `-`.
 
+`--sort-reference` does the opposite: the reference records are ordered
+and oriented along the vertical assembly, which stays in file order —
+useful when the vertical assembly is the one with the trusted
+chromosome order. The two options exclude each other; in the GUI they are
+the *Order* choices *Sort query along reference* and *Sort reference
+along query*. Hand flips (right-click) still act on vertical records.
+
 The same sort is available for ordinary dotplots of multi-record FASTA
 files, with either input sorted: see
 [Sorting records](./large.md#sorting-records).
@@ -152,7 +159,7 @@ The layout is the dotplot's: menu bar with the two inputs, controls on
 the right, pointer position in the status bar. *Fit* and *Back* (also in
 *View*, and *File → Save PNG / Save SVG*) act on the genome view. The right panel
 has the same filters as the CLI (applied instantly, no re-alignment),
-*Sort query along reference*, *Keep all copies of repeats* (re-runs the
+*Sort query along reference* or *reference along query*, *Keep all copies of repeats* (re-runs the
 aligner, keeping the filters), line width, the identity legend and exports
 (plot PNG, association table, query FASTA in plot order, drawn alignments
 as PAF). Dotplot-only menu items are disabled. The plot is redrawn at

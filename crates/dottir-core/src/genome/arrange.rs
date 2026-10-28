@@ -5,6 +5,7 @@ use super::alignment::{Alignment, GenomeRecord};
 use super::filter::{keep_mask, FilterConfig};
 use super::layout::{AxisLayout, DEFAULT_SMALL_FRACTION};
 use super::order::{sort_query, Placement};
+use super::records::SortAxis;
 
 /// What to draw and where.
 #[derive(Debug, Clone, PartialEq)]
@@ -13,7 +14,8 @@ pub struct Arranged {
     pub keep: Vec<bool>,
     /// Noise length threshold, when the noise filter applied.
     pub noise: Option<f64>,
-    /// Horizontal axis (reference, alignment targets), in file order.
+    /// Horizontal axis (reference, alignment targets): file order unless
+    /// sorted along the query.
     pub x: AxisLayout,
     /// Vertical axis (alignment queries).
     pub y: AxisLayout,
@@ -31,47 +33,70 @@ impl Arranged {
     }
 }
 
-/// Filter `alns` and lay out both axes. With `sort`, the vertical
-/// records are ordered and oriented along the reference as D-GENIES
-/// does, from the noise-filtered alignments (spec §4.7.6). `flips`
-/// (per vertical record, may be empty) reverses records on top of that.
+/// Filter `alns` and lay out both axes. `sort` orders and orients one
+/// axis's records along the other as D-GENIES does, from the
+/// noise-filtered alignments (spec §4.7.6): [`SortAxis::Vertical`] the
+/// query records along the reference, [`SortAxis::Horizontal`] the
+/// reference records along the query. `flips` (per vertical record, may
+/// be empty) reverses records on top of that.
 pub fn arrange(
     alns: &[Alignment],
     x_records: &[GenomeRecord],
     y_records: &[GenomeRecord],
     filter: &FilterConfig,
-    sort: bool,
+    sort: Option<SortAxis>,
     flips: &[bool],
 ) -> Arranged {
     let (keep, noise) = keep_mask(alns, filter);
-    let x = AxisLayout::new(x_records, None, &[], DEFAULT_SMALL_FRACTION);
     let flipped = |base: &[bool]| -> Vec<bool> {
         (0..y_records.len())
             .map(|r| base.get(r).copied().unwrap_or(false) ^ flips.get(r).copied().unwrap_or(false))
             .collect()
     };
-    let (y, placements) = if sort {
-        let (sort_keep, _) = keep_mask(
+    let sort_keep = || {
+        keep_mask(
             alns,
             &FilterConfig {
                 remove_noise: true,
                 ..filter.clone()
             },
-        );
-        let used: Vec<&Alignment> = select(alns, &sort_keep).collect();
-        let o = sort_query(&used, y_records, x_records, &x);
-        let y = AxisLayout::new(
-            y_records,
-            Some(&o.order),
-            &flipped(&o.flips),
-            DEFAULT_SMALL_FRACTION,
-        );
-        (y, o.placements)
-    } else {
-        let used: Vec<&Alignment> = select(alns, &keep).collect();
-        let placements = sort_query(&used, y_records, x_records, &x).placements;
-        let y = AxisLayout::new(y_records, None, &flipped(&[]), DEFAULT_SMALL_FRACTION);
-        (y, placements)
+        )
+        .0
+    };
+    let file_order_x = || AxisLayout::new(x_records, None, &[], DEFAULT_SMALL_FRACTION);
+    let (x, y, placements) = match sort {
+        Some(SortAxis::Vertical) => {
+            let x = file_order_x();
+            let sort_keep = sort_keep();
+            let used: Vec<&Alignment> = select(alns, &sort_keep).collect();
+            let o = sort_query(&used, y_records, x_records, &x);
+            let y = AxisLayout::new(
+                y_records,
+                Some(&o.order),
+                &flipped(&o.flips),
+                DEFAULT_SMALL_FRACTION,
+            );
+            (x, y, o.placements)
+        }
+        Some(SortAxis::Horizontal) => {
+            let y = AxisLayout::new(y_records, None, &flipped(&[]), DEFAULT_SMALL_FRACTION);
+            let sort_keep = sort_keep();
+            let swapped: Vec<Alignment> =
+                select(alns, &sort_keep).map(Alignment::swapped).collect();
+            let used: Vec<&Alignment> = swapped.iter().collect();
+            let o = sort_query(&used, x_records, y_records, &y);
+            let x = AxisLayout::new(x_records, Some(&o.order), &o.flips, DEFAULT_SMALL_FRACTION);
+            let used: Vec<&Alignment> = select(alns, &keep).collect();
+            let placements = sort_query(&used, y_records, x_records, &x).placements;
+            (x, y, placements)
+        }
+        None => {
+            let x = file_order_x();
+            let used: Vec<&Alignment> = select(alns, &keep).collect();
+            let placements = sort_query(&used, y_records, x_records, &x).placements;
+            let y = AxisLayout::new(y_records, None, &flipped(&[]), DEFAULT_SMALL_FRACTION);
+            (x, y, placements)
+        }
     };
     Arranged {
         keep,
@@ -124,17 +149,44 @@ mod tests {
             aln(1, 0, (0, 30_000), false),
         ];
         let cfg = FilterConfig::default();
-        let s = arrange(&alns, &x, &y, &cfg, true, &[]);
+        let s = arrange(&alns, &x, &y, &cfg, Some(SortAxis::Vertical), &[]);
         let order: Vec<u32> = s.y.segments.iter().map(|g| g.rec).collect();
         assert_eq!(order, [1, 0]);
         assert!(s.y.segment(0).reverse && !s.y.segment(1).reverse);
         // A user flip of a undoes the sort's flip; of b adds one.
-        let s = arrange(&alns, &x, &y, &cfg, true, &[true, true]);
+        let s = arrange(&alns, &x, &y, &cfg, Some(SortAxis::Vertical), &[true, true]);
         assert!(!s.y.segment(0).reverse && s.y.segment(1).reverse);
-        let u = arrange(&alns, &x, &y, &cfg, false, &[false, true]);
+        let u = arrange(&alns, &x, &y, &cfg, None, &[false, true]);
         let order: Vec<u32> = u.y.segments.iter().map(|g| g.rec).collect();
         assert_eq!(order, [0, 1]);
         assert!(!u.y.segment(0).reverse && u.y.segment(1).reverse);
         assert_eq!(u.drawn(&alns).count(), 2);
+    }
+
+    #[test]
+    fn reference_records_sort_along_the_query() {
+        // One query record; reference r2 matches its start, r1 (reversed)
+        // its end.
+        let x = [rec("r1", 20_000), rec("r2", 30_000)];
+        let y = [rec("q", 100_000)];
+        let mut a1 = aln(0, 0, (0, 20_000), true);
+        (a1.q_start, a1.q_end) = (70_000, 90_000);
+        let a2 = aln(0, 1, (0, 30_000), false);
+        let alns = [a1, a2];
+        let s = arrange(
+            &alns,
+            &x,
+            &y,
+            &FilterConfig::default(),
+            Some(SortAxis::Horizontal),
+            &[],
+        );
+        let order: Vec<u32> = s.x.segments.iter().map(|g| g.rec).collect();
+        assert_eq!(order, [1, 0]);
+        assert!(!s.x.segment(1).reverse && s.x.segment(0).reverse);
+        let qorder: Vec<u32> = s.y.segments.iter().map(|g| g.rec).collect();
+        assert_eq!(qorder, [0]);
+        // Placements still describe the vertical records.
+        assert_eq!(s.placements.len(), 1);
     }
 }
