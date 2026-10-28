@@ -9,6 +9,24 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+* **Genome mode** (ADR 0008, spec §4.7): whole-assembly dotplots at
+  D-GENIES scale, drawn from alignments instead of matrix cells.
+  - `dottir batch REF.fa ASM.fa --engine genome` runs mm2plus or minimap2
+    (`--aligner`, `--preset`, `--aligner-args`, `--threads`): query
+    records are streamed in `--chunk-size` pieces and re-joined, results
+    are cached by input checksums, aligner version and arguments.
+    `--paf FILE` draws existing alignments instead. Self-comparisons use
+    `-D --dual=no` (`--self-all-copies` for `-P`).
+  - Identity-coloured lines (D-GENIES classes), filters (`--min-aln-len`,
+    `--min-identity`, `--primary-only`, `--remove-noise`), small-record
+    blocks, contig sorting and orientation (`--sort-query`), following the
+    D-GENIES source.
+  - Exports: `--assoc-out`, `--sorted-query-out`, `--unaligned-out`,
+    `--paf-out`; `[genome]` sidecar section.
+  - `--engine auto` selects genome mode from `--genome-threshold-cells`
+    (10¹⁷) when an aligner is installed.
+  - Inputs are indexed (samtools-compatible `.fai`) and never loaded;
+    gzipped FASTA is decompressed once into the user cache.
 * **Large-sequence mode** (ADR 0007, spec §4.6): a seed-based engine for DNA
   comparisons at chromosome/genome scale (tested to 100 Mb × 100 Mb,
   multi-record).

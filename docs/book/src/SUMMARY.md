@@ -10,6 +10,7 @@
 - [The `dottir find-peaks` CLI](./find-peaks.md)
 - [The `dottir-gui` interactive viewer](./gui.md)
 - [Large sequences](./large.md)
+- [Genome comparisons](./genome.md)
 
 # Concepts
 

@@ -144,9 +144,11 @@ down, where large mode takes over.
   reader), and a process runner for the aligner outside `dottir-core`.
 * Large-mode drill-down from genome mode runs on regions, so its repeat
   classes are estimated within the visible regions, not genome-wide. A
-  genome-wide seed-depth track computed during the genome run is adopted
-  only if it adds at most 25 % to the genome-mode wall time and fits the
-  memory limit on the G0 corpora; otherwise it is skipped and classes
+  genome-wide seed-depth track computed during the genome run was to be
+  adopted only if it added at most 25 % to the genome-mode wall time.
+  Measured on Col-CC (142 Mb): the depth pass costs ~21 s per assembly
+  even with 1/5 seed sampling — ~40 % of the 52 s self-comparison and
+  ~6× the 8.6 s Col-CC × *A. lyrata* run. It is not computed; classes
   stay region-local (documented).
 * Genome mode is repeat-blind by construction (aligner seed filtering and
   chain selection). The book states this and points to large mode.

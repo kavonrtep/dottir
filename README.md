@@ -60,13 +60,14 @@ Pre-built Linux x86_64 packages live on the
 [`petrnovak`](https://anaconda.org/petrnovak/dottir) channel:
 
 ```sh
-mamba install -c petrnovak -c conda-forge dottir
+mamba install -c petrnovak -c conda-forge -c bioconda dottir
 # or:
-conda install -c petrnovak -c conda-forge dottir
+conda install -c petrnovak -c conda-forge -c bioconda dottir
 ```
 
 This installs both the `dottir` CLI and the `dottir-gui` binary into
-the active environment. The conda package bundles the X11/GL
+the active environment, plus mm2plus and minimap2 (from bioconda) for
+genome mode. The conda package bundles the X11/GL
 runtime libraries the GUI needs, so no extra system packages are
 required.
 

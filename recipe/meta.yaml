@@ -56,7 +56,11 @@ requirements:
     - libxkbcommon                                         # [linux]
     - wayland                                              # [linux]
     - fontconfig                                           # [linux]
-  run:                                                     # [linux]
+  run:
+    # Genome mode runs an external aligner (ADR 0008); without one only
+    # `--paf` is available. mm2plus is preferred where it is built.
+    - mm2plus                                              # [linux and x86_64]
+    - minimap2                                             # [not win]
     - {{ pin_compatible('libxkbcommon') }}                 # [linux]
     - {{ pin_compatible('wayland') }}                      # [linux]
     - {{ pin_compatible('fontconfig') }}                   # [linux]
@@ -82,7 +86,9 @@ about:
     dottir is a modern Rust reimplementation of Dotter
     (Sonnhammer & Durbin 1995): a sliding-window, score-matrix
     sequence dot-matrix plotter with an interactive greyramp GUI
-    and a headless batch CLI. Two binaries are installed:
+    and a headless batch CLI, plus seed-based (large) and
+    alignment-based (genome) engines for chromosome- and genome-scale
+    comparisons. Two binaries are installed:
 
       * dottir      — headless batch CLI (FASTA in, PNG out + sidecar)
       * dottir-gui  — interactive viewer (egui/eframe)

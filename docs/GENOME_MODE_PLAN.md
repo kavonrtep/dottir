@@ -15,10 +15,10 @@ v0.6.x.
 | G0 | ADR, spec section, corpora | ☑ Arabidopsis corpora (Col-CC, TAIR10.1, *A. lyrata*); 1–3 Gb pair still to add |
 | G1 | PAF reader, FASTA index, genome layout | ☑ |
 | G2 | Filters, ordering, rasterisation, CLI `--engine genome --paf` | ☑ PNG; SVG vector lines not done |
-| G3 | Aligner runner: detection, chunking, cache, provenance | ☐ |
+| G3 | Aligner runner: detection, chunking, cache, provenance | ☑ CLI; GUI progress/cancel hooks exist, unused until G5 |
 | G4 | Exports: association table, sorted / unaligned FASTA, filtered PAF | ☑ |
 | G5 | GUI genome view and drill-down to large / exact | ☐ |
-| G6 | Docs, book chapter, conda recipe, release | ☐ |
+| G6 | Docs, book chapter, conda recipe, release | ☑ book chapter, changelog, recipe (bioconda run deps); release pending |
 
 ## Pipeline overview
 
@@ -85,6 +85,10 @@ Deviations from the plan below:
 * Axes: the first input is horizontal (reference, PAF target), the
   second vertical (PAF query, the one sorted). A PAF made the other way
   round is detected by its record names and swapped.
+* The aligner runs as one process: chunks are pieces of query records
+  streamed to its stdin (no temporary FASTA), not concurrent processes,
+  which would each load the reference index. Self-comparisons send whole
+  records under their own names (`-D` needs matching names and lengths).
 
 ---
 
@@ -246,4 +250,6 @@ gated on `minimap2` being on PATH.
 3. `--engine auto` selects genome mode by size (≥ 10¹⁷ cells, aligner
    present); threshold tuned in G0.
 4. Genome-wide depth track only if ≤ 25 % extra wall time and within the
-   memory limit; otherwise skipped (region-local classes).
+   memory limit; otherwise skipped (region-local classes). **Measured:
+   skipped** — ~21 s per 142 Mb assembly (1/5 sampling) against 8.6 s
+   (pairwise) / 52 s (self) for the aligner.
