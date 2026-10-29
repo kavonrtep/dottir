@@ -7,6 +7,11 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-29
+
+Large-sequence and genome-scale comparisons, and pixelmaps identical to
+C dotter. (0.5.0 was planned for large mode alone and not released.)
+
 ### Added
 
 * **Genome mode** (ADR 0008, spec §4.7): whole-assembly dotplots at
