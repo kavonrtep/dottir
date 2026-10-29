@@ -213,9 +213,58 @@ pub const MASK_LEVEL: f64 = 0.5;
 /// none (`-P` reports every chain as `tp:A:S`): in descending score
 /// (matches, then block length, then position), an alignment is primary
 /// unless at least `mask_level` of the shorter query span overlaps an
-/// earlier primary of the same query record.
+/// earlier primary of the same query record. `mask_level` is at most 1.
 pub fn assign_primary(alns: &mut [Alignment], mask_level: f64) {
     use std::collections::BTreeMap;
+    debug_assert!(mask_level <= 1.0);
+    // Scores sorted as compact keys; the alignments themselves are only
+    // looked at to break ties.
+    let mut keys: Vec<(u64, u64, usize)> = alns
+        .iter()
+        .enumerate()
+        .map(|(i, a)| (a.matches, a.block_len, i))
+        .collect();
+    keys.sort_unstable_by(|&(am, ab, i), &(bm, bb, j)| {
+        (bm, bb).cmp(&(am, ab)).then_with(|| {
+            let (a, b) = (&alns[i], &alns[j]);
+            (
+                a.q_rec, a.q_start, a.q_end, a.t_rec, a.t_start, a.t_end, a.reverse, i,
+            )
+                .cmp(&(
+                    b.q_rec, b.q_start, b.q_end, b.t_rec, b.t_start, b.t_end, b.reverse, j,
+                ))
+        })
+    });
+    let by_score = keys.into_iter().map(|(_, _, i)| i);
+    // Per query record: primaries keyed by (start, index) → end. No
+    // primary lies inside another (it would overlap all of the shorter
+    // one), so in start order the ends increase too: the primaries
+    // overlapping an alignment are the run before its end that still
+    // ends after its start. Zero-length ones overlap nothing and are left
+    // out, keeping that order.
+    let mut primaries: BTreeMap<u32, BTreeMap<(u64, usize), u64>> = BTreeMap::new();
+    for i in by_score {
+        let a = &alns[i];
+        let set = primaries.entry(a.q_rec).or_default();
+        let len = a.q_len();
+        let secondary = set
+            .range(..(a.q_end, 0))
+            .rev()
+            .take_while(|&(_, &end)| end > a.q_start)
+            .any(|(&(start, _), &end)| {
+                let overlap = end.min(a.q_end) - start.max(a.q_start);
+                overlap > 0 && overlap as f64 >= mask_level * len.min(end - start) as f64
+            });
+        if !secondary && len > 0 {
+            set.insert((a.q_start, i), a.q_end);
+        }
+        alns[i].primary = !secondary;
+    }
+}
+
+/// [`assign_primary`] as the definition reads, O(n²), for tests.
+#[cfg(test)]
+fn assign_primary_naive(alns: &mut [Alignment], mask_level: f64) {
     let mut by_score: Vec<usize> = (0..alns.len()).collect();
     by_score.sort_by(|&i, &j| {
         let (a, b) = (&alns[i], &alns[j]);
@@ -230,25 +279,20 @@ pub fn assign_primary(alns: &mut [Alignment], mask_level: f64) {
                     )),
             )
     });
-    // Per query record: primaries keyed by (start, index) → end, and the
-    // longest primary, which bounds how far left an overlap can start.
-    type Primaries = (BTreeMap<(u64, usize), u64>, u64);
-    let mut primaries: BTreeMap<u32, Primaries> = BTreeMap::new();
+    let mut kept: Vec<usize> = Vec::new();
     for i in by_score {
         let a = &alns[i];
-        let (set, longest) = primaries.entry(a.q_rec).or_default();
-        let len = a.q_len();
-        let secondary = set
-            .range(..(a.q_end, 0))
-            .rev()
-            .take_while(|&(&(start, _), _)| start + *longest > a.q_start)
-            .any(|(&(start, _), &end)| {
-                let overlap = end.min(a.q_end).saturating_sub(start.max(a.q_start));
-                overlap > 0 && overlap as f64 >= mask_level * len.min(end - start) as f64
-            });
+        let secondary = kept.iter().map(|&k| &alns[k]).any(|p| {
+            let overlap = p
+                .q_end
+                .min(a.q_end)
+                .saturating_sub(p.q_start.max(a.q_start));
+            p.q_rec == a.q_rec
+                && overlap > 0
+                && overlap as f64 >= mask_level * a.q_len().min(p.q_len()) as f64
+        });
         if !secondary {
-            set.insert((a.q_start, i), a.q_end);
-            *longest = (*longest).max(len);
+            kept.push(i);
         }
         alns[i].primary = !secondary;
     }
@@ -316,6 +360,34 @@ mod tests {
             mapq: 60,
             primary: true,
             divergence: None,
+        }
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(200))]
+
+        #[test]
+        fn assign_primary_matches_its_definition(
+            hits in proptest::collection::vec(
+                (0u32..2, 0u64..5000, 0u64..3000, 0u64..40, proptest::bool::ANY),
+                0..120,
+            ),
+            mask in 0.05f64..=1.0,
+        ) {
+            let mut alns: Vec<Alignment> = hits
+                .iter()
+                .map(|&(rec, start, len, m, rev)| Alignment {
+                    q_rec: rec,
+                    matches: len * m / 40,
+                    ..aln((start, start + len), (0, len), rev)
+                })
+                .collect();
+            let mut naive = alns.clone();
+            assign_primary(&mut alns, mask);
+            assign_primary_naive(&mut naive, mask);
+            let got: Vec<bool> = alns.iter().map(|a| a.primary).collect();
+            let want: Vec<bool> = naive.iter().map(|a| a.primary).collect();
+            proptest::prop_assert_eq!(got, want);
         }
     }
 

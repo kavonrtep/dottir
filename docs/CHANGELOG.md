@@ -7,6 +7,25 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+Performance (findings HIGH 2 and HIGH 4 of
+`docs/efficiency-review-large-genome.md`; output unchanged):
+
+* `--sort-records` no longer prepares the large engine twice: the plot
+  reuses the sort pass's index and depth tracks where the sorted input is
+  unchanged (`LargeSession::prepare_reusing`). TAIR10 × Col-CC, 8 cores:
+  170 → 123 s when the order stays, 180 → 141 s when query records move.
+* GUI *View → Sort records* computes its chains on the dotplot's prepared
+  session instead of preparing another one, and the compute worker
+  re-prepares by reusing what still matches (after sorting, or a window
+  size change).
+* PAF reading: one pass for HSP overlays instead of one per orientation
+  (3 M lines: 3.6 → 2.0 s), no per-line allocation, and deriving
+  primaries for `-P` PAFs sorts compact keys and scans only overlapping
+  primaries (`read_paf_file`, 3 M lines: 2.4 → 2.0 s, gzipped
+  3.0 → 2.1 s). `examples/paf_read_bench.rs` in `dottir-io` times both.
+
 ## [0.6.0] - 2026-10-29
 
 Large-sequence and genome-scale comparisons, and pixelmaps identical to

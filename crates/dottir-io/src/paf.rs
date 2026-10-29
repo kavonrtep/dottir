@@ -66,7 +66,7 @@ pub fn read_paf_file(
     target: &[GenomeRecord],
     min_len: u64,
 ) -> Result<Vec<Alignment>, PafError> {
-    read_paf_impl(open_maybe_gz(path)?, query, target, true, min_len, false).map(|(a, ..)| a)
+    read_paf_impl(open_maybe_gz(path)?, query, target, true, min_len)
 }
 
 /// Read a PAF for a plot with `vertical` records on the query side and
@@ -158,7 +158,7 @@ pub fn read_paf<R: BufRead>(
     query: &[GenomeRecord],
     target: &[GenomeRecord],
 ) -> Result<Vec<Alignment>, PafError> {
-    read_paf_impl(reader, query, target, true, 0, false).map(|(a, ..)| a)
+    read_paf_impl(reader, query, target, true, 0)
 }
 
 /// Like [`read_paf_oriented`], but lines naming records outside the
@@ -172,10 +172,18 @@ pub fn read_paf_subset_oriented(
     vertical: &[GenomeRecord],
     horizontal: &[GenomeRecord],
 ) -> Result<SubsetRead, PafError> {
-    let read = |q: &[GenomeRecord], t: &[GenomeRecord]| {
-        read_paf_impl(open_maybe_gz(path)?, q, t, false, 0, true)
-    };
-    let swap = |b: Vec<Alignment>, m, paths: Vec<Option<AlignmentPath>>| {
+    // One pass resolving each line both ways round.
+    let mut a = Orientation::new(vertical, horizontal);
+    let mut b = Orientation::new(horizontal, vertical);
+    for_each_line(open_maybe_gz(path)?, |l, line| {
+        let p = parse_line(l, line, true)?;
+        let path = p.cigar.and_then(|cg| cigar_path(cg, &p.aln));
+        a.take(line, &p, &path);
+        b.take(line, &p, &path);
+        Ok(())
+    })?;
+    let swap = |b: Orientation<'_>| {
+        let (alns, skipped, paths) = b.finish();
         let paths = paths
             .into_iter()
             .map(|p| {
@@ -186,17 +194,180 @@ pub fn read_paf_subset_oriented(
                 })
             })
             .collect();
-        Ok((b.iter().map(Alignment::swapped).collect(), m, true, paths))
+        Ok((
+            alns.iter().map(Alignment::swapped).collect(),
+            skipped,
+            true,
+            paths,
+        ))
     };
-    match (read(vertical, horizontal), read(horizontal, vertical)) {
-        (Ok((a, _, _)), Ok((b, m, pb))) if b.len() > a.len() => swap(b, m, pb),
-        (Ok((a, n, pa)), _) => Ok((a, n, false, pa)),
-        (Err(_), Ok((b, m, pb))) => swap(b, m, pb),
-        (Err(e), Err(_)) => Err(e),
+    match (a.error.take(), b.error.is_none()) {
+        (None, true) if b.out.len() > a.out.len() => swap(b),
+        (None, _) => {
+            let (alns, skipped, paths) = a.finish();
+            Ok((alns, skipped, false, paths))
+        }
+        (Some(_), true) => swap(b),
+        (Some(e), false) => Err(e),
     }
 }
 
-/// Alignments, lines skipped and (when asked for) their paths.
+/// One way of reading a PAF onto the plotted records, for
+/// [`read_paf_subset_oriented`]: lines naming other records are skipped,
+/// the first length disagreement rules this orientation out.
+struct Orientation<'a> {
+    qn: Names<'a>,
+    tn: Names<'a>,
+    out: Vec<Alignment>,
+    paths: Vec<Option<AlignmentPath>>,
+    skipped: u64,
+    error: Option<PafError>,
+}
+
+impl<'a> Orientation<'a> {
+    fn new(query: &'a [GenomeRecord], target: &'a [GenomeRecord]) -> Self {
+        Self {
+            qn: Names::new("query", query),
+            tn: Names::new("target", target),
+            out: Vec::new(),
+            paths: Vec::new(),
+            skipped: 0,
+            error: None,
+        }
+    }
+
+    fn take(&mut self, line: u64, p: &PafLine<'_>, path: &Option<AlignmentPath>) {
+        if self.error.is_some() {
+            return;
+        }
+        let resolved = self
+            .qn
+            .resolve(line, p.q_name, p.q_len)
+            .and_then(|q| Ok((q, self.tn.resolve(line, p.t_name, p.t_len)?)));
+        match resolved {
+            Err(e) => self.error = Some(e),
+            Ok((Some(q_rec), Some(t_rec))) => {
+                self.out.push(Alignment {
+                    q_rec,
+                    t_rec,
+                    ..p.aln.clone()
+                });
+                self.paths.push(path.clone());
+            }
+            Ok(_) => self.skipped += 1,
+        }
+    }
+
+    fn finish(mut self) -> PafRead {
+        derive_primaries(&mut self.out);
+        (self.out, self.skipped, self.paths)
+    }
+}
+
+/// minimap2 -P marks every chain secondary; derive the primaries it
+/// would have chosen so "primary only" still means something.
+fn derive_primaries(alns: &mut [Alignment]) {
+    if !alns.is_empty() && alns.iter().all(|a| !a.primary) {
+        assign_primary(alns, MASK_LEVEL);
+    }
+}
+
+/// The fields of one PAF line; `aln` has record indices 0 until the
+/// names are resolved.
+struct PafLine<'l> {
+    q_name: &'l str,
+    q_len: u64,
+    t_name: &'l str,
+    t_len: u64,
+    aln: Alignment,
+    cigar: Option<&'l str>,
+}
+
+/// Parse one data line (no trailing newline). `cg:Z` is kept only when
+/// `keep_cigar`.
+fn parse_line(l: &str, line: u64, keep_cigar: bool) -> Result<PafLine<'_>, PafError> {
+    let bad = |msg: String| PafError::Malformed { line, msg };
+    let mut fields = l.split('\t');
+    let mut col = [""; 12];
+    for (i, c) in col.iter_mut().enumerate() {
+        *c = fields
+            .next()
+            .ok_or_else(|| bad(format!("{i} columns, expected at least 12")))?;
+    }
+    let num = |i: usize| -> Result<u64, PafError> {
+        col[i]
+            .parse()
+            .map_err(|_| bad(format!("column {} is not a number: {:?}", i + 1, col[i])))
+    };
+    let (q_len, q_start, q_end) = (num(1)?, num(2)?, num(3)?);
+    let reverse = match col[4] {
+        "+" => false,
+        "-" => true,
+        s => return Err(bad(format!("strand must be + or -, got {s:?}"))),
+    };
+    let (t_len, t_start, t_end) = (num(6)?, num(7)?, num(8)?);
+    let (matches, block_len) = (num(9)?, num(10)?);
+    let mapq = num(11)?.min(255) as u8;
+    if q_start > q_end || q_end > q_len || t_start > t_end || t_end > t_len {
+        return Err(bad("coordinates out of range".into()));
+    }
+    let mut primary = true;
+    let mut divergence = None;
+    let mut cigar = None;
+    for tag in fields {
+        if let Some(v) = tag.strip_prefix("tp:A:") {
+            primary = matches!(v, "P" | "I");
+        } else if let Some(v) = tag.strip_prefix("de:f:") {
+            divergence = Some(v.parse().map_err(|_| bad(format!("bad de:f tag {v:?}")))?);
+        } else if let Some(v) = tag.strip_prefix("cg:Z:").filter(|_| keep_cigar) {
+            cigar = Some(v);
+        }
+    }
+    Ok(PafLine {
+        q_name: col[0],
+        q_len,
+        t_name: col[5],
+        t_len,
+        aln: Alignment {
+            q_rec: 0,
+            q_start,
+            q_end,
+            t_rec: 0,
+            t_start,
+            t_end,
+            reverse,
+            matches,
+            block_len,
+            mapq,
+            primary,
+            divergence,
+        },
+        cigar,
+    })
+}
+
+/// Call `f` with each data line of `reader` (empty lines and `#`
+/// comments skipped) and its 1-based line number.
+fn for_each_line<R: BufRead>(
+    mut reader: R,
+    mut f: impl FnMut(&str, u64) -> Result<(), PafError>,
+) -> Result<(), PafError> {
+    let mut buf = String::new();
+    let mut line = 0u64;
+    loop {
+        buf.clear();
+        if reader.read_line(&mut buf)? == 0 {
+            return Ok(());
+        }
+        line += 1;
+        let l = buf.trim_end_matches(['\n', '\r']);
+        if !l.is_empty() && !l.starts_with('#') {
+            f(l, line)?;
+        }
+    }
+}
+
+/// Alignments, lines skipped and their paths.
 type PafRead = (Vec<Alignment>, u64, Vec<Option<AlignmentPath>>);
 
 /// [`read_paf_subset_oriented`]: alignments, lines skipped, read
@@ -269,108 +440,38 @@ fn cigar_path(cg: &str, a: &Alignment) -> Option<AlignmentPath> {
 }
 
 fn read_paf_impl<R: BufRead>(
-    mut reader: R,
+    reader: R,
     query: &[GenomeRecord],
     target: &[GenomeRecord],
     strict: bool,
     min_len: u64,
-    keep_paths: bool,
-) -> Result<PafRead, PafError> {
+) -> Result<Vec<Alignment>, PafError> {
     let mut qn = Names::new("query", query);
     let mut tn = Names::new("target", target);
     let mut out = Vec::new();
-    let mut paths = Vec::new();
-    let mut buf = String::new();
-    let mut line = 0u64;
-    let mut skipped = 0u64;
-    loop {
-        buf.clear();
-        if reader.read_line(&mut buf)? == 0 {
-            break;
-        }
-        line += 1;
-        let l = buf.trim_end_matches(['\n', '\r']);
-        if l.is_empty() || l.starts_with('#') {
-            continue;
-        }
-        let bad = |msg: &str| PafError::Malformed {
-            line,
-            msg: msg.to_string(),
-        };
-        let cols: Vec<&str> = l.split('\t').collect();
-        if cols.len() < 12 {
-            return Err(bad(&format!(
-                "{} columns, expected at least 12",
-                cols.len()
-            )));
-        }
-        let num = |i: usize| -> Result<u64, PafError> {
-            cols[i]
-                .parse()
-                .map_err(|_| bad(&format!("column {} is not a number: {:?}", i + 1, cols[i])))
-        };
-        let (q_len, q_start, q_end) = (num(1)?, num(2)?, num(3)?);
-        let reverse = match cols[4] {
-            "+" => false,
-            "-" => true,
-            s => return Err(bad(&format!("strand must be + or -, got {s:?}"))),
-        };
-        let (t_len, t_start, t_end) = (num(6)?, num(7)?, num(8)?);
-        let (matches, block_len) = (num(9)?, num(10)?);
-        let mapq = num(11)?.min(255) as u8;
-        if q_start > q_end || q_end > q_len || t_start > t_end || t_end > t_len {
-            return Err(bad("coordinates out of range"));
-        }
-        let mut primary = true;
-        let mut divergence = None;
-        let mut cigar = None;
-        for tag in &cols[12..] {
-            if let Some(v) = tag.strip_prefix("tp:A:") {
-                primary = matches!(v, "P" | "I");
-            } else if let Some(v) = tag.strip_prefix("de:f:") {
-                divergence = Some(v.parse().map_err(|_| bad(&format!("bad de:f tag {v:?}")))?);
-            } else if let Some(v) = tag.strip_prefix("cg:Z:").filter(|_| keep_paths) {
-                cigar = Some(v);
-            }
-        }
-        let q = qn.resolve(line, cols[0], q_len)?;
-        let t = tn.resolve(line, cols[5], t_len)?;
+    for_each_line(reader, |l, line| {
+        let p = parse_line(l, line, false)?;
+        let q = qn.resolve(line, p.q_name, p.q_len)?;
+        let t = tn.resolve(line, p.t_name, p.t_len)?;
         let (Some(q_rec), Some(t_rec)) = (q, t) else {
-            skipped += 1;
-            continue;
+            return Ok(());
         };
-        if (q_end - q_start).max(t_end - t_start) < min_len {
-            continue;
-        }
         let a = Alignment {
             q_rec,
-            q_start,
-            q_end,
             t_rec,
-            t_start,
-            t_end,
-            reverse,
-            matches,
-            block_len,
-            mapq,
-            primary,
-            divergence,
+            ..p.aln
         };
-        if keep_paths {
-            paths.push(cigar.and_then(|cg| cigar_path(cg, &a)));
+        if a.len() >= min_len {
+            out.push(a);
         }
-        out.push(a);
-    }
+        Ok(())
+    })?;
     if strict {
         qn.finish()?;
         tn.finish()?;
     }
-    // minimap2 -P marks every chain secondary; derive the primaries it
-    // would have chosen so "primary only" still means something.
-    if !out.is_empty() && out.iter().all(|a| !a.primary) {
-        assign_primary(&mut out, MASK_LEVEL);
-    }
-    Ok((out, skipped, paths))
+    derive_primaries(&mut out);
+    Ok(out)
 }
 
 /// Write alignments as PAF: 12 columns, `tp:A:P|S`, and `de:f` when known.
