@@ -53,6 +53,13 @@ ignore = [
     # upgrade without a major egui bump. This is an "unmaintained" notice, not
     # a security vulnerability. Revisit when egui updates its font stack.
     "RUSTSEC-2026-0192",
+    # RUSTSEC-2026-0370/0371/0372: `zvariant`, `zbus_names`, `zvariant_derive`
+    # are unmaintained as standalone crates (merged into zbus 6). Pulled in on
+    # Linux via rfd → ashpd → zbus 5 for the GUI's file dialogs. Notices, not
+    # vulnerabilities; revisit when rfd moves to zbus 6.
+    "RUSTSEC-2026-0370",
+    "RUSTSEC-2026-0371",
+    "RUSTSEC-2026-0372",
 ]
 
 [sources]
