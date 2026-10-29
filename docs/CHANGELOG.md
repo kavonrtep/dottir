@@ -9,7 +9,7 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-Performance (findings HIGH 2 and HIGH 4 of
+Performance (findings HIGH 2, HIGH 3, HIGH 4 and MEDIUM 7 of
 `docs/efficiency-review-large-genome.md`; output unchanged):
 
 * `--sort-records` no longer prepares the large engine twice: the plot
@@ -31,6 +31,11 @@ Performance (findings HIGH 2 and HIGH 4 of
   saving grows with `-P` output on large genomes. `--paf-min-len` still
   applies when the cached result is read, after alignments split at
   query chunk cuts are joined.
+* The large engine's seed index is built on all cores (chunked windows,
+  atomic bucket counters, each bucket sorted afterwards so the index is
+  unchanged). Col-CC (142 Mb): 15.5 → 5.2 s per index; TAIR10 × Col-CC
+  prepare 61.7 → 42.2 s. `examples/index_build_bench.rs` in
+  `dottir-core` times it.
 
 ## [0.6.0] - 2026-10-29
 
