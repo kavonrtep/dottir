@@ -407,12 +407,11 @@ mod tests {
                     shade: Shade::Score,
                 }),
             });
+            // Generous: preparing the large engine is slow in debug builds.
+            let deadline = std::time::Instant::now() + Duration::from_secs(60);
             let mut got = None;
-            for _ in 0..400 {
-                if let Some(r) = worker.drain_results().pop() {
-                    got = Some(r);
-                    break;
-                }
+            while got.is_none() && std::time::Instant::now() < deadline {
+                got = worker.drain_results().pop();
                 thread::sleep(Duration::from_millis(5));
             }
             let r = got.expect("no result");
