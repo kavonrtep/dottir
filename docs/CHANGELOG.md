@@ -7,6 +7,10 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-10-29
+
+Faster large and genome modes; output unchanged.
+
 ### Changed
 
 Performance (findings HIGH 2, HIGH 3, HIGH 4 and MEDIUM 7 of
@@ -36,6 +40,14 @@ Performance (findings HIGH 2, HIGH 3, HIGH 4 and MEDIUM 7 of
   unchanged). Col-CC (142 Mb): 15.5 → 5.2 s per index; TAIR10 × Col-CC
   prepare 61.7 → 42.2 s. `examples/index_build_bench.rs` in
   `dottir-core` times it.
+
+### Security
+
+* Dependency updates for RustSec advisories: crossbeam-epoch 0.9.21
+  (RUSTSEC-2026-0204), quick-xml 0.41 via wayland-scanner (RUSTSEC-2026-0194,
+  -0195), webbrowser 1.2.5 (RUSTSEC-2026-0257). The unmaintained notices for
+  zvariant, zbus_names and zvariant_derive (via rfd's file dialogs) are
+  ignored in `deny.toml` until rfd moves to zbus 6.
 
 ## [0.6.0] - 2026-10-29
 
