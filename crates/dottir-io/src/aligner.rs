@@ -16,12 +16,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use dottir_core::genome::alignment::join_at_cuts;
-use dottir_core::genome::GenomeRecord;
+use dottir_core::genome::{Alignment, GenomeRecord};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::faidx::{FaidxError, FastaIndex};
-use crate::paf::{read_paf, write_paf, PafError};
+use crate::paf::{write_paf, PafError, PafParser};
 
 /// Aligners tried by `auto`, in order.
 pub const AUTO_ALIGNERS: [&str; 2] = ["mm2plus", "minimap2"];
@@ -397,11 +397,11 @@ pub fn align(
     map_cmd.push(mmi.display().to_string());
     map_cmd.push("-".into());
 
-    let result = map_pieces(program, &map_cmd, req, &pcs, &q_recs, progress, cancel);
+    let result = map_pieces(
+        program, &map_cmd, req, &pcs, &q_recs, &t_recs, progress, cancel,
+    );
     let _ = std::fs::remove_file(&mmi);
-    let text = result?;
-
-    let alns = read_paf(text.as_bytes(), &q_recs, &t_recs)?;
+    let alns = result?;
     let mut cuts: Vec<Vec<u64>> = vec![Vec::new(); q_recs.len()];
     for p in pcs.iter().filter(|p| p.offset > 0) {
         cuts[p.rec as usize].push(p.offset);
@@ -424,17 +424,20 @@ pub fn align(
     })
 }
 
-/// Stream the pieces into the aligner and collect its PAF, remapped to
-/// record coordinates.
+/// Stream the pieces into the aligner and parse its PAF, remapped to
+/// record coordinates, as it arrives (the text of a `-P` run can be
+/// gigabytes).
+#[allow(clippy::too_many_arguments)]
 fn map_pieces(
     program: &Path,
     argv: &[String],
     req: &AlignRequest<'_>,
     pcs: &[Piece],
     q_recs: &[GenomeRecord],
+    t_recs: &[GenomeRecord],
     progress: &(dyn Fn(u64, u64) + Sync),
     cancel: &AtomicBool,
-) -> Result<String, AlignerError> {
+) -> Result<Vec<Alignment>, AlignerError> {
     let mut child: Child = Command::new(program)
         .args(&argv[1..])
         .stdin(Stdio::piped())
@@ -454,7 +457,7 @@ fn map_pieces(
     let child = Mutex::new(child);
     let done = AtomicBool::new(false);
 
-    let text = std::thread::scope(|s| {
+    let alns = std::thread::scope(|s| {
         s.spawn(|| kill_on_cancel(&child, cancel, &done));
         s.spawn(|| {
             for (i, p) in pcs.iter().enumerate() {
@@ -507,34 +510,31 @@ fn map_pieces(
                 }
             }
         });
-        let read = || -> Result<String, AlignerError> {
-            let mut text = String::new();
+        let read = || -> Result<Vec<Alignment>, AlignerError> {
+            let mut parser = PafParser::new(q_recs, t_recs);
             for line in BufReader::new(stdout).lines() {
                 let line = line?;
                 if cancel.load(Ordering::Relaxed) {
                     return Err(AlignerError::Cancelled);
                 }
                 if req.self_comparison {
-                    text.push_str(&line);
+                    parser.push(&line)?;
                 } else if let Some(l) = remap_line(&line, pcs, q_recs) {
-                    text.push_str(&l);
-                } else {
-                    continue;
+                    parser.push(&l)?;
                 }
-                text.push('\n');
             }
-            Ok(text)
+            Ok(parser.finish()?)
         };
-        let text = read();
+        let alns = read();
         done.store(true, Ordering::Relaxed);
-        if text.is_err() {
+        if alns.is_err() {
             // Unblock the feeder and stderr threads.
             let _ = child.lock().unwrap().kill();
         }
-        text
+        alns
     });
     let status = child.into_inner().unwrap().wait()?;
-    let text = text?;
+    let alns = alns?;
     if cancel.load(Ordering::Relaxed) {
         return Err(AlignerError::Cancelled);
     }
@@ -548,7 +548,7 @@ fn map_pieces(
             stderr: stderr_tail.into_inner().unwrap().join("\n"),
         });
     }
-    Ok(text)
+    Ok(alns)
 }
 
 #[cfg(test)]

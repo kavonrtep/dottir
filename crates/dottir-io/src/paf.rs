@@ -66,7 +66,7 @@ pub fn read_paf_file(
     target: &[GenomeRecord],
     min_len: u64,
 ) -> Result<Vec<Alignment>, PafError> {
-    read_paf_impl(open_maybe_gz(path)?, query, target, true, min_len)
+    read_paf_impl(open_maybe_gz(path)?, query, target, min_len)
 }
 
 /// Read a PAF for a plot with `vertical` records on the query side and
@@ -158,7 +158,7 @@ pub fn read_paf<R: BufRead>(
     query: &[GenomeRecord],
     target: &[GenomeRecord],
 ) -> Result<Vec<Alignment>, PafError> {
-    read_paf_impl(reader, query, target, true, 0)
+    read_paf_impl(reader, query, target, 0)
 }
 
 /// Like [`read_paf_oriented`], but lines naming records outside the
@@ -443,35 +443,71 @@ fn read_paf_impl<R: BufRead>(
     reader: R,
     query: &[GenomeRecord],
     target: &[GenomeRecord],
-    strict: bool,
     min_len: u64,
 ) -> Result<Vec<Alignment>, PafError> {
-    let mut qn = Names::new("query", query);
-    let mut tn = Names::new("target", target);
-    let mut out = Vec::new();
-    for_each_line(reader, |l, line| {
-        let p = parse_line(l, line, false)?;
-        let q = qn.resolve(line, p.q_name, p.q_len)?;
-        let t = tn.resolve(line, p.t_name, p.t_len)?;
-        let (Some(q_rec), Some(t_rec)) = (q, t) else {
+    let mut parser = PafParser::new(query, target);
+    parser.min_len = min_len;
+    for_each_line(reader, |l, line| parser.data_line(l, line))?;
+    parser.finish()
+}
+
+/// Strict PAF reading ([`read_paf`]) one line at a time, for output that
+/// arrives as a stream (an aligner's): only the alignments are kept.
+pub struct PafParser<'a> {
+    qn: Names<'a>,
+    tn: Names<'a>,
+    out: Vec<Alignment>,
+    line: u64,
+    min_len: u64,
+}
+
+impl<'a> PafParser<'a> {
+    pub fn new(query: &'a [GenomeRecord], target: &'a [GenomeRecord]) -> Self {
+        Self {
+            qn: Names::new("query", query),
+            tn: Names::new("target", target),
+            out: Vec::new(),
+            line: 0,
+            min_len: 0,
+        }
+    }
+
+    /// Read the next line (a trailing newline is ignored; empty lines and
+    /// `#` comments are skipped).
+    pub fn push(&mut self, l: &str) -> Result<(), PafError> {
+        self.line += 1;
+        let l = l.trim_end_matches(['\n', '\r']);
+        if l.is_empty() || l.starts_with('#') {
             return Ok(());
-        };
-        let a = Alignment {
-            q_rec,
-            t_rec,
-            ..p.aln
-        };
-        if a.len() >= min_len {
-            out.push(a);
+        }
+        self.data_line(l, self.line)
+    }
+
+    fn data_line(&mut self, l: &str, line: u64) -> Result<(), PafError> {
+        let p = parse_line(l, line, false)?;
+        let q = self.qn.resolve(line, p.q_name, p.q_len)?;
+        let t = self.tn.resolve(line, p.t_name, p.t_len)?;
+        if let (Some(q_rec), Some(t_rec)) = (q, t) {
+            let a = Alignment {
+                q_rec,
+                t_rec,
+                ..p.aln
+            };
+            if a.len() >= self.min_len {
+                self.out.push(a);
+            }
         }
         Ok(())
-    })?;
-    if strict {
-        qn.finish()?;
-        tn.finish()?;
     }
-    derive_primaries(&mut out);
-    Ok(out)
+
+    /// The alignments; an error if any line named an unknown record.
+    pub fn finish(self) -> Result<Vec<Alignment>, PafError> {
+        self.qn.finish()?;
+        self.tn.finish()?;
+        let mut out = self.out;
+        derive_primaries(&mut out);
+        Ok(out)
+    }
 }
 
 /// Write alignments as PAF: 12 columns, `tp:A:P|S`, and `de:f` when known.

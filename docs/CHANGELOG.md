@@ -25,6 +25,12 @@ Performance (findings HIGH 2 and HIGH 4 of
   primaries for `-P` PAFs sorts compact keys and scans only overlapping
   primaries (`read_paf_file`, 3 M lines: 2.4 → 2.0 s, gzipped
   3.0 → 2.1 s). `examples/paf_read_bench.rs` in `dottir-io` times both.
+* Genome mode parses the aligner's PAF as it arrives instead of holding
+  the whole text first (`paf::PafParser`): TAIR10 × Col-CC `-P` (889 k
+  alignments) peaks at 154 MB instead of 225 MB in dottir, and the
+  saving grows with `-P` output on large genomes. `--paf-min-len` still
+  applies when the cached result is read, after alignments split at
+  query chunk cuts are joined.
 
 ## [0.6.0] - 2026-10-29
 
