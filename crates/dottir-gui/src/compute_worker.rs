@@ -15,7 +15,7 @@
 //! request buffered.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 
 use dottir_core::large::{
@@ -100,6 +100,8 @@ pub struct ComputeWorker {
     result_rx: mpsc::Receiver<ComputeResult>,
     progress: Arc<Progress>,
     cancel: Arc<AtomicBool>,
+    /// The large-engine session, shared with record sorting.
+    session: SharedSession,
     /// Drop guard — JoinHandle keeps the OS thread alive for the
     /// app's lifetime. The thread exits when the request channel
     /// closes (i.e. when `ComputeWorker` is dropped).
@@ -118,11 +120,11 @@ impl ComputeWorker {
         let (result_tx, result_rx) = mpsc::channel::<ComputeResult>();
         let progress = Arc::new(Progress::default());
         let cancel = Arc::new(AtomicBool::new(false));
-        let (wp, wc) = (progress.clone(), cancel.clone());
+        let session: SharedSession = Arc::default();
+        let (wp, wc, ws) = (progress.clone(), cancel.clone(), session.clone());
         let handle = thread::Builder::new()
             .name("dottir-compute".into())
             .spawn(move || {
-                let mut session: Option<(u64, LargeSession)> = None;
                 while let Ok(mut req) = request_rx.recv() {
                     // Only the newest queued request matters; older ones
                     // would be discarded as stale by the receiver anyway.
@@ -135,7 +137,7 @@ impl ComputeWorker {
                         .as_ref()
                         .map_or(req.config.zoom, |j| j.config.zoom);
                     let (plot, large) = match req.large.take() {
-                        Some(job) => run_large(job, &mut session, &wp, &wc, &repaint),
+                        Some(job) => run_large(job, &ws, &wp, &wc, &repaint),
                         None => {
                             wp.set(Stage::Exact);
                             (compute_dotplot(&req.query, &req.subject, &req.config), None)
@@ -163,8 +165,18 @@ impl ComputeWorker {
             result_rx,
             progress,
             cancel,
+            session,
             _handle: handle,
         }
+    }
+
+    /// The prepared session for `key`, if it serves `cfg`.
+    pub fn session_for(&self, key: u64, cfg: &LargeConfig) -> Option<Arc<LargeSession>> {
+        let guard = self.session.lock().unwrap_or_else(|e| e.into_inner());
+        guard
+            .as_ref()
+            .filter(|(k, s)| *k == key && s.compatible(cfg))
+            .map(|(_, s)| s.clone())
     }
 
     /// Dispatch a new request. Never blocks. An in-flight large job is
@@ -203,9 +215,13 @@ impl ComputeWorker {
 
 type LargeOutcome = (Result<DotPlot, DottirError>, Option<LargePlot>);
 
+/// The worker's prepared large session and the [`LargeSource::key`] it
+/// was prepared for.
+type SharedSession = Arc<Mutex<Option<(u64, Arc<LargeSession>)>>>;
+
 fn run_large(
     job: LargeJob,
-    session: &mut Option<(u64, LargeSession)>,
+    session: &Mutex<Option<(u64, Arc<LargeSession>)>>,
     progress: &Progress,
     cancel: &AtomicBool,
     repaint: &(dyn Fn() + Sync),
@@ -217,12 +233,17 @@ fn run_large(
         }
     };
     let src = &job.source;
-    let stale = match session {
-        Some((key, s)) => *key != src.key || !s.compatible(&job.config),
-        None => true,
-    };
-    if stale {
-        *session = None;
+    let lock = || session.lock().unwrap_or_else(|e| e.into_inner());
+    let current = lock()
+        .clone()
+        .filter(|(key, s)| *key == src.key && s.compatible(&job.config));
+    let s = if let Some((_, s)) = current {
+        s
+    } else {
+        // What still matches of the previous session (the other axis
+        // after sorting records, everything after a window change) is
+        // reused, unless record sorting is still computing on it.
+        let prev = lock().take().and_then(|(_, s)| Arc::try_unwrap(s).ok());
         progress.set(Stage::Indexing);
         let input = LargeInput {
             query: &src.query,
@@ -242,12 +263,15 @@ fn run_large(
             cancel: None,
             progress: Some(&report),
         };
-        match LargeSession::prepare(&input, &job.config, &ctl) {
-            Ok(s) => *session = Some((src.key, s)),
+        match LargeSession::prepare_reusing(&input, &job.config, &ctl, prev) {
+            Ok(s) => {
+                let s = Arc::new(s);
+                *lock() = Some((src.key, s.clone()));
+                s
+            }
             Err(e) => return (Err(e), None),
         }
-    }
-    let (_, s) = session.as_ref().expect("prepared above");
+    };
     progress.set(Stage::Large);
     let ctl = Control {
         cancel: Some(cancel),
@@ -397,5 +421,14 @@ mod tests {
             let side = if id == 1 { 600 } else { 500 };
             assert_eq!((plot.width, plot.height), (side, side));
         }
+        // Record sorting can borrow the session, for this source and
+        // compatible settings only.
+        assert!(worker.session_for(7, &config).is_some());
+        assert!(worker.session_for(8, &config).is_none());
+        let other = LargeConfig {
+            seed: dottir_core::large::SpacedSeed::contiguous(11).unwrap(),
+            ..config.clone()
+        };
+        assert!(worker.session_for(7, &other).is_none());
     }
 }

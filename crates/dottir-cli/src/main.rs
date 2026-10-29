@@ -297,8 +297,8 @@ fn run_batch(args: BatchArgs) -> Result<()> {
         report_input("subject", &s);
         s
     };
-    let (query_input, subject_input, record_sort) = match args.large.sort_records {
-        None => (query_input, subject_input, None),
+    let (query_input, subject_input, record_sort, sort_session) = match args.large.sort_records {
+        None => (query_input, subject_input, None, None),
         Some(axis) => {
             if is_self_comparison {
                 anyhow::bail!("--sort-records needs two inputs");
@@ -306,7 +306,7 @@ fn run_batch(args: BatchArgs) -> Result<()> {
             if mode != BlastMode::Blastn {
                 anyhow::bail!("--sort-records needs DNA (blastn) inputs");
             }
-            let (q, s, info) = large_batch::sort_records(
+            let (q, s, info, session) = large_batch::sort_records(
                 &args.large,
                 axis.axis(),
                 &matrix,
@@ -314,7 +314,7 @@ fn run_batch(args: BatchArgs) -> Result<()> {
                 subject_input,
             )
             .context("sorting records")?;
-            (q, s, Some(info))
+            (q, s, Some(info), Some(session))
         }
     };
     if let Some(at) = &args.align_export.export_alignment_at {
@@ -414,9 +414,11 @@ fn run_batch(args: BatchArgs) -> Result<()> {
             &query_input,
             &subject_input,
             is_self_comparison,
+            sort_session,
         )?;
         (out.plot, Some(out.info), out.chains)
     } else {
+        drop(sort_session);
         let plot = compute_dotplot(query.bytes(), subject.bytes(), &cfg)
             .context("compute_dotplot failed")?;
         (plot, None, Vec::new())

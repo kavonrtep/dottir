@@ -1113,10 +1113,12 @@ impl DottirApp {
             chain: Some(ChainConfig::default()),
             ..LargeConfig::default()
         };
+        let reuse = self.worker.session_for(source.key, &config);
         let ctx = ctx.clone();
         self.record_sort_job = Some(crate::record_sort::SortJob::start(
             source,
             config,
+            reuse,
             axis,
             move || ctx.request_repaint(),
         ));

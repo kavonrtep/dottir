@@ -8,8 +8,8 @@ use clap::ValueEnum;
 
 use dottir_core::genome::{sort_by_chains, InputRecord, SortAxis};
 use dottir_core::large::{
-    seed::DEFAULT_PATTERN, whole_plot_chains, ChainConfig, ClassMask, ClassThresholds, Control,
-    DepthMethod, LargeConfig, LargeInput, LargeSession, RepeatClass, Shade, SpacedSeed,
+    seed::DEFAULT_PATTERN, whole_plot_chains_session, ChainConfig, ClassMask, ClassThresholds,
+    Control, DepthMethod, LargeConfig, LargeInput, LargeSession, RepeatClass, Shade, SpacedSeed,
 };
 use dottir_core::{BlastMode, DotPlot, PlotConfig, ScoreMatrix};
 use dottir_io::params::LargeParamsInfo;
@@ -335,14 +335,15 @@ pub struct RecordSort {
 
 /// `--sort-records`: order and orient the records of one input along the
 /// other as D-GENIES does, from the large engine's synteny chains of the
-/// whole plot. DNA pairwise comparisons only.
+/// whole plot. DNA pairwise comparisons only. Also returns the prepared
+/// session, for [`run`] to reuse what sorting left unchanged.
 pub fn sort_records(
     args: &LargeArgs,
     axis: SortAxis,
     matrix: &ScoreMatrix,
     query_input: SeqInput,
     subject_input: SeqInput,
-) -> Result<(SeqInput, SeqInput, RecordSort)> {
+) -> Result<(SeqInput, SeqInput, RecordSort, LargeSession)> {
     let thresholds = parse_thresholds(&args.class_thresholds)?;
     let lcfg = LargeConfig {
         matrix: matrix.clone(),
@@ -361,7 +362,7 @@ pub fn sort_records(
         s_floor: s_floor.as_deref(),
     };
     let started = std::time::Instant::now();
-    let chains = whole_plot_chains(&input, &lcfg, &Control::default())?;
+    let (chains, session) = whole_plot_chains_session(&input, &lcfg, &Control::default())?;
     let recs = |s: &Sequence| -> Vec<InputRecord> {
         s.records
             .iter()
@@ -407,7 +408,7 @@ pub fn sort_records(
         chains: chains.len(),
         order: names,
     };
-    Ok((query_input, subject_input, info))
+    Ok((query_input, subject_input, info, session))
 }
 
 pub struct LargeOutcome {
@@ -425,6 +426,7 @@ pub fn run(
     query_input: &SeqInput,
     subject_input: &SeqInput,
     is_self: bool,
+    reuse: Option<LargeSession>,
 ) -> Result<LargeOutcome> {
     if cfg.reverse_query || cfg.reverse_subject {
         bail!("-r / -v are not supported by the large engine");
@@ -490,7 +492,8 @@ pub fn run(
         lcfg.max_occ,
         lcfg.depth.describe()
     );
-    let session = LargeSession::prepare(&input, &lcfg, &ctl).context("large engine: prepare")?;
+    let session = LargeSession::prepare_reusing(&input, &lcfg, &ctl, reuse)
+        .context("large engine: prepare")?;
     tracing::info!(
         "prepared index ({} seeds, {:.1} MiB) in {:.1}s; W={}, pixel_fac={}",
         session.index().n_positions(),

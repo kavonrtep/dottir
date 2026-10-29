@@ -7,7 +7,9 @@ use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 use dottir_core::genome::{sort_by_chains, InputRecord, QueryOrder, SortAxis};
-use dottir_core::large::{whole_plot_chains, Chain, Control, LargeConfig, LargeInput};
+use dottir_core::large::{
+    whole_plot_chains, whole_plot_config, Chain, Control, LargeConfig, LargeInput, LargeSession,
+};
 use dottir_io::Sequence;
 
 use crate::compute_worker::LargeSource;
@@ -21,9 +23,13 @@ pub struct SortJob {
 }
 
 impl SortJob {
+    /// Sort along the whole-plot chains of `source`, computed on `reuse`
+    /// (the compute worker's session, when it serves `config`) or on a
+    /// session prepared here.
     pub fn start(
         source: Arc<LargeSource>,
         config: LargeConfig,
+        reuse: Option<Arc<LargeSession>>,
         axis: SortAxis,
         repaint: impl Fn() + Send + Sync + 'static,
     ) -> Self {
@@ -52,7 +58,13 @@ impl SortJob {
                     cancel: Some(&c),
                     progress: Some(&report),
                 };
-                let r = whole_plot_chains(&input, &config, &ctl).map_err(|e| e.to_string());
+                let r = match reuse {
+                    Some(s) => s
+                        .compute(&whole_plot_config(&config, &input), &ctl)
+                        .map(|p| p.chains),
+                    None => whole_plot_chains(&input, &config, &ctl),
+                }
+                .map_err(|e| e.to_string());
                 let _ = tx.send(r);
                 repaint();
             });

@@ -359,6 +359,73 @@ fn session_reuse_and_cancel() {
     ));
 }
 
+#[test]
+fn prepare_reusing_matches_a_fresh_prepare_and_reuses_unchanged_axes() {
+    // Two records per axis with shared repeats, seed depth.
+    let (q, s) = planted_pair(30_000, 1500, 8, 3);
+    let (s1, s2) = s.split_at(12_000);
+    let swapped: Vec<u8> = [s2, s1].concat();
+    let (q_breaks, s_breaks, sw_breaks) = ([10_000usize], [12_000usize], [s2.len()]);
+    let mut cfg = large_cfg(20, None);
+    cfg.depth = DepthMethod::Seed;
+    let ctl = Control::default();
+    let fresh = |input: &LargeInput<'_>| LargeSession::prepare(input, &cfg, &ctl).unwrap();
+    let same = |a: &LargeSession, b: &LargeSession| {
+        assert_eq!(a.query_depth().depth, b.query_depth().depth);
+        assert_eq!(a.subject_depth().depth, b.subject_depth().depth);
+        assert_eq!(a.index().n_positions(), b.index().n_positions());
+        let (pa, pb) = (
+            a.compute(&cfg, &ctl).unwrap(),
+            b.compute(&cfg, &ctl).unwrap(),
+        );
+        assert_eq!(pa.channels, pb.channels);
+        assert_eq!(pa.chains.len(), pb.chains.len());
+    };
+    let ptr = |d: &DepthTrack| d.depth.as_ptr();
+
+    let orig = LargeInput::pair(&q, &q_breaks, &s, &s_breaks);
+    let sorted = LargeInput::pair(&q, &q_breaks, &swapped, &sw_breaks);
+
+    // Subject records reordered: the query's depth track is kept.
+    let prev = fresh(&orig);
+    let q_ptr = ptr(prev.query_depth());
+    let reused = LargeSession::prepare_reusing(&sorted, &cfg, &ctl, Some(prev)).unwrap();
+    assert_eq!(ptr(reused.query_depth()), q_ptr);
+    same(&reused, &fresh(&sorted));
+
+    // Query reordered: the subject's index and depth are kept.
+    let (q1, q2) = q.split_at(10_000);
+    let q_sw: Vec<u8> = [q2, q1].concat();
+    let q_sw_breaks = [q2.len()];
+    let q_sorted = LargeInput::pair(&q_sw, &q_sw_breaks, &s, &s_breaks);
+    let prev = fresh(&orig);
+    let s_ptr = ptr(prev.subject_depth());
+    let reused = LargeSession::prepare_reusing(&q_sorted, &cfg, &ctl, Some(prev)).unwrap();
+    assert_eq!(ptr(reused.subject_depth()), s_ptr);
+    same(&reused, &fresh(&q_sorted));
+
+    // A different subject floor recomputes the subject depth.
+    let floor = vec![3u16; s.len()];
+    let floored = LargeInput {
+        s_floor: Some(&floor),
+        ..orig
+    };
+    let prev = fresh(&orig);
+    let old = prev.subject_depth().depth.clone();
+    let reused = LargeSession::prepare_reusing(&floored, &cfg, &ctl, Some(prev)).unwrap();
+    assert_ne!(reused.subject_depth().depth, old);
+    same(&reused, &fresh(&floored));
+
+    // Other seed parameters reuse nothing.
+    let prev = fresh(&orig);
+    let mut other = cfg.clone();
+    other.max_occ = 3;
+    let a = LargeSession::prepare_reusing(&orig, &other, &ctl, Some(prev)).unwrap();
+    let b = LargeSession::prepare(&orig, &other, &ctl).unwrap();
+    assert_eq!(a.query_depth().depth, b.query_depth().depth);
+    assert_eq!(a.subject_depth().depth, b.subject_depth().depth);
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(24))]
 

@@ -49,7 +49,7 @@ pub use depth::{compute_depth, ClassThresholds, DepthMethod, DepthTrack, RepeatC
 pub use index::SeedIndex;
 pub use seed::SpacedSeed;
 
-use crate::alphabet::{encode, AlphabetKind};
+use crate::alphabet::{encode, encode_dna, AlphabetKind};
 use crate::error::DottirError;
 use crate::karlin::{karlin_window_size, KarlinResult};
 use crate::matrix::{BlastMode, ScoreMatrix};
@@ -502,6 +502,18 @@ pub struct LargeSession {
     depth_params: (u32, u32, Option<u32>),
     /// Resolved depth sampling rates (query, subject).
     depth_rates: (u32, u32),
+    /// [`floor_signature`]s of the floors applied to the depth tracks.
+    floor_sigs: (u64, u64),
+}
+
+/// Cheap fingerprint of a class floor, so a session is reused only for
+/// the floor its depth track was raised by.
+fn floor_signature(floor: Option<&[u16]>) -> u64 {
+    floor.map_or(0, |f| {
+        f.iter().fold(0xcbf2_9ce4_8422_2325_u64, |h, &v| {
+            (h ^ u64::from(v)).wrapping_mul(0x0100_0000_01b3)
+        }) | 1
+    })
 }
 
 /// Automatic pixel factor from the Karlin expected residue score.
@@ -516,6 +528,20 @@ impl LargeSession {
         input: &LargeInput<'_>,
         cfg: &LargeConfig,
         ctl: &Control<'_>,
+    ) -> Result<Self, DottirError> {
+        Self::prepare_reusing(input, cfg, ctl, None)
+    }
+
+    /// [`Self::prepare`], taking the subject index and the depth tracks
+    /// from `prev` where they were built from the same sequence (and
+    /// floor) with the same seed and depth parameters — e.g. after
+    /// sorting the records of one axis, the other axis's parts. The result
+    /// is identical to a fresh `prepare`.
+    pub fn prepare_reusing(
+        input: &LargeInput<'_>,
+        cfg: &LargeConfig,
+        ctl: &Control<'_>,
+        prev: Option<LargeSession>,
     ) -> Result<Self, DottirError> {
         if cfg.matrix.kind != AlphabetKind::Dna {
             return Err(DottirError::InvalidConfig(
@@ -605,11 +631,58 @@ impl LargeSession {
         };
         ctl.check()?;
 
-        let q_enc = encode(query, AlphabetKind::Dna);
-        let s_enc = input.subject.map(|s| encode(s, AlphabetKind::Dna));
+        let floor_sigs = (
+            floor_signature(input.q_floor),
+            floor_signature(input.s_floor),
+        );
+        let depth_params = (cfg.two_hit_dist, cfg.max_occ, cfg.depth_sample);
+        let encodes = |enc: &[u8], seq: &[u8]| {
+            enc.len() == seq.len() && enc.iter().zip(seq).all(|(&e, &b)| e == encode_dna(b))
+        };
+        // Parts of `prev` still valid (its encodings too, compared without
+        // encoding anew); the rest is dropped here, before anything new is
+        // built.
+        let (mut kept_q_enc, mut kept_s_enc) = (None, None);
+        let (prev_index, prev_q_depth, prev_s_depth) = match prev.filter(|p| {
+            p.index.seed() == &cfg.seed
+                && p.depth == cfg.depth
+                && (cfg.depth != DepthMethod::Seed || p.depth_params == depth_params)
+                && p.s_enc.is_some() == input.subject.is_some()
+        }) {
+            Some(p) => {
+                let same_q = p.q_breaks == input.q_breaks && encodes(&p.q_enc, query);
+                let same_s = p.s_breaks == input.s_breaks
+                    && match (&p.s_enc, input.subject) {
+                        (Some(e), Some(s)) => encodes(e, s),
+                        _ => same_q,
+                    };
+                if same_q {
+                    kept_q_enc = Some(p.q_enc);
+                }
+                if same_s {
+                    kept_s_enc = p.s_enc;
+                }
+                (
+                    same_s.then_some(p.index),
+                    (same_q && p.floor_sigs.0 == floor_sigs.0).then_some(p.q_depth),
+                    p.s_depth
+                        .filter(|_| same_s && p.floor_sigs.1 == floor_sigs.1),
+                )
+            }
+            None => (None, None, None),
+        };
+        let q_enc = kept_q_enc.unwrap_or_else(|| encode(query, AlphabetKind::Dna));
+        let s_enc = input.subject.map(|s| {
+            kept_s_enc
+                .take()
+                .unwrap_or_else(|| encode(s, AlphabetKind::Dna))
+        });
         let s_ref = s_enc.as_deref().unwrap_or(&q_enc);
         ctl.report(0.05);
-        let index = SeedIndex::build(&cfg.seed, s_ref, input.s_breaks)?;
+        let index = match prev_index {
+            Some(i) => i,
+            None => SeedIndex::build(&cfg.seed, s_ref, input.s_breaks)?,
+        };
         ctl.report(0.3);
         ctl.check()?;
 
@@ -642,12 +715,16 @@ impl LargeSession {
         // The subject index doubles as the self index of the subject (and,
         // in a self-comparison, of the query).
         let q_self_index = s_enc.is_none().then_some(&index);
-        let q_depth = depth_for(&q_enc, input.q_breaks, input.q_floor, q_self_index)?;
+        let q_depth = match prev_q_depth {
+            Some(d) => d,
+            None => depth_for(&q_enc, input.q_breaks, input.q_floor, q_self_index)?,
+        };
         ctl.report(0.65);
         ctl.check()?;
-        let s_depth = match &s_enc {
-            Some(s) => Some(depth_for(s, input.s_breaks, input.s_floor, Some(&index))?),
-            None => None,
+        let s_depth = match (&s_enc, prev_s_depth) {
+            (Some(_), Some(d)) => Some(d),
+            (Some(s), None) => Some(depth_for(s, input.s_breaks, input.s_floor, Some(&index))?),
+            (None, _) => None,
         };
         ctl.report(1.0);
         let rate_of = |len: usize| {
@@ -675,8 +752,9 @@ impl LargeSession {
             pixel_fac,
             matrix: cfg.matrix.clone(),
             depth: cfg.depth,
-            depth_params: (cfg.two_hit_dist, cfg.max_occ, cfg.depth_sample),
+            depth_params,
             depth_rates,
+            floor_sigs,
         })
     }
 
@@ -1248,15 +1326,34 @@ pub fn whole_plot_chains(
     cfg: &LargeConfig,
     ctl: &Control<'_>,
 ) -> Result<Vec<Chain>, DottirError> {
+    whole_plot_chains_session(input, cfg, ctl).map(|(c, _)| c)
+}
+
+/// The configuration [`whole_plot_chains`] computes with: `cfg` without
+/// a viewport or coverage, with chaining on, at a zoom fitting the plot of
+/// `input` into [`SORT_PLOT_PX`]. Compatible with sessions prepared for
+/// `cfg`, so a session at hand can be used instead of preparing one.
+pub fn whole_plot_config(cfg: &LargeConfig, input: &LargeInput<'_>) -> LargeConfig {
     let mut cfg = cfg.clone();
     cfg.chain.get_or_insert_with(ChainConfig::default);
     cfg.viewport = None;
     cfg.coverage = false;
     let longest = input.query.len().max(input.subject.map_or(0, <[u8]>::len));
     cfg.zoom = cfg.zoom.max(longest.div_ceil(SORT_PLOT_PX).max(1) as u32);
-    Ok(LargeSession::prepare(input, &cfg, ctl)?
-        .compute(&cfg, ctl)?
-        .chains)
+    cfg
+}
+
+/// [`whole_plot_chains`], also returning the prepared session for
+/// [`LargeSession::prepare_reusing`] on the sorted input.
+pub fn whole_plot_chains_session(
+    input: &LargeInput<'_>,
+    cfg: &LargeConfig,
+    ctl: &Control<'_>,
+) -> Result<(Vec<Chain>, LargeSession), DottirError> {
+    let cfg = whole_plot_config(cfg, input);
+    let session = LargeSession::prepare(input, &cfg, ctl)?;
+    let chains = session.compute(&cfg, ctl)?.chains;
+    Ok((chains, session))
 }
 
 pub fn compute_large_dotplot(
