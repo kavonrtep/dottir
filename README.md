@@ -38,6 +38,18 @@ the crosshair](./docs/dottir_screenshot.png)
   menu or via `--gff` / `--gff-query` / `--gff-subject` — or skip the
   separate file entirely and pass a **GFF3 with an embedded `##FASTA`
   section** as the sequence input.
+- **Three engines, one plot** — the **exact** engine scores every
+  matrix cell, as Dotter does. The seed-based **large engine** handles
+  chromosome-scale DNA: a 100 Mb self-plot takes about a minute. It
+  classifies every dot as unique, low-, mid- or high-copy repeat, and can
+  chain synteny blocks. **Genome mode** compares whole assemblies of up to
+  a few gigabases from minimap2/mm2plus alignments, in the style of
+  D-GENIES. `--engine auto` picks one from the input size. See
+  [Large sequences](./docs/book/src/large.md) and
+  [Genome comparisons](./docs/book/src/genome.md).
+- **Record sorting** — order and orient contigs or scaffolds along a
+  reference (`--sort-records`, `--sort-query`), so a fragmented assembly
+  plots as one diagonal per chromosome.
 - **Live greyramp** — drag the black/white sliders, the image
   updates without re-running compute.
 - **Zoom-aware** GUI: smooth pan/zoom, then a debounced recompute
@@ -137,6 +149,34 @@ sequences after a `##FASTA` directive:
 dottir-gui tests/corpora/gff3_with_sequence/ltr_angela.with_seq.gff3.gz
 ```
 
+### Large sequences and whole genomes
+
+Above about 316 kb × 316 kb (10¹¹ cells), `dottir batch` switches to the
+large engine on its own. Use `--engine large` or `--engine exact` to
+force either one:
+
+```sh
+# Repeat landscape of a chromosome; repeat classes coloured in the GUI.
+dottir-gui chr1.fa
+
+# Synteny between two assemblies, repeats hidden, chains exported.
+dottir batch asmA.fa asmB.fa -o synteny.png \
+    --hide-classes mid,high --chains-out synteny.paf
+```
+
+For whole assemblies, genome mode draws one line per alignment. It runs
+mm2plus or minimap2 for you, or reads a PAF file you already have:
+
+```sh
+dottir batch reference.fa assembly.fa --engine genome --sort-query -o genome.png
+dottir batch reference.fa assembly.fa --paf aln.paf -o genome.png
+dottir-gui reference.fa assembly.fa --genome
+```
+
+In the GUI, a region of the genome view can be opened as a dotplot
+(right-click → *Dot-plot this view*). The large and exact engines then
+show the repeats that the aligner skipped.
+
 Full flag reference: `dottir batch --help`, `dottir-gui --help`, or
 the [CLI page](./docs/book/src/cli.md) /
 [GUI page](./docs/book/src/gui.md) in the user manual.
@@ -144,8 +184,9 @@ the [CLI page](./docs/book/src/cli.md) /
 ## Documentation
 
 - [User manual](./docs/book/src/intro.md) (mdBook): installation,
-  CLI/GUI reference, algorithm overview, score matrices,
-  reproducibility format.
+  CLI/GUI reference, [large sequences](./docs/book/src/large.md),
+  [genome comparisons](./docs/book/src/genome.md), algorithm overview,
+  score matrices, reproducibility format.
 - [Spec](./docs/dottir_specification.md) and
   [implementation plan](./docs/IMPLEMENTATION_PLAN.md): what's
   guaranteed, what's planned.

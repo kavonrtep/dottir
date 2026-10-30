@@ -7,6 +7,14 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Documentation
+
+* The README, the book's introduction and the CLI, GUI, reproducibility and
+  crate-layout pages now cover the large engine and genome mode: engine
+  selection, the GUI's genome and repeat-annotation flags, *Settings →
+  Large sequences*, the `[large]`, `[genome]` and `[record_sort]` sidecar
+  sections, and ADRs 0007–0010 in the index.
+
 ## [0.6.1] - 2026-10-29
 
 Faster large and genome modes; output unchanged.
