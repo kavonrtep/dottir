@@ -56,8 +56,33 @@ Caused by:
 
 ## Flags
 
-Large-sequence flags (`--engine`, `--seed-pattern`, `--hide-classes`,
-`--chains-out`, …) are described in [Large sequences](./large.md).
+### Engines
+
+`--engine` selects how the plot is made:
+
+| Value | Use | Details |
+|-------|-----|---------|
+| `exact` | Dotter's algorithm: every cell scored. Proteins, BLASTX, and any DNA up to a few hundred kb. | this page |
+| `large` | DNA too big for `exact`: seed-based, with repeat classes and synteny chains. | [Large sequences](./large.md) |
+| `genome` | Whole assemblies, drawn from aligner output (or `--paf`, which implies it). | [Genome comparisons](./genome.md) |
+| `auto` (default) | `large` above `--large-threshold-cells` (10¹¹), `genome` above `--genome-threshold-cells` (10¹⁷) when an aligner is installed, `exact` otherwise. | |
+
+The large-engine flags (`--seed-pattern`, `--hide-classes`,
+`--chains-out`, `--repeat-annot`, …) and the genome-mode flags
+(`--aligner`, `--preset`, `--sort-query`, `--assoc-out`, …) are listed on
+their own pages. `--sort-records {vertical,horizontal}` orders the
+records of one input along the other with the `exact` or `large` engine;
+see [Sorting records](./large.md#sorting-records).
+
+```sh
+# Chromosome self-comparison (auto → large engine).
+dottir batch chr1.fa -o chr1.png
+
+# Two assemblies, aligned by minimap2/mm2plus, contigs sorted.
+dottir batch reference.fa assembly.fa --engine genome --sort-query -o genome.png
+```
+
+### Plot flags
 
 | Flag | Default | Description |
 |------|---------|-------------|

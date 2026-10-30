@@ -39,6 +39,20 @@ priority order:
 * Multi-record FASTA: record boundaries are preserved through the
   load path. The GUI status bar shows `chr4:1234` style coords
   (record + position) when the input has more than one record.
+* Three plot engines behind the same CLI and GUI:
+  * **exact** — Dotter's algorithm, every matrix cell scored. Pixelmaps
+    are identical to C dotter's.
+  * **large** — for DNA too big for the exact engine: spaced-seed hits,
+    scored with the exact engine's sliding window. Every dot gets a
+    repeat class (unique / low / mid / high). Optional synteny chains.
+    See [Large sequences](./large.md).
+  * **genome** — whole assemblies drawn from minimap2/mm2plus
+    alignments or a PAF file, with D-GENIES-style filters, contig
+    sorting and exports. See [Genome comparisons](./genome.md).
+
+  `--engine auto` (the default) picks the engine from the input size.
+  The GUI does the same for each view, so zooming into a large-engine
+  overview gives an exact plot.
 * Eight built-in protein matrices (BLOSUM45/50/62/80/90, PAM30/70/250)
   plus a DNA identity matrix and a `custom_dna(match, mismatch)`
   helper. BLAST-format text matrices load via the strict
@@ -61,6 +75,10 @@ See [Architecture decisions](./adr.md) for context. Status is tracked in
 
 * [Installation](./install.md) — how to build and run.
 * [The `dottir batch` CLI](./cli.md) — full flag reference.
+* [Large sequences](./large.md) — the seed-based engine for
+  chromosome-scale DNA, repeat classes, synteny chains, record sorting.
+* [Genome comparisons](./genome.md) — whole-assembly plots from
+  aligner output.
 * [Algorithm overview](./algorithm.md) — what the kernel does and
   why.
 * [Score matrices](./matrices.md) — which matrices ship, where

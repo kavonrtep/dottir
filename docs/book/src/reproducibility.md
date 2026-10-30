@@ -58,6 +58,50 @@ os = "linux"
 timestamp_utc = "2026-05-16T22:33:00Z"
 ```
 
+Large-engine and genome-mode runs add their own sections, and a run
+that sorted records adds `[record_sort]`. A section is left out when the
+plot did not use that feature.
+
+```toml
+[large]                  # --engine large (or auto → large)
+format_version = 3
+seed = "1110100110010101111"
+two_hit_dist = 100
+max_occ = 1000
+seed_sample = 1          # 1 = every seed looked up (see "Seed sampling")
+depth_sample = [1, 1]    # query, subject
+extend = 32
+depth = "seed"
+class_thresholds = [2, 5, 51]
+shown_classes = ["unique", "low", "mid", "high"]
+soft_mask_class = "mid"
+raw_hits = 62178         # seed hits before the two-hit filter
+anchors = 60362
+runs = 128               # diagonal runs scored
+scored_cells = 85170
+capped_query_positions = 0   # seeds skipped by --max-occ
+
+[genome]                 # --engine genome / --paf
+format_version = 1
+source = "paf"           # or "aligner", with aligner, aligner_version,
+paf_path = "aln.paf"     #   aligner_args and chunk_size
+paf_sha256 = "..."
+min_aln_len = 0
+min_identity = 0.0
+primary_only = false
+remove_noise = false
+sorted_query = false
+alignments = 1           # read from the PAF
+alignments_drawn = 1     # after the filters
+bp_per_px = 15
+line_width = 2
+
+[record_sort]            # --sort-records
+axis = "vertical"
+chains = 57
+order = ["chr1_ctg3", "chr1_ctg7-", "..."]   # "-" = reverse-complemented
+```
+
 ## Why this matters
 
 Recreating a published dotplot from scratch requires knowing
@@ -70,3 +114,8 @@ the same plot. The sidecar captures all of it in a parseable format.
 Given the same inputs and the same sidecar parameters, dottir is
 byte-deterministic across runs and across thread counts. This is
 spec §4.1.11 and is verified by golden / parallel-determinism tests.
+It holds for the large engine too: its seed index is built in parallel
+and then sorted, so it does not depend on the thread count. Genome mode
+is deterministic given the same PAF. When dottir runs the aligner, the
+result depends on the aligner's version and arguments. Both are recorded
+in `[genome]` and are part of the cache key.

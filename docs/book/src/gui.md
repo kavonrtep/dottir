@@ -34,6 +34,16 @@ Each positional is a FASTA file, or a GFF3 file with an embedded
 | `--query-region REGION` | — | Plot only this region of QUERY: `NAME:START-END` (1-based, inclusive), `:-` appended for the reverse complement, or a whole record. Repeatable. QUERY must be a FASTA (plain or gzipped). |
 | `--subject-region REGION` | — | The same for SUBJECT. |
 | `--sort-records {vertical,horizontal}` | — | Order and orient one input's records along the other ([Sorting records](./large.md#sorting-records)). |
+| `--repeat-annot PATH` | — | Large sequences: GFF3/BED of known repeats on the query (and on the subject in a self-comparison). These bases count as `high` copy ([Repeat classes](./large.md#repeat-classes)). |
+| `--repeat-annot-subject PATH` | — | The same for the subject. |
+| `--repeat-types TYPES` | all | GFF3 feature types (column 3, comma-separated) taken from the repeat annotations. |
+| `--genome` | off | Open QUERY (reference, horizontal) and SUBJECT as a [genome comparison](./genome.md#in-the-gui). Omit SUBJECT for a self-comparison. |
+| `--paf PATH` | — | Genome comparison from this PAF instead of running an aligner (implies `--genome`). |
+| `--aligner NAME\|PATH` | `auto` | Genome mode: mm2plus if installed, else minimap2, or the named aligner. |
+| `--preset PRESET` | `asm20` | Genome mode: minimap2 `-x` preset. |
+| `--aligner-args ARGS` | — | Genome mode: extra aligner arguments. |
+| `--all-copies` | off | Genome mode: keep all copies of repeats (`-P`). |
+| `--paf-min-len BP` | `0` | Genome mode: do not read alignments shorter than this. |
 
 Per-axis flags override `--gff`, which in turn overrides features
 embedded in a GFF3 positional input. Format is auto-detected; both plain
@@ -122,6 +132,29 @@ Behind **View → Settings…**. Changes recompute the dotplot.
 * Pixel factor: 1..255.
 * Strand: Forward / Reverse / Both (BLASTN only).
 * Self-comparison: triangle Both / Upper / Lower.
+* **Large sequences**:
+  * Engine: *Auto*, *Exact* or *Large*. *Auto* uses the large engine
+    for views with more than 2·10¹⁰ visible cells (*Switch above*) and
+    the exact engine when you zoom in further.
+  * Seed parameters: seed, two-hit distance, max occ, seed and depth
+    sampling.
+  * Repeat depth (*Seed*, *k-mer* or *None*) and the copy-number class
+    thresholds.
+  * Soft-masked bases counted as repeats, and repeat annotations per
+    axis with a feature-type filter.
+  * Memory cap.
+
+  See [Large sequences](./large.md#when-it-is-used). Large-engine views
+  get their own side panel: repeat-class toggles and colours, matching-bp
+  shading, axis repeat tracks and synteny chains.
+
+## Large sequences
+
+Large DNA inputs open like any other. The first large-engine view builds
+the seed index (status bar: *Indexing for large mode…*), and later views
+reuse it. *View → Sort records* orders and orients contigs along the
+other input. The display controls are covered in
+[Large sequences](./large.md#recipes).
 
 ## Annotations (GFF3 / BED)
 
