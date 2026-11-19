@@ -1677,31 +1677,15 @@ impl DottirApp {
         if !lp.has_coverage() {
             return;
         }
-        let mut hist = [0u64; 256];
-        for c in lp.merged_coverage(None, self.settings.large.classes) {
-            hist[c as usize] += 1;
-        }
-        let lit: u64 = hist[1..].iter().sum();
-        if lit == 0 {
+        let Some((w, b)) = dottir_core::large::fit_coverage_ramp(
+            &lp.merged_coverage(None, self.settings.large.classes),
+        ) else {
             return;
-        }
-        let pct = |p: f64| {
-            let target = (lit as f64 * p).ceil() as u64;
-            let mut acc = 0;
-            for (code, &n) in hist.iter().enumerate().skip(1) {
-                acc += n;
-                if acc >= target {
-                    return coverage_bases(code as u8) as f32;
-                }
-            }
-            coverage_bases(255) as f32
         };
-        // Whole bases: the sliders are integer and would otherwise report
-        // the rounding as a user edit (which turns auto-fit off).
-        let w = pct(0.02).max(1.0).round();
-        let b = pct(0.95).max(w * 2.0).round();
-        self.settings.large.cov_white_bp = w;
-        self.settings.large.cov_black_bp = b;
+        // Whole bases (the fit rounds): the sliders are integer and would
+        // otherwise report the rounding as a user edit (auto-fit off).
+        self.settings.large.cov_white_bp = w as f32;
+        self.settings.large.cov_black_bp = b as f32;
         self.texture_dirty = true;
     }
 
@@ -5930,8 +5914,6 @@ impl DottirApp {
     }
 }
 
-/// Greyramp over coverage codes: white below `white_bp` matching bases per
-/// pixel, black from `black_bp`, linear in log(bases) between.
 /// Score greyramp, or the coverage ramp in matching bases when large-mode
 /// pixels hold coverage codes.
 fn display_lut(coverage: bool, greyramp: &Greyramp, white_bp: f32, black_bp: f32) -> [u8; 256] {
@@ -5942,18 +5924,9 @@ fn display_lut(coverage: bool, greyramp: &Greyramp, white_bp: f32, black_bp: f32
     }
 }
 
+/// [`dottir_core::large::coverage_lut`] for the `f32` slider values.
 fn coverage_lut(white_bp: f32, black_bp: f32) -> [u8; 256] {
-    let lo = (white_bp.max(1.0) as f64).ln();
-    let hi = (black_bp.max(white_bp.max(1.0) + 1.0) as f64).ln();
-    let mut lut = [255u8; 256];
-    for (code, slot) in lut.iter_mut().enumerate().skip(1) {
-        let b = coverage_bases(code as u8).max(1.0).ln();
-        if b >= lo {
-            let t = ((b - lo) / (hi - lo)).clamp(0.0, 1.0);
-            *slot = (255.0 * (1.0 - t)).round() as u8;
-        }
-    }
-    lut
+    dottir_core::large::coverage_lut(white_bp as f64, black_bp as f64)
 }
 
 fn depth_bin_text(
@@ -7446,7 +7419,6 @@ impl ExportPixels {
 #[cfg(test)]
 mod large_display_tests {
     use super::*;
-    use dottir_core::large::coverage_code;
 
     #[test]
     fn export_pixels_keep_colour_only_when_shown() {
@@ -7470,18 +7442,6 @@ mod large_display_tests {
         assert_ne!(a, b, "coverage sensitivity changes the mapping");
         assert_ne!(a, g.lut());
         assert_eq!(display_lut(false, &g, 100.0, 10_000.0), g.lut());
-    }
-
-    #[test]
-    fn coverage_lut_ramps_in_log_bases() {
-        let lut = coverage_lut(100.0, 10_000.0);
-        assert_eq!(lut[0], 255, "empty pixels stay white");
-        assert_eq!(lut[coverage_code(50.0) as usize], 255);
-        assert_eq!(lut[coverage_code(20_000.0) as usize], 0);
-        // 1 kb is half-way between 100 bp and 10 kb on a log scale.
-        let mid = lut[coverage_code(1000.0) as usize];
-        assert!((120..=135).contains(&mid), "{mid}");
-        assert!(lut[1..].windows(2).all(|w| w[0] >= w[1]), "monotone");
     }
 
     #[test]

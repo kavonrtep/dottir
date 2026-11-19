@@ -31,6 +31,7 @@ use dottir_io::{
     },
     png_export,
 };
+use large_batch::{EngineArg, ShadeArg};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -270,7 +271,14 @@ fn main() -> Result<()> {
 
 fn run_batch(args: BatchArgs) -> Result<()> {
     // Genome mode never loads the sequences, so it branches off first.
-    if genome_batch::wanted(&args)? {
+    let genome = genome_batch::wanted(&args)?;
+    if args.large.shade == ShadeArg::Coverage && (genome || args.large.engine == EngineArg::Exact) {
+        anyhow::bail!("--shade coverage needs the large engine (--engine large or auto)");
+    }
+    if args.large.shade == ShadeArg::Score && args.large.coverage_ramp.0.is_some() {
+        tracing::warn!("--coverage-ramp is ignored without --shade coverage");
+    }
+    if genome {
         return genome_batch::run(&args);
     }
     let mode = args.mode.to_core();
@@ -342,6 +350,9 @@ fn run_batch(args: BatchArgs) -> Result<()> {
     if use_large && args.repeat_uniform_rendering {
         anyhow::bail!("--repeat-uniform-rendering is not supported by the large engine");
     }
+    if !use_large && args.large.shade == ShadeArg::Coverage {
+        tracing::warn!("--shade coverage: the exact engine was chosen; shading by window score");
+    }
     // The large engine targets inputs whose zoom-1 pixelmap could never be
     // allocated; without an explicit zoom, fit the plot to 4000 px.
     let auto_zoom = match args.auto_zoom {
@@ -407,7 +418,7 @@ fn run_batch(args: BatchArgs) -> Result<()> {
         args.window,
         zoom
     );
-    let (plot, large_info, chains) = if use_large {
+    let (plot, score_plot, large_info, chains) = if use_large {
         let out = large_batch::run(
             &args.large,
             &cfg,
@@ -416,12 +427,12 @@ fn run_batch(args: BatchArgs) -> Result<()> {
             is_self_comparison,
             sort_session,
         )?;
-        (out.plot, Some(out.info), out.chains)
+        (out.plot, out.score_plot, Some(out.info), out.chains)
     } else {
         drop(sort_session);
         let plot = compute_dotplot(query.bytes(), subject.bytes(), &cfg)
             .context("compute_dotplot failed")?;
-        (plot, None, Vec::new())
+        (plot, None, None, Vec::new())
     };
     tracing::info!(
         "wrote pixelmap {}x{} ({} bytes)",
@@ -466,6 +477,12 @@ fn run_batch(args: BatchArgs) -> Result<()> {
                 info.shown_classes.join(",")
             ),
         ));
+        // Same keys as the GUI's image export.
+        if let Some([white, black]) = info.coverage_ramp_bp {
+            text_chunks.push(("shading".to_string(), "coverage".to_string()));
+            text_chunks.push(("coverage-white-bp".to_string(), white.to_string()));
+            text_chunks.push(("coverage-black-bp".to_string(), black.to_string()));
+        }
     }
 
     let (render_pixels, render_w, render_h) = if args.repeat_uniform_rendering {
@@ -764,7 +781,11 @@ fn run_batch(args: BatchArgs) -> Result<()> {
             ".dot stores the shown classes merged; repeat-class channels are not preserved"
         );
     }
+    if let (Some(_), Some(_)) = (&args.dot, &score_plot) {
+        tracing::info!(".dot stores the window-score pixelmap; --shade applies to images only");
+    }
     if let Some(dot_path) = &args.dot {
+        let plot = score_plot.as_ref().unwrap_or(&plot);
         // Construct a format-3 .dot. Matrix is only 24×24 for proteins;
         // for DNA we pad the 4×4 matrix into the top-left of a 24×24
         // block (the rest stays zero — C-dotter doesn't care about

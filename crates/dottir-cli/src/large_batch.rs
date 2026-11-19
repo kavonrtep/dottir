@@ -8,8 +8,9 @@ use clap::ValueEnum;
 
 use dottir_core::genome::{sort_by_chains, InputRecord, SortAxis};
 use dottir_core::large::{
-    seed::DEFAULT_PATTERN, whole_plot_chains_session, ChainConfig, ClassMask, ClassThresholds,
-    Control, DepthMethod, LargeConfig, LargeInput, LargeSession, RepeatClass, Shade, SpacedSeed,
+    coverage_lut, fit_coverage_ramp, seed::DEFAULT_PATTERN, whole_plot_chains_session, ChainConfig,
+    ClassMask, ClassThresholds, Control, DepthMethod, LargeConfig, LargeInput, LargeSession,
+    RepeatClass, Shade, SpacedSeed,
 };
 use dottir_core::{BlastMode, DotPlot, PlotConfig, ScoreMatrix};
 use dottir_io::params::LargeParamsInfo;
@@ -43,6 +44,27 @@ impl SortRecordsArg {
         }
     }
 }
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+pub enum ShadeArg {
+    /// Best window score per pixel, as in Dotter.
+    Score,
+    /// Matching bases per pixel on a log ramp (the GUI's "Matching bp").
+    Coverage,
+}
+
+impl ShadeArg {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Score => "score",
+            Self::Coverage => "coverage",
+        }
+    }
+}
+
+/// `--coverage-ramp`: `[white, black]` bases per pixel; `None` = fit.
+#[derive(Debug, Clone, Copy)]
+pub struct CoverageRamp(pub Option<[f64; 2]>);
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 pub enum DepthArg {
@@ -130,6 +152,19 @@ pub struct LargeArgs {
     /// < MID low, < HIGH mid, otherwise high.
     #[arg(long, value_name = "L,M,H", default_value = "2,5,51")]
     pub class_thresholds: String,
+
+    /// Pixel shading. At overview zoom nearly every pixel holds a
+    /// saturated window score; `coverage` shades by matching bases per
+    /// pixel instead (the GUI's "Matching bp"). The `.dot` export keeps
+    /// the score pixelmap either way.
+    #[arg(long, value_enum, default_value_t = ShadeArg::Score)]
+    pub shade: ShadeArg,
+
+    /// Ramp for `--shade coverage`, in matching bases per pixel on a log
+    /// scale: white below WHITE, black from BLACK. `auto` = the 2nd and
+    /// 95th percentile of the lit pixels.
+    #[arg(long, value_name = "WHITE,BLACK|auto", default_value = "auto", value_parser = parse_coverage_ramp)]
+    pub coverage_ramp: CoverageRamp,
 
     /// Repeat classes to leave out of the image (`unique,low,mid,high`).
     #[arg(long, value_delimiter = ',', value_name = "CLASSES")]
@@ -412,7 +447,10 @@ pub fn sort_records(
 }
 
 pub struct LargeOutcome {
+    /// The pixels to render, shaded per `--shade`.
     pub plot: DotPlot,
+    /// The score pixelmap, when `plot` holds something else.
+    pub score_plot: Option<DotPlot>,
     pub info: LargeParamsInfo,
     /// Synteny chains (absolute residues), when `--chains-out` asked.
     pub chains: Vec<dottir_core::large::Chain>,
@@ -456,6 +494,7 @@ pub fn run(
         triangle: cfg.triangle,
         disable_mirror: cfg.disable_mirror,
         chain,
+        coverage: args.shade == ShadeArg::Coverage,
         ..engine_config(args, thresholds)?
     };
     let (q_floor, s_floor) = floors(args, query_input, subject_input, is_self, &thresholds)?;
@@ -538,6 +577,15 @@ pub fn run(
         }
     }
 
+    let score = lp.to_dot_plot(shown, false, Shade::Score);
+    let (plot, score_plot, ramp) = match args.shade {
+        ShadeArg::Score => (score, None, None),
+        ShadeArg::Coverage => {
+            let (plot, ramp) = coverage_plot(&lp, shown, args.coverage_ramp)?;
+            (plot, Some(score), Some(ramp))
+        }
+    };
+
     let info = LargeParamsInfo {
         format_version: lp.params.format_version,
         seed: lp.params.seed.clone(),
@@ -561,12 +609,47 @@ pub fn run(
         scored_cells: st.scored_cells,
         capped_query_positions: st.capped_query_positions,
         chains: args.chains_out.as_ref().map(|_| lp.chains.len()),
+        shade: args.shade.name().to_string(),
+        coverage_ramp_bp: ramp,
     };
     Ok(LargeOutcome {
-        plot: lp.to_dot_plot(shown, false, Shade::Score),
+        plot,
+        score_plot,
         info,
         chains: lp.chains.clone(),
     })
+}
+
+/// Coverage pixels of the shown classes through the coverage ramp, as
+/// pixel values (the PNG writer draws `255 - v`), and the ramp used.
+fn coverage_plot(
+    lp: &dottir_core::large::LargePlot,
+    shown: ClassMask,
+    ramp: CoverageRamp,
+) -> Result<(DotPlot, [f64; 2])> {
+    if !lp.has_coverage() {
+        bail!("large engine: coverage was not computed");
+    }
+    let mut plot = lp.to_dot_plot(shown, false, Shade::Coverage);
+    let [white, black] = match ramp.0 {
+        Some(r) => r,
+        None => match fit_coverage_ramp(&plot.pixels) {
+            Some((w, b)) => [w, b],
+            None => {
+                tracing::warn!("--shade coverage: no matching bases in the plot");
+                [1.0, 2.0]
+            }
+        },
+    };
+    tracing::info!(
+        "coverage ramp{}: white below {white:.0} bp, black from {black:.0} bp per pixel",
+        if ramp.0.is_none() { " (auto)" } else { "" }
+    );
+    let lut = coverage_lut(white, black);
+    for v in plot.pixels.iter_mut() {
+        *v = 255 - lut[*v as usize];
+    }
+    Ok((plot, [white, black]))
 }
 
 fn with_suffix(prefix: &std::path::Path, suffix: &str) -> PathBuf {
@@ -574,6 +657,22 @@ fn with_suffix(prefix: &std::path::Path, suffix: &str) -> PathBuf {
     s.push(".");
     s.push(suffix);
     PathBuf::from(s)
+}
+
+/// `auto` or `WHITE,BLACK` with 1 <= WHITE < BLACK.
+fn parse_coverage_ramp(s: &str) -> Result<CoverageRamp, String> {
+    if s.eq_ignore_ascii_case("auto") {
+        return Ok(CoverageRamp(None));
+    }
+    let bad =
+        || format!("expected `auto` or `WHITE,BLACK` bases with 1 <= WHITE < BLACK, got `{s}`");
+    let (w, b) = s.split_once(',').ok_or_else(bad)?;
+    let w: f64 = w.trim().parse().map_err(|_| bad())?;
+    let b: f64 = b.trim().parse().map_err(|_| bad())?;
+    if !(w.is_finite() && b.is_finite() && w >= 1.0 && w < b) {
+        return Err(bad());
+    }
+    Ok(CoverageRamp(Some([w, b])))
 }
 
 /// A sampling rate; `None` = automatic.

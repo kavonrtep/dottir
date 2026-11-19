@@ -340,6 +340,52 @@ pub fn coverage_bases(code: u8) -> f64 {
     (code as f64 / 8.0).exp2() - 1.0
 }
 
+/// Greyramp over [`coverage_code`]s, indexed by code: 255 (white) below
+/// `white_bp` matching bases per pixel, 0 (black) from `black_bp`, linear
+/// in log(bases) between. Code 0 is always white.
+pub fn coverage_lut(white_bp: f64, black_bp: f64) -> [u8; 256] {
+    let lo = white_bp.max(1.0).ln();
+    let hi = black_bp.max(white_bp.max(1.0) + 1.0).ln();
+    let mut lut = [255u8; 256];
+    for (code, slot) in lut.iter_mut().enumerate().skip(1) {
+        let b = coverage_bases(code as u8).max(1.0).ln();
+        if b >= lo {
+            let t = ((b - lo) / (hi - lo)).clamp(0.0, 1.0);
+            *slot = (255.0 * (1.0 - t)).round() as u8;
+        }
+    }
+    lut
+}
+
+/// Fit a [`coverage_lut`] ramp to a pixelmap of [`coverage_code`]s:
+/// white at the 2nd and black at the 95th percentile of the non-zero
+/// pixels, in whole bases, black at least twice white. `None` when no
+/// pixel is lit.
+pub fn fit_coverage_ramp(codes: &[u8]) -> Option<(f64, f64)> {
+    let mut hist = [0u64; 256];
+    for &c in codes {
+        hist[c as usize] += 1;
+    }
+    let lit: u64 = hist[1..].iter().sum();
+    if lit == 0 {
+        return None;
+    }
+    let pct = |p: f64| {
+        let target = (lit as f64 * p).ceil() as u64;
+        let mut acc = 0;
+        for (code, &n) in hist.iter().enumerate().skip(1) {
+            acc += n;
+            if acc >= target {
+                return coverage_bases(code as u8);
+            }
+        }
+        coverage_bases(255)
+    };
+    let w = pct(0.02).max(1.0).round();
+    let b = pct(0.95).max(w * 2.0).round();
+    Some((w, b))
+}
+
 /// How [`LargePlot::to_dot_plot`] fills the pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Shade {

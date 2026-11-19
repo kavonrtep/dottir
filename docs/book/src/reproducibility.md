@@ -80,6 +80,8 @@ anchors = 60362
 runs = 128               # diagonal runs scored
 scored_cells = 85170
 capped_query_positions = 0   # seeds skipped by --max-occ
+shade = "score"          # or "coverage", with the resolved ramp:
+                         #   coverage_ramp_bp = [5000.0, 50000000.0]
 
 [genome]                 # --engine genome / --paf
 format_version = 1

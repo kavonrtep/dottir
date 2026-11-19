@@ -491,6 +491,33 @@ fn coverage_code_round_trips_within_five_percent() {
 }
 
 #[test]
+fn coverage_lut_ramps_in_log_bases() {
+    let lut = coverage_lut(100.0, 10_000.0);
+    assert_eq!(lut[0], 255, "empty pixels stay white");
+    assert_eq!(lut[coverage_code(50.0) as usize], 255);
+    assert_eq!(lut[coverage_code(20_000.0) as usize], 0);
+    // 1 kb is half-way between 100 bp and 10 kb on a log scale.
+    let mid = lut[coverage_code(1000.0) as usize];
+    assert!((120..=135).contains(&mid), "{mid}");
+    assert!(lut[1..].windows(2).all(|w| w[0] >= w[1]), "monotone");
+}
+
+#[test]
+fn fit_coverage_ramp_takes_2nd_and_95th_percentile_of_lit_pixels() {
+    assert_eq!(fit_coverage_ramp(&[0; 10]), None);
+    // 100 lit pixels with codes 1..=100, plus unlit ones that must not count.
+    let mut codes: Vec<u8> = (1..=100).collect();
+    codes.extend([0; 500]);
+    let (w, b) = fit_coverage_ramp(&codes).unwrap();
+    assert_eq!(w, coverage_bases(2).max(1.0).round());
+    assert_eq!(b, coverage_bases(95).round());
+    // A single value: black is forced to at least twice white.
+    let (w, b) = fit_coverage_ramp(&[80; 4]).unwrap();
+    assert_eq!(w, coverage_bases(80).round());
+    assert_eq!(b, w * 2.0);
+}
+
+#[test]
 fn coverage_measures_matching_bases_not_score() {
     // A 3 kb forward copy at 5 % divergence: at zoom 100 every scored
     // pixel saturates in score, but coverage adds up to the copy length.

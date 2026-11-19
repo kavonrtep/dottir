@@ -107,6 +107,18 @@ pub struct LargeParamsInfo {
     pub scored_cells: u64,
     pub capped_query_positions: u64,
     pub chains: Option<usize>,
+    /// Pixel shading: `score` (best window score) or `coverage` (matching
+    /// bases per pixel through `coverage_ramp_bp`).
+    #[serde(default = "score_shade")]
+    pub shade: String,
+    /// Resolved coverage ramp `[white, black]` in bases per pixel (also
+    /// when fitted with `--coverage-ramp auto`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coverage_ramp_bp: Option<[f64; 2]>,
+}
+
+fn score_shade() -> String {
+    "score".into()
 }
 
 fn one() -> u32 {
@@ -300,8 +312,25 @@ mod tests {
             scored_cells: 300,
             capped_query_positions: 0,
             chains: Some(1),
+            shade: "coverage".into(),
+            coverage_ramp_bp: Some([5000.0, 5e7]),
         });
-        let back: ParamsSidecar = toml::from_str(&l.to_toml().unwrap()).unwrap();
-        assert_eq!(back.large.unwrap().shown_classes, vec!["unique", "low"]);
+        let text = l.to_toml().unwrap();
+        let back: ParamsSidecar = toml::from_str(&text).unwrap();
+        let large = back.large.unwrap();
+        assert_eq!(large.shown_classes, vec!["unique", "low"]);
+        assert_eq!(large.shade, "coverage");
+        assert_eq!(large.coverage_ramp_bp, Some([5000.0, 5e7]));
+
+        // Sidecars written before `shade` existed read as score shading.
+        let mut old: toml::Table = toml::from_str(&text).unwrap();
+        let large = old["large"].as_table_mut().unwrap();
+        large.remove("shade");
+        large.remove("coverage_ramp_bp");
+        let old = toml::to_string(&old).unwrap();
+        let back: ParamsSidecar = toml::from_str(&old).unwrap();
+        let large = back.large.unwrap();
+        assert_eq!(large.shade, "score");
+        assert_eq!(large.coverage_ramp_bp, None);
     }
 }

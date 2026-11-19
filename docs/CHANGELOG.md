@@ -7,6 +7,21 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+* `dottir batch --shade coverage` shades large-engine plots by matching
+  bases per pixel, as the GUI's *Matching bp* does; `--coverage-ramp
+  WHITE,BLACK|auto` sets the log ramp (default `auto`: 2nd/95th
+  percentile of lit pixels). The resolved ramp is recorded in the
+  sidecar (`[large] shade`, `coverage_ramp_bp`) and in the PNG text
+  chunks. The default, `--shade score`, leaves output unchanged; `.dot`
+  exports keep the window-score pixelmap. (#2)
+
+### Changed
+
+* `coverage_lut` and `fit_coverage_ramp` moved from the GUI to
+  `dottir_core::large`, shared by the GUI and batch.
+
 ### Documentation
 
 * The README, the book's introduction and the CLI, GUI, reproducibility and

@@ -112,6 +112,21 @@ slider turns it off. **Window score** switches back to Dotter shading with
 the usual greyramp, which is the right choice once zoomed in to a few
 bases per pixel.
 
+`dottir batch` shades by window score unless asked otherwise.
+`--shade coverage` selects matching bp, and `--coverage-ramp WHITE,BLACK`
+sets the two thresholds in bases per pixel; the default, `auto`, is the
+same 2nd/95th percentile fit as the GUI. The resolved ramp is written to
+the sidecar and to the PNG text chunks, so an `auto` figure can be
+redrawn with fixed values. The `.dot` export keeps the window-score
+pixelmap either way. `--shade coverage` with `--engine exact` or genome
+mode is an error; when `--engine auto` picks the exact engine, the plot
+falls back to score shading with a warning.
+
+```bash
+dottir batch cen_a.fa cen_b.fa -o cen.png --auto-zoom 2000 \
+    --shade coverage --coverage-ramp 5000,50000000
+```
+
 ### Axis tracks
 
 With **Repeat tracks on axes**, a strip along the top (query) and left
@@ -220,6 +235,8 @@ chromosome, in the right order and orientation; sorting took 9 s.
 | `--depth` / `--depth-k` | `seed` / 21 | copy-number method |
 | `--class-thresholds` | `2,5,51` | class boundaries |
 | `--hide-classes` | — | classes left out of the image |
+| `--shade` | `score` | `score` or `coverage` (matching bp per pixel) |
+| `--coverage-ramp` | `auto` | `WHITE,BLACK` bp per pixel for `--shade coverage` |
 | `--large-memory-limit-bytes` | 6 GiB | index + depth + channels |
 
 ## Performance
