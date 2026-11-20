@@ -1,6 +1,6 @@
 # dottir — GUI navigation plan: cache, zoom out, exact plot on demand
 
-Status: **proposed** (2026-11-20). GUI only; no change to algorithms,
+Status: **implemented** (2026-11-20), interactive desktop testing pending. GUI only; no change to algorithms,
 pixelmaps or file formats, so no ADR. Estimates are person-days.
 
 Target release: **v0.8.0**.
@@ -9,13 +9,14 @@ Target release: **v0.8.0**.
 
 | ID | Item | Status |
 |----|------|--------|
-| N1 | Cancellable exact engine, Stop button | ☐ |
-| N2 | Exact plot of a view on demand, with cost estimate | ☐ |
-| N3 | Zoom out ×2 | ☐ |
-| N4 | Cache and history rework | ☐ |
-| N5 | Docs, changelog, release | ☐ |
+| N1 | Cancellable exact engine, Stop button | ☑ |
+| N2 | Exact plot of a view on demand, with cost estimate | ☑ |
+| N3 | Zoom out ×2 | ☑ |
+| N4 | Cache and history rework | ☑ (one large session, see N4) |
+| N5 | Docs, changelog, release | ☑ docs, changelog; release pending |
 
-Order: N1 is a prerequisite of N2; N4 touches the most code and comes last.
+Order: N1 is a prerequisite of N2. Implemented N1, N4, N2, N3: N2's cache
+entries need the engine in the N4 key.
 
 ## Problem
 
@@ -115,8 +116,8 @@ memory  = w × h × (1 + separate reverse pixelmap)          pixelmaps
   [Compute]  [Cancel]
   ```
 
-* Memory above `LargeSettings::memory_limit_bytes`: the dialog says so and
-  offers only Cancel.
+* Memory above the exact engine's memory cap (`Settings::memory_limit_bytes`,
+  the limit the core enforces): the dialog says so and offers only Cancel.
 * The running job shows progress and Stop (N1).
 
 ## N3 — Zoom out ×2 (≈ 1 d)

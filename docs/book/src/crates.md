@@ -32,7 +32,8 @@ future `pyo3` bindings without dragging in PNG / FASTA / GUI deps.
 | `sliding` | The ping-pong sum recurrence kernel, chunkable for rayon parallelism. |
 | `antidiag` | Anti-diagonal sub-pixel suppression rule. |
 | `pixel` | `PixelMap` with checked allocation, max-merge, and element-wise merge. |
-| `plot` | Top-level `compute_dotplot` driver (exact engine). |
+| `plot` | Top-level `compute_dotplot` driver (exact engine); `compute_dotplot_with` adds progress and cancellation. |
+| `control` | `Control`: cancel flag and progress callback, shared by the exact and large engines. |
 | `large` | Large engine ([ADR 0007](./adr.md)): `seed` (spaced seeds over 2-bit DNA), `index` (spaced-seed index of the subject), `hits` (query streaming and the two-hit diagonal filter), `score` (exact sliding-window scoring along the surviving diagonals), `depth` (per-base copy number and repeat classes), `chain` (co-linear synteny chains). |
 | `genome` | Genome mode ([ADR 0008](./adr.md)): `alignment` (the alignment model), `filter` (identity, length and D-GENIES noise filters), `order` (sorting query records along the reference), `layout` (record placement on each axis), `arrange` (filters, sorting and layouts for one plot), `raster` (deterministic line rasterisation), `records` (the same sort for ordinary multi-record dotplots). |
 

@@ -7,6 +7,26 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+GUI navigation (docs/GUI_NAVIGATION_PLAN.md).
+
+### Added
+
+* **Stop** cancels a running plot (exact or large engine, including the
+  large-mode index) and keeps the current one.
+* **Exact plot of this view / of selection** in large mode, with an
+  estimate of cells, time and memory before long runs; the speed is
+  measured on this machine.
+* **Zoom out ×2** (button, `-` key) around the crosshair or the view
+  centre.
+* `dottir_core::compute_dotplot_with` takes a `Control` (progress,
+  cancellation); `Control` moved to the crate root.
+
+### Changed
+
+* The GUI view cache is bounded by memory (default 1 GiB, Settings) and
+  keyed by the compute settings, so settings changed back are instant;
+  history holds 50 views and survives settings changes.
+
 ## [0.7.0] - 2026-11-19
 
 Coverage shading for batch plots from the large engine.

@@ -314,7 +314,22 @@ pub fn compute_dotplot(
 
 /// [`compute_dotplot`] with progress reporting and cancellation. A set
 /// cancel flag ends the computation with [`DottirError::Cancelled`];
-/// otherwise the pixels are identical to [`compute_dotplot`].
+/// otherwise the pixels are identical to [`compute_dotplot`]. Progress
+/// is a fraction in `[0, 1]`, reported from worker threads.
+///
+/// ```
+/// use std::sync::atomic::AtomicBool;
+/// use dottir_core::{compute_dotplot_with, Control, DottirError, PlotConfig, ScoreMatrix};
+///
+/// let cfg = PlotConfig::default_blastn(ScoreMatrix::dna_identity());
+/// let seq = b"ACGTTGCAACGTAGCTAGCTAGGATCCGATCGATCGTAGCTAGCTAGCATCGAT";
+/// let stop = AtomicBool::new(true); // e.g. set by a Stop button
+/// let ctl = Control { cancel: Some(&stop), progress: None };
+/// assert!(matches!(
+///     compute_dotplot_with(seq, seq, &cfg, &ctl),
+///     Err(DottirError::Cancelled)
+/// ));
+/// ```
 pub fn compute_dotplot_with(
     query: &[u8],
     subject: &[u8],

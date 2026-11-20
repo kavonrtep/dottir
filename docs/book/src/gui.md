@@ -100,7 +100,9 @@ through the `--gff*` flags or **File → Load GFF3/BED…** instead.
 |-------|--------|
 | Primary-button drag on the canvas | Pan |
 | Middle-button drag | Zoom to the rectangle |
-| Right-button drag | Select a rectangle and open its menu: *Zoom to selection*, *Open in new window*, *Copy coordinates (BEDPE)*. Esc or a click closes it. |
+| Right-button drag | Select a rectangle and open its menu: *Zoom to selection*, *Exact plot of selection* (large engine), *Open in new window*, *Copy coordinates (BEDPE)*. Esc or a click closes it. |
+| `-` | Zoom out ×2 |
+| Esc / Backspace | Back (previous view) |
 | Scroll wheel on the canvas | Zoom on cursor |
 | Click on the canvas | Set crosshair |
 | Arrow keys | Nudge crosshair by 1 |
@@ -113,6 +115,42 @@ through the `--gff*` flags or **File → Load GFF3/BED…** instead.
 Shift / Ctrl multiply the diagonal and anti-diagonal steps the same
 way as the arrow keys (×10 / ×100). The full keymap is also visible
 in the GUI under **View → Keyboard shortcuts…**.
+
+## Views, cache and Stop
+
+* **Fit** shows both sequences. **Zoom out** (or `-`) doubles the visible
+  area around the crosshair, or around the centre when the crosshair is
+  not visible, and halves the resolution; it never extends past the
+  sequence ends. The mouse wheel does not zoom out, because the larger
+  view can take long to compute. **Back** returns to the previous view;
+  the last 50 views are kept, also across settings changes (Back then
+  recomputes the old view under the current settings).
+* Computed views are cached in memory, up to the **View cache** budget
+  in Settings (default 1 GiB; least recently used views go first). A
+  view is found again by its settings, engine, region and zoom, so
+  changing a setting and changing it back is instant. The cache is
+  cleared when sequences are loaded.
+* While a plot computes, **Stop** (on the plot and in the status bar)
+  cancels it and keeps the current plot. This also cancels building the
+  large-mode seed index.
+* **Exact plot of this view** (large-engine side panel, *Exact…* in the
+  status bar) and **Exact plot of selection** compute one view with the
+  exact engine, without changing *Settings → Engine*. A dialog shows the
+  estimated cells, time and memory first when the run would take more
+  than 5 s:
+
+  ```
+  Exact plot of 1.20 Mb × 1.20 Mb (both strands)
+  ≈ 2.9e12 cells · ≈ 29 min · ≈ 120 MB
+  [Compute]  [Cancel]
+  ```
+
+  The time uses the speed measured on earlier exact runs (10⁹ cells/s
+  until one longer than 1 s has finished). Back returns to the large-
+  engine view; zooming into the exact view stays exact; Fit and Zoom out
+  return to the normal engine choice. With *Settings → Engine → Exact*,
+  any plot estimated above 30 s asks first. A plot above the memory cap
+  is refused.
 
 ## Theme
 
@@ -143,6 +181,8 @@ Behind **View → Settings…**. Changes recompute the dotplot.
   * Soft-masked bases counted as repeats, and repeat annotations per
     axis with a feature-type filter.
   * Memory cap.
+* View cache: memory for computed views (see
+  [Views, cache and Stop](#views-cache-and-stop)).
 
   See [Large sequences](./large.md#when-it-is-used). Large-engine views
   get their own side panel: repeat-class toggles and colours, matching-bp
