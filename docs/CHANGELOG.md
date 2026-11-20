@@ -7,7 +7,10 @@ the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-GUI navigation (docs/GUI_NAVIGATION_PLAN.md).
+## [0.8.0] - 2026-11-20
+
+GUI navigation: Stop, exact plots on demand, zoom out, a memory-bounded
+view cache (docs/GUI_NAVIGATION_PLAN.md). Pixelmaps are unchanged.
 
 ### Added
 

@@ -1,6 +1,6 @@
 # dottir — GUI navigation plan: cache, zoom out, exact plot on demand
 
-Status: **implemented** (2026-11-20), interactive desktop testing pending. GUI only; no change to algorithms,
+Status: **implemented** (2026-11-20), released in v0.8.0. GUI only; no change to algorithms,
 pixelmaps or file formats, so no ADR. Estimates are person-days.
 
 Target release: **v0.8.0**.
@@ -13,7 +13,7 @@ Target release: **v0.8.0**.
 | N2 | Exact plot of a view on demand, with cost estimate | ☑ |
 | N3 | Zoom out ×2 | ☑ |
 | N4 | Cache and history rework | ☑ (one large session, see N4) |
-| N5 | Docs, changelog, release | ☑ docs, changelog; release pending |
+| N5 | Docs, changelog, release | ☑ v0.8.0 |
 
 Order: N1 is a prerequisite of N2. Implemented N1, N4, N2, N3: N2's cache
 entries need the engine in the N4 key.
