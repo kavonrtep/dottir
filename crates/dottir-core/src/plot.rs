@@ -5,12 +5,13 @@
 //! self-comparison.
 
 use crate::alphabet::{complement_encoded, encode, reverse_complement_dna};
+use crate::control::Control;
 use crate::error::DottirError;
 use crate::karlin::{karlin_window_size, KarlinResult};
 use crate::matrix::{BlastMode, ScoreMatrix};
 use crate::pixel::{image_dimension, PixelMap, PixelView};
 use crate::score_vec::ScoreVec;
-use crate::sliding::{sliding_window_pass_chunked, Direction};
+use crate::sliding::{sliding_window_pass_ticked, Direction, Ticker};
 
 /// Which strand(s) of the *subject* sequence to compute against the query.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -308,6 +309,19 @@ pub fn compute_dotplot(
     subject: &[u8],
     config: &PlotConfig,
 ) -> Result<DotPlot, DottirError> {
+    compute_dotplot_with(query, subject, config, &Control::default())
+}
+
+/// [`compute_dotplot`] with progress reporting and cancellation. A set
+/// cancel flag ends the computation with [`DottirError::Cancelled`];
+/// otherwise the pixels are identical to [`compute_dotplot`].
+pub fn compute_dotplot_with(
+    query: &[u8],
+    subject: &[u8],
+    config: &PlotConfig,
+    ctl: &Control<'_>,
+) -> Result<DotPlot, DottirError> {
+    ctl.check()?;
     if query.is_empty() || subject.is_empty() {
         return Err(DottirError::EmptySequence);
     }
@@ -317,7 +331,7 @@ pub fn compute_dotplot(
     // `config.pixel_fac == 0` means "auto-derive from Karlin's
     // expected_residue_score" — handled below once Karlin has run.
     if config.mode == BlastMode::Blastx {
-        return compute_blastx(query, subject, config);
+        return compute_blastx(query, subject, config, ctl);
     }
     if config.self_comparison && query.len() != subject.len() {
         return Err(DottirError::InvalidConfig(
@@ -437,6 +451,16 @@ pub fn compute_dotplot(
     }
 
     let score_vec = ScoreVec::build(&config.matrix, &q_encoded);
+    let passes = do_forward as u64 + do_reverse as u64;
+    let ticker = Ticker::new(
+        *ctl,
+        passes
+            * pass_cells(
+                q_encoded.len(),
+                s_encoded_forward.len(),
+                config.self_comparison,
+            ),
+    );
 
     // Per spec §4.4.3, separate-strand channels keep forward and reverse
     // hits distinct (used for inverted-repeat highlighting in the GUI).
@@ -460,7 +484,9 @@ pub fn compute_dotplot(
             Direction::Forward,
             config.self_comparison,
             &view,
+            &ticker,
         );
+        ticker.check()?;
     }
 
     if do_reverse {
@@ -482,7 +508,9 @@ pub fn compute_dotplot(
                     Direction::Reverse,
                     config.self_comparison,
                     &view,
+                    &ticker,
                 );
+                ticker.check()?;
             }
             reverse_map = Some(rm);
         } else {
@@ -496,7 +524,9 @@ pub fn compute_dotplot(
                 Direction::Reverse,
                 config.self_comparison,
                 &view,
+                &ticker,
             );
+            ticker.check()?;
         }
     }
 
@@ -555,6 +585,17 @@ pub fn compute_dotplot(
     })
 }
 
+/// Query cells one sliding-window pass visits (the self-comparison pass
+/// stops at the diagonal).
+fn pass_cells(qlen: usize, slen: usize, self_comp: bool) -> u64 {
+    if self_comp {
+        let n = slen.min(qlen) as u64;
+        n * (n + 1) / 2 + (slen.saturating_sub(qlen) as u64) * qlen as u64
+    } else {
+        qlen as u64 * slen as u64
+    }
+}
+
 /// Reverse-complement a DNA sequence in place (helper for callers who want
 /// to pre-flip a sequence before passing to [`compute_dotplot`]; equivalent
 /// to the original Dotter's `-r` / `-v` CLI flags per spec §4.1.10).
@@ -588,6 +629,7 @@ fn run_pass(
     direction: Direction,
     self_comp: bool,
     out: &PixelView<'_>,
+    ticker: &Ticker<'_>,
 ) {
     #[cfg(feature = "rayon")]
     {
@@ -600,7 +642,7 @@ fn run_pass(
         // chunk) dominates and serial is faster.
         let min_for_parallel = (window as usize).saturating_mul(64).max(2048);
         if n_threads <= 1 || slen < min_for_parallel {
-            sliding_window_pass_chunked(
+            sliding_window_pass_ticked(
                 score_vec,
                 subject,
                 window,
@@ -610,6 +652,7 @@ fn run_pass(
                 self_comp,
                 0..slen,
                 out,
+                Some(ticker),
             );
             return;
         }
@@ -627,7 +670,7 @@ fn run_pass(
             .collect();
 
         chunks.par_iter().for_each(|range| {
-            sliding_window_pass_chunked(
+            sliding_window_pass_ticked(
                 score_vec,
                 subject,
                 window,
@@ -637,13 +680,14 @@ fn run_pass(
                 self_comp,
                 range.clone(),
                 out,
+                Some(ticker),
             );
         });
     }
 
     #[cfg(not(feature = "rayon"))]
     {
-        sliding_window_pass_chunked(
+        sliding_window_pass_ticked(
             score_vec,
             subject,
             window,
@@ -653,6 +697,7 @@ fn run_pass(
             self_comp,
             0..subject.len(),
             out,
+            Some(ticker),
         );
     }
 }
@@ -707,6 +752,7 @@ fn compute_blastx(
     query: &[u8],
     subject: &[u8],
     config: &PlotConfig,
+    ctl: &Control<'_>,
 ) -> Result<DotPlot, DottirError> {
     if config.matrix.kind != crate::alphabet::AlphabetKind::Protein {
         return Err(DottirError::InvalidMatrix(
@@ -766,6 +812,7 @@ fn compute_blastx(
     let width = image_dimension(query.len(), config.zoom.max(1) * 3);
     let height = image_dimension(subject.len(), config.zoom);
     let mut pixmap = PixelMap::new_checked(width, height, config.memory_limit_bytes)?;
+    let ticker = Ticker::new(*ctl, 3 * pass_cells(pepqlen, s_encoded.len(), false));
 
     for frame_offset in 0..3 {
         let translated = crate::translation::translate_frame(query, frame_offset);
@@ -795,7 +842,9 @@ fn compute_blastx(
             Direction::Forward,
             false, // self-comparison not supported for BLASTX
             &view,
+            &ticker,
         );
+        ticker.check()?;
     }
 
     Ok(DotPlot {

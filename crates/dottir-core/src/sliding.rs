@@ -22,9 +22,13 @@
 //! Two ping-pong row buffers (`sum1`, `sum2`) carry `score(_, s-1)` into
 //! the next iteration without per-iteration allocation.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use crate::antidiag::keep_dot;
+use crate::control::Control;
 use crate::pixel::PixelView;
 use crate::score_vec::ScoreVec;
+use crate::DottirError;
 
 /// Direction along the subject axis. Forward iterates `s = 0..slen`,
 /// reverse iterates `s = slen-1..=0`.
@@ -107,6 +111,69 @@ pub fn sliding_window_pass_chunked(
     s_emit_range: std::ops::Range<usize>,
     out: &PixelView<'_>,
 ) {
+    sliding_window_pass_ticked(
+        score_vec,
+        subject_encoded,
+        window,
+        zoom,
+        pixel_fac,
+        direction,
+        self_comp,
+        s_emit_range,
+        out,
+        None,
+    );
+}
+
+/// Query cells between two progress / cancel checks (~10 ms of work):
+/// rows of a long query must not delay a Stop by seconds.
+const TICK_CELLS: u64 = 1 << 24;
+
+/// Progress and cancellation of one exact computation, shared by all
+/// worker threads. Work is counted in query cells.
+pub(crate) struct Ticker<'a> {
+    ctl: Control<'a>,
+    done: AtomicU64,
+    total: u64,
+}
+
+impl<'a> Ticker<'a> {
+    pub(crate) fn new(ctl: Control<'a>, total: u64) -> Self {
+        Self {
+            ctl,
+            done: AtomicU64::new(0),
+            total: total.max(1),
+        }
+    }
+
+    /// Record `cells` of work; `false` once cancelled.
+    fn tick(&self, cells: u64) -> bool {
+        let done = self.done.fetch_add(cells, Ordering::Relaxed) + cells;
+        self.ctl.report(done as f32 / self.total as f32);
+        !self.ctl.cancelled()
+    }
+
+    pub(crate) fn check(&self) -> Result<(), DottirError> {
+        self.ctl.check()
+    }
+}
+
+/// [`sliding_window_pass_chunked`] with progress and cancellation.
+/// Returns `false` when cancelled; the pixels written so far are then
+/// incomplete.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn sliding_window_pass_ticked(
+    score_vec: &ScoreVec,
+    subject_encoded: &[u8],
+    window: u32,
+    zoom: u32,
+    pixel_fac: u32,
+    direction: Direction,
+    self_comp: bool,
+    s_emit_range: std::ops::Range<usize>,
+    out: &PixelView<'_>,
+    ticker: Option<&Ticker<'_>>,
+) -> bool {
     let qlen = score_vec.qlen;
     let slen = subject_encoded.len();
     let w = window as usize;
@@ -114,7 +181,7 @@ pub fn sliding_window_pass_chunked(
     let zoom_us = zoom as usize;
 
     if w == 0 || qlen == 0 || slen == 0 || s_emit_range.is_empty() {
-        return;
+        return true;
     }
 
     let mut sum1 = vec![0_i32; qlen];
@@ -141,10 +208,20 @@ pub fn sliding_window_pass_chunked(
     // because slen-1 has the same parity as 0..slen-1 in the same order.
     // We use an explicit counter for clarity and determinism.
     let mut iter_idx: usize = 0;
+    let mut cells: u64 = 0;
 
     let mut s_signed = s_start;
     while s_signed != s_end_excl {
         let s = s_signed as usize;
+        if let Some(t) = ticker {
+            cells += if self_comp { qlen.min(s + 1) } else { qlen } as u64;
+            if cells >= TICK_CELLS {
+                if !t.tick(cells) {
+                    return false;
+                }
+                cells = 0;
+            }
+        }
         let s_row = score_vec.subject_row(subject_encoded[s]) as usize;
         let add_row = score_vec.row(s_row);
 
@@ -229,6 +306,7 @@ pub fn sliding_window_pass_chunked(
         iter_idx += 1;
         s_signed += step;
     }
+    ticker.is_none_or(|t| t.tick(cells))
 }
 
 /// Emit one pixel candidate at sub-pixel `(q_idx, s_idx)`. Applies the

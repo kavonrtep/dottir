@@ -18,10 +18,8 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 
-use dottir_core::large::{
-    ClassMask, Control, LargeConfig, LargeInput, LargePlot, LargeSession, Shade,
-};
-use dottir_core::{compute_dotplot, DotPlot, DottirError, PlotConfig};
+use dottir_core::large::{ClassMask, LargeConfig, LargeInput, LargePlot, LargeSession, Shade};
+use dottir_core::{compute_dotplot_with, Control, DotPlot, DottirError, PlotConfig};
 
 /// Inputs of the large engine, shared with the worker without copying
 /// per request. `key` identifies the inputs: the worker re-prepares its
@@ -138,10 +136,7 @@ impl ComputeWorker {
                         .map_or(req.config.zoom, |j| j.config.zoom);
                     let (plot, large) = match req.large.take() {
                         Some(job) => run_large(job, &ws, &wp, &wc, &repaint),
-                        None => {
-                            wp.set(Stage::Exact);
-                            (compute_dotplot(&req.query, &req.subject, &req.config), None)
-                        }
+                        None => (run_exact(&req, &wp, &wc, &repaint), None),
                     };
                     wp.set(Stage::Idle);
                     if result_tx
@@ -190,6 +185,12 @@ impl ComputeWorker {
         }
     }
 
+    /// Cancel the running job without dispatching another. Its result
+    /// arrives as `Err(DottirError::Cancelled)`.
+    pub fn stop(&self) {
+        self.cancel.store(true, Ordering::Relaxed);
+    }
+
     /// Current stage and progress fraction of the running job.
     pub fn progress(&self) -> (Stage, f32) {
         let stage = match self.progress.stage.load(Ordering::Relaxed) {
@@ -219,6 +220,34 @@ type LargeOutcome = (Result<DotPlot, DottirError>, Option<LargePlot>);
 /// was prepared for.
 type SharedSession = Arc<Mutex<Option<(u64, Arc<LargeSession>)>>>;
 
+/// Progress callback for the status bar: repaints every 5 %.
+fn reporter<'a>(
+    progress: &'a Progress,
+    repaint: &'a (dyn Fn() + Sync),
+) -> impl Fn(f32) + Sync + 'a {
+    move |f: f32| {
+        let pm = (f * 1000.0) as u32;
+        if progress.permille.swap(pm, Ordering::Relaxed) / 50 != pm / 50 {
+            repaint();
+        }
+    }
+}
+
+fn run_exact(
+    req: &ComputeRequest,
+    progress: &Progress,
+    cancel: &AtomicBool,
+    repaint: &(dyn Fn() + Sync),
+) -> Result<DotPlot, DottirError> {
+    progress.set(Stage::Exact);
+    let report = reporter(progress, repaint);
+    let ctl = Control {
+        cancel: Some(cancel),
+        progress: Some(&report),
+    };
+    compute_dotplot_with(&req.query, &req.subject, &req.config, &ctl)
+}
+
 fn run_large(
     job: LargeJob,
     session: &Mutex<Option<(u64, Arc<LargeSession>)>>,
@@ -226,12 +255,7 @@ fn run_large(
     cancel: &AtomicBool,
     repaint: &(dyn Fn() + Sync),
 ) -> LargeOutcome {
-    let report = |f: f32| {
-        let pm = (f * 1000.0) as u32;
-        if progress.permille.swap(pm, Ordering::Relaxed) / 50 != pm / 50 {
-            repaint();
-        }
-    };
+    let report = reporter(progress, repaint);
     let src = &job.source;
     let lock = || session.lock().unwrap_or_else(|e| e.into_inner());
     let current = lock()
@@ -257,10 +281,10 @@ fn run_large(
             },
             s_floor: src.s_floor.as_deref(),
         };
-        // Preparing is not cancelled: the session survives the request
-        // that triggered it and serves the next viewport.
+        // A cancelled preparation keeps no session; the next large
+        // request prepares again.
         let ctl = Control {
-            cancel: None,
+            cancel: Some(cancel),
             progress: Some(&report),
         };
         match LargeSession::prepare_reusing(&input, &job.config, &ctl, prev) {
@@ -332,6 +356,69 @@ mod tests {
         assert_eq!(r.id, 1);
         assert!(r.plot.is_ok());
         assert!(repaint_count.load(Ordering::SeqCst) >= 1);
+    }
+
+    fn wait_result(worker: &ComputeWorker, id: u64) -> ComputeResult {
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        while std::time::Instant::now() < deadline {
+            if let Some(r) = worker.drain_results().into_iter().find(|r| r.id == id) {
+                return r;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        panic!("no result for request {id} within 60 s");
+    }
+
+    /// Stop cancels a running exact job; the worker then serves the next
+    /// request.
+    #[test]
+    fn stop_cancels_exact_job() {
+        let worker = ComputeWorker::spawn(|| {});
+        let mut st = 5u64;
+        let mut dna = |n: usize| -> Vec<u8> {
+            (0..n)
+                .map(|_| {
+                    st = st
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
+                    b"ACGT"[(st >> 62) as usize]
+                })
+                .collect()
+        };
+        let mut cfg = PlotConfig::default_blastn(ScoreMatrix::dna_identity());
+        cfg.strand = Strand::Both;
+        cfg.window_size = Some(25);
+        cfg.zoom = 100;
+        // Minutes of work unless stopped.
+        worker.dispatch(ComputeRequest {
+            id: 1,
+            query: dna(200_000),
+            subject: dna(200_000),
+            config: cfg.clone(),
+            large: None,
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            let (stage, f) = worker.progress();
+            if stage == Stage::Exact && f > 0.0 {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "job never started");
+            thread::sleep(Duration::from_millis(5));
+        }
+        worker.stop();
+        let r = wait_result(&worker, 1);
+        assert!(matches!(r.plot, Err(DottirError::Cancelled)));
+
+        cfg.zoom = 1;
+        worker.dispatch(ComputeRequest {
+            id: 2,
+            query: b"ACGTACGTACGTACGTACGTACGTACGTACGT".to_vec(),
+            subject: b"ACGTACGTACGTACGTACGTACGTACGTACGT".to_vec(),
+            config: cfg,
+            large: None,
+        });
+        assert!(wait_result(&worker, 2).plot.is_ok());
     }
 
     /// Requests run in dispatch order; queued requests superseded by a

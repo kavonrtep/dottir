@@ -59,9 +59,9 @@ pub fn compute_dotplot_with(query: &[u8], subject: &[u8], cfg: &PlotConfig,
 
 * The parallel loop splits the subject into ~4 × threads chunks; at
   minutes per run that is several seconds per chunk. The cancel flag is
-  therefore checked inside `sliding_window_pass_chunked` every 1024
-  subject rows (one relaxed atomic load), and rows done are added to an
-  atomic counter that drives `ctl.progress`.
+  therefore checked inside the sliding-window loop every 2²⁴ query cells
+  (~10 ms; a row count would be too coarse for a 100 Mb query), and the
+  cells done are added to an atomic counter that drives `ctl.progress`.
 * BLASTX: the same, per frame pass.
 * Pixels of a completed run are unchanged. Cancel only aborts.
 

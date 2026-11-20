@@ -42,7 +42,7 @@ pub(crate) mod score;
 pub mod seed;
 
 use std::ops::Range;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 pub use chain::{chain_segments, Chain, ChainConfig};
 pub use depth::{compute_depth, ClassThresholds, DepthMethod, DepthTrack, RepeatClass};
@@ -212,40 +212,7 @@ impl<'a> LargeInput<'a> {
     }
 }
 
-/// Cancellation and progress hooks. Progress is reported as a fraction in
-/// `[0, 1]` from worker threads.
-#[derive(Default, Clone, Copy)]
-pub struct Control<'a> {
-    pub cancel: Option<&'a AtomicBool>,
-    pub progress: Option<&'a (dyn Fn(f32) + Sync)>,
-}
-
-impl std::fmt::Debug for Control<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Control")
-            .field("cancel", &self.cancel.map(|c| c.load(Ordering::Relaxed)))
-            .field("progress", &self.progress.is_some())
-            .finish()
-    }
-}
-
-impl Control<'_> {
-    fn cancelled(&self) -> bool {
-        self.cancel.is_some_and(|c| c.load(Ordering::Relaxed))
-    }
-    fn check(&self) -> Result<(), DottirError> {
-        if self.cancelled() {
-            Err(DottirError::Cancelled)
-        } else {
-            Ok(())
-        }
-    }
-    fn report(&self, f: f32) {
-        if let Some(p) = self.progress {
-            p(f.clamp(0.0, 1.0));
-        }
-    }
-}
+pub use crate::control::Control;
 
 /// A diagonal run of anchors, in concatenated 0-based half-open
 /// coordinates. Reverse runs pair `q_start` with `s_end - 1`.

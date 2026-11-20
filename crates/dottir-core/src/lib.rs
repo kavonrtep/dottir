@@ -30,6 +30,7 @@
 
 pub mod alphabet;
 pub mod antidiag;
+pub mod control;
 pub mod error;
 pub mod find_peaks;
 pub mod genome;
@@ -45,6 +46,7 @@ pub mod sliding;
 pub mod spectrum;
 pub mod translation;
 
+pub use control::Control;
 pub use error::DottirError;
 pub use find_peaks::{
     auto_threshold_mad, find_peaks_in_periodogram, find_peaks_in_spectrum, HarmonicDirection, Peak,
@@ -57,8 +59,8 @@ pub use periodogram::{
     empirical_null_stats, AnalyticalNull, Periodogram, PeriodogramConfig, Sensitivity,
 };
 pub use plot::{
-    compute_dotplot, pick_auto_zoom, reverse_complement, snap_zoom_to_period_divisor, DotPlot,
-    PlotConfig, PlotParams, Strand, Triangle,
+    compute_dotplot, compute_dotplot_with, pick_auto_zoom, reverse_complement,
+    snap_zoom_to_period_divisor, DotPlot, PlotConfig, PlotParams, Strand, Triangle,
 };
 pub use ridges::{extract_ridges, extract_ridges_from_pixels, Ridge, RidgeDirection, RidgeParams};
 pub use spectrum::{spectrum_of_signal, DetrendMode, Spectrum, SpectrumConfig, WindowFn};

@@ -8,8 +8,8 @@ use dottir_core::large::{
     LargePlot, RepeatClass, Shade, SpacedSeed, Viewport,
 };
 use dottir_core::{
-    extract_ridges_from_pixels, snap_zoom_to_period_divisor, BlastMode, DotPlot, PlotConfig, Ridge,
-    RidgeDirection, RidgeParams, ScoreMatrix, Strand, Triangle,
+    extract_ridges_from_pixels, snap_zoom_to_period_divisor, BlastMode, DotPlot, DottirError,
+    PlotConfig, Ridge, RidgeDirection, RidgeParams, ScoreMatrix, Strand, Triangle,
 };
 use dottir_io::faidx::Region;
 use dottir_io::{DetectedAlphabet, Sequence};
@@ -503,6 +503,9 @@ pub struct DottirApp {
     plot: Option<DotPlot>,
     /// Last error from a compute / load operation. Cleared on next user action.
     last_error: Option<String>,
+    /// Neutral status message (e.g. "Stopped."), shown when there is no
+    /// error; cleared by the next completed compute.
+    status_note: Option<String>,
     greyramp: Greyramp,
     texture: Option<TextureHandle>,
     /// Whether the cached texture matches the current greyramp + pixelmap.
@@ -806,6 +809,7 @@ impl DottirApp {
             settings,
             plot: None,
             last_error: None,
+            status_note: None,
             greyramp: Greyramp::default(),
             texture: None,
             texture_dirty: true,
@@ -2456,6 +2460,7 @@ impl DottirApp {
                     self.plot = Some(plot);
                     self.texture_dirty = true;
                     self.last_error = None;
+                    self.status_note = None;
                     self.refresh_ridges();
                     if self.settings.large.cov_auto {
                         self.auto_coverage_ramp();
@@ -2479,9 +2484,13 @@ impl DottirApp {
                     }
                 }
                 Err(e) => {
-                    self.last_error = Some(format!("compute_dotplot failed: {e}"));
-                    // Failed compute leaves the previous pixelmap (if
-                    // any) intact and drops the pending state.
+                    if matches!(e, DottirError::Cancelled) {
+                        self.status_note = Some("Stopped.".into());
+                    } else {
+                        self.last_error = Some(format!("compute_dotplot failed: {e}"));
+                    }
+                    // A failed or stopped compute leaves the previous
+                    // pixelmap (if any) intact and drops the pending state.
                     self.pending_view_offset_after_compute = None;
                     self.last_dispatched_slice = None;
                 }
@@ -4622,6 +4631,9 @@ impl DottirApp {
             crate::compute_worker::Stage::Large => {
                 format!("Large engine… {:.0}%", f * 100.0)
             }
+            crate::compute_worker::Stage::Exact => {
+                format!("Exact engine… {:.0}%", f * 100.0)
+            }
             _ => "Recomputing…".to_string(),
         }
     }
@@ -4669,6 +4681,19 @@ impl DottirApp {
             galley,
             Color32::from_gray(30),
         );
+        egui::Area::new(egui::Id::new("compute_stop"))
+            .pivot(egui::Align2::CENTER_TOP)
+            .fixed_pos(Pos2::new(badge.center().x, badge.bottom() + 6.0))
+            .order(egui::Order::Foreground)
+            .show(ui.ctx(), |ui| {
+                if ui
+                    .button("Stop")
+                    .on_hover_text("Cancel this computation and keep the current plot.")
+                    .clicked()
+                {
+                    self.worker.stop();
+                }
+            });
     }
 
     fn draw_status_bar(&self, ctx: &Context) {
@@ -4677,11 +4702,22 @@ impl DottirApp {
                 if self.compute_in_flight {
                     ui.spinner();
                     ui.label(self.progress_text());
+                    if ui
+                        .small_button("Stop")
+                        .on_hover_text("Cancel this computation and keep the current plot.")
+                        .clicked()
+                    {
+                        self.worker.stop();
+                    }
                     ui.separator();
                 }
                 if let Some(err) = &self.last_error {
                     ui.colored_label(Color32::from_rgb(220, 90, 70), err);
                     return;
+                }
+                if let Some(note) = &self.status_note {
+                    ui.label(note);
+                    ui.separator();
                 }
                 if let Some(plot) = &self.plot {
                     let engine = if self.large_plot.is_some() {

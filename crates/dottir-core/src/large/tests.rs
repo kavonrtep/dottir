@@ -4,6 +4,7 @@ use super::*;
 use crate::alphabet::reverse_complement_dna;
 use crate::plot::{compute_dotplot, PlotConfig};
 use proptest::prelude::*;
+use std::sync::atomic::AtomicBool;
 
 fn lcg_dna(n: usize, mut state: u64) -> Vec<u8> {
     (0..n)
