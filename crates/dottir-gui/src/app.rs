@@ -148,6 +148,8 @@ struct Settings {
     auto_pixel_fac: bool,
     /// Large-sequence mode (ADR 0007).
     large: LargeSettings,
+    /// Memory budget of the pixelmap cache.
+    cache_budget_bytes: u64,
 }
 
 /// Which engine computes a view.
@@ -413,11 +415,54 @@ impl Default for Settings {
             ridge_min_length: 8,
             ridge_max_gap: 2,
             large: LargeSettings::default(),
+            cache_budget_bytes: crate::view_cache::DEFAULT_BUDGET,
         }
     }
 }
 
 impl Settings {
+    /// Hash of every setting that changes computed pixels. Display
+    /// settings and the engine choice are left out; the engine actually
+    /// used is part of [`CacheKey`].
+    fn compute_fingerprint(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let l = &self.large;
+        let key = format!(
+            "{:?}",
+            (
+                (
+                    self.mode,
+                    &self.matrix_name,
+                    self.window_size,
+                    self.auto_pixel_fac,
+                    (!self.auto_pixel_fac).then_some(self.pixel_fac),
+                    self.strand,
+                    self.self_comparison,
+                    self.triangle,
+                    self.reverse_query,
+                    self.reverse_subject,
+                    self.inverted_repeat_colour,
+                ),
+                (
+                    &l.seed_pattern,
+                    l.two_hit_dist,
+                    l.max_occ,
+                    l.depth,
+                    l.depth_k,
+                    l.thresholds,
+                    l.softmask_as_repeat,
+                    &l.repeat_annot,
+                    &l.repeat_types,
+                    l.seed_sample,
+                    l.depth_sample,
+                ),
+            )
+        );
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        key.hash(&mut h);
+        h.finish()
+    }
+
     fn build_matrix(&self) -> Option<ScoreMatrix> {
         if self.mode == BlastMode::Blastn {
             Some(ScoreMatrix::dna_identity())
@@ -571,12 +616,21 @@ pub struct DottirApp {
     /// view we can [`pop_history`] back to. Bounded to
     /// [`HISTORY_MAX`] entries — older ones drop off the bottom.
     history: std::collections::VecDeque<ViewSnapshot>,
-    /// LRU-style cache of recently computed pixelmaps, keyed by the
-    /// `(slice, compute_zoom)` pair. Hitting Back to a cached view is
-    /// instant; otherwise the cache miss triggers a fresh compute.
-    /// Cleared on any settings change that would invalidate the
-    /// pixelmap (matrix, window size, strand, etc.).
-    pixelmap_cache: std::collections::VecDeque<(ViewSlice, u32, DotPlot, Option<LargePlot>)>,
+    /// Recently computed views, bounded by memory. Keyed by the settings
+    /// fingerprint, engine, slice and zoom, so a settings change leaves
+    /// entries in place and setting a value back hits them. Cleared when
+    /// sequences are (re)loaded.
+    pixelmap_cache: crate::view_cache::ByteLru<CacheKey, (DotPlot, Option<LargePlot>)>,
+    /// [`Settings::compute_fingerprint`] the locked values belong to.
+    fingerprint: u64,
+    /// `(locked_pixel_fac, locked_window)` of other fingerprints, so
+    /// returning to earlier settings draws with the same darkness.
+    locks: std::collections::BTreeMap<u64, (Option<u32>, Option<u32>)>,
+    /// Cache key of the latest dispatched compute.
+    last_dispatched_key: Option<CacheKey>,
+    /// The current view is an exact plot asked for in large mode (plan
+    /// N2); rect-zoom keeps it, Fit and zoom out drop it.
+    exact_override: bool,
     /// View offset to apply when the next compute result lands.
     /// Set by `action_rect_zoom` / `action_back` so the new pixelmap
     /// (which has different dims, hence different coord space) gets
@@ -689,8 +743,17 @@ pub struct DottirApp {
 }
 
 /// Maximum number of history entries kept around for Back. Older
-/// entries fall off the bottom. Also caps the pixelmap cache size.
-const HISTORY_MAX: usize = 5;
+/// entries fall off the bottom.
+const HISTORY_MAX: usize = 50;
+
+/// What a cached view was computed from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CacheKey {
+    fingerprint: u64,
+    large: bool,
+    slice: ViewSlice,
+    zoom: u32,
+}
 
 /// Residue range covered by the currently displayed pixelmap. The
 /// canonical (fit) view spans the full sequences; a rect-zoom narrows
@@ -737,6 +800,7 @@ struct ViewSnapshot {
     compute_zoom: u32,
     view_offset: Vec2,
     crosshair: Option<(u32, u32)>,
+    exact_override: bool,
 }
 
 /// A finished right-drag selection: absolute residue ranges, the canvas
@@ -783,6 +847,7 @@ impl DottirApp {
         };
         let settings = Settings {
             large: LargeSettings::default(),
+            cache_budget_bytes: crate::view_cache::DEFAULT_BUDGET,
             mode: startup.mode,
             matrix_name: startup.matrix_name.clone(),
             window_size: startup.window_size,
@@ -829,7 +894,11 @@ impl DottirApp {
             pending_resize_retarget: None,
             last_compute_canvas_size: None,
             history: std::collections::VecDeque::with_capacity(HISTORY_MAX),
-            pixelmap_cache: std::collections::VecDeque::with_capacity(HISTORY_MAX),
+            pixelmap_cache: crate::view_cache::ByteLru::new(crate::view_cache::DEFAULT_BUDGET),
+            fingerprint: 0,
+            locks: std::collections::BTreeMap::new(),
+            last_dispatched_key: None,
+            exact_override: false,
             rect_select: None,
             selection_drag: None,
             selection: None,
@@ -1501,59 +1570,55 @@ impl DottirApp {
             compute_zoom: plot.params.zoom,
             view_offset: self.view_offset,
             crosshair: self.crosshair,
+            exact_override: self.exact_override,
         });
     }
 
-    /// Look up a cached pixelmap for the given `(slice, compute_zoom)`
-    /// (LRU "touch on read"). Cleared whenever settings that affect
-    /// the pixelmap change.
-    fn cache_get(
-        &mut self,
-        slice: &ViewSlice,
-        compute_zoom: u32,
-    ) -> Option<(DotPlot, Option<LargePlot>)> {
-        let pos = self
-            .pixelmap_cache
-            .iter()
-            .position(|(s, z, _, _)| *z == compute_zoom && s == slice)?;
-        let (s, z, plot, large) = self.pixelmap_cache.remove(pos)?;
-        let restored = (plot.clone(), large.clone());
-        self.pixelmap_cache.push_back((s, z, plot, large));
-        Some(restored)
+    fn cache_get(&mut self, key: &CacheKey) -> Option<(DotPlot, Option<LargePlot>)> {
+        self.pixelmap_cache.get(key)
     }
 
-    /// Insert a freshly computed pixelmap into the cache; evict
-    /// oldest if at capacity.
-    fn cache_insert(
-        &mut self,
-        slice: ViewSlice,
-        compute_zoom: u32,
-        plot: DotPlot,
-        large: Option<LargePlot>,
-    ) {
-        self.pixelmap_cache
-            .retain(|(s, z, _, _)| *z != compute_zoom || s != &slice);
-        if self.pixelmap_cache.len() >= HISTORY_MAX {
-            self.pixelmap_cache.pop_front();
+    fn cache_insert(&mut self, key: CacheKey, plot: DotPlot, large: Option<LargePlot>) {
+        let bytes = crate::view_cache::view_bytes(&plot, large.as_ref());
+        if !self.pixelmap_cache.insert(key, (plot, large), bytes) {
+            tracing::info!(
+                "view of {} MB exceeds the cache budget; not cached",
+                bytes >> 20
+            );
         }
-        self.pixelmap_cache
-            .push_back((slice, compute_zoom, plot, large));
     }
 
-    /// Drop everything pixel-dependent — call when settings that
-    /// affect compute output change (matrix, window, strand, etc.).
-    /// Also clears the Karlin-locked pixel_fac so the next compute
-    /// re-derives it under the new settings.
+    /// Drop everything tied to the sequences: cache, history and the
+    /// per-settings locked values. Called when sequences are (re)loaded.
     fn invalidate_caches(&mut self) {
         self.pixelmap_cache.clear();
         self.history.clear();
+        self.locks.clear();
         self.locked_pixel_fac = None;
         self.locked_window = None;
+        self.exact_override = false;
+    }
+
+    /// Follow a change of compute settings: park the locked pixel factor
+    /// and window of the old settings and restore those of the new ones.
+    fn sync_fingerprint(&mut self) -> u64 {
+        let fp = self.settings.compute_fingerprint();
+        if fp != self.fingerprint {
+            self.locks.insert(
+                self.fingerprint,
+                (self.locked_pixel_fac, self.locked_window),
+            );
+            (self.locked_pixel_fac, self.locked_window) =
+                self.locks.remove(&fp).unwrap_or_default();
+            self.fingerprint = fp;
+        }
+        fp
     }
 
     /// Whether `slice` is computed by the large engine.
     fn use_large_engine(&self, slice: &ViewSlice) -> bool {
-        if self.settings.mode != BlastMode::Blastn
+        if self.exact_override
+            || self.settings.mode != BlastMode::Blastn
             || self.settings.reverse_query
             || self.settings.reverse_subject
         {
@@ -1745,6 +1810,7 @@ impl DottirApp {
         };
         self.settings.zoom = prev.compute_zoom;
         self.crosshair = prev.crosshair;
+        self.exact_override = prev.exact_override;
         self.target_slice = Some(prev.slice);
         self.pending_view_offset_after_compute = Some(prev.view_offset);
         self.recompute();
@@ -2165,6 +2231,9 @@ impl DottirApp {
             self.compute_in_flight = false;
             return;
         }
+        let fingerprint = self.sync_fingerprint();
+        self.pixelmap_cache
+            .set_budget(self.settings.cache_budget_bytes);
         let target_zoom = self.settings.zoom.max(1);
         // Resolve the target slice: explicit (`target_slice` set by
         // action_*) wins; otherwise reuse the current slice if any;
@@ -2190,7 +2259,13 @@ impl DottirApp {
         } else {
             target_slice
         };
-        if let Some((mut plot, large)) = self.cache_get(&target_slice, target_zoom) {
+        let key = CacheKey {
+            fingerprint,
+            large: use_large,
+            slice: target_slice.clone(),
+            zoom: target_zoom,
+        };
+        if let Some((mut plot, large)) = self.cache_get(&key) {
             if let Some(lp) = &large {
                 plot = lp.to_dot_plot(
                     self.settings.large.classes,
@@ -2210,6 +2285,7 @@ impl DottirApp {
             self.plot = Some(plot);
             self.texture_dirty = true;
             self.last_error = None;
+            self.status_note = None;
             self.refresh_ridges();
             if self.settings.large.cov_auto {
                 self.auto_coverage_ramp();
@@ -2219,6 +2295,7 @@ impl DottirApp {
             }
             return;
         }
+        self.last_dispatched_key = Some(key);
         if use_large {
             self.dispatch_large(target_slice, target_zoom);
             return;
@@ -2437,14 +2514,10 @@ impl DottirApp {
                     );
                     // Apply the slice that was paired with this dispatch.
                     if let Some(slice) = self.last_dispatched_slice.take() {
-                        // Insert into LRU cache for instant restore on
-                        // Back / Fit cycling.
-                        self.cache_insert(
-                            slice.clone(),
-                            plot.params.zoom,
-                            plot.clone(),
-                            r.large.clone(),
-                        );
+                        // Cache for instant restore on Back / Fit.
+                        if let Some(key) = self.last_dispatched_key.take() {
+                            self.cache_insert(key, plot.clone(), r.large.clone());
+                        }
                         self.current_slice = Some(slice);
                     }
                     if r.large.is_some() && self.settings.window_size.is_none() {
@@ -2493,6 +2566,7 @@ impl DottirApp {
                     // pixelmap (if any) intact and drops the pending state.
                     self.pending_view_offset_after_compute = None;
                     self.last_dispatched_slice = None;
+                    self.last_dispatched_key = None;
                 }
             }
         }
@@ -4047,6 +4121,40 @@ impl DottirApp {
                 );
 
                 ui.separator();
+                ui.horizontal(|ui| {
+                    ui.label("View cache (MiB):");
+                    let mut mib = (self.settings.cache_budget_bytes >> 20).clamp(64, 65_536) as u32;
+                    if ui
+                        .add(
+                            Slider::new(&mut mib, 64..=65_536)
+                                .logarithmic(true)
+                                .clamping(egui::SliderClamping::Always),
+                        )
+                        .on_hover_text(
+                            "Memory for recently computed views. Back and settings \
+                             changed back are instant while their views are cached.",
+                        )
+                        .changed()
+                    {
+                        self.settings.cache_budget_bytes = (mib as u64) << 20;
+                        self.pixelmap_cache
+                            .set_budget(self.settings.cache_budget_bytes);
+                    }
+                });
+                ui.horizontal(|ui| {
+                    let c = &self.pixelmap_cache;
+                    ui.weak(format!(
+                        "Cache: {} of {}, {} views",
+                        fmt_bytes(c.used()),
+                        fmt_bytes(c.budget()),
+                        c.len()
+                    ));
+                    if ui.small_button("Clear").clicked() {
+                        self.pixelmap_cache.clear();
+                    }
+                });
+
+                ui.separator();
                 ui.heading("Large sequences");
                 changed |= self.large_settings_ui(ui);
 
@@ -4129,10 +4237,9 @@ impl DottirApp {
         if changed {
             // Floors and self-comparison detection live in the source.
             self.large_source = None;
-            // Any setting that affects the pixelmap invalidates the
-            // cache + history (which would point at incompatible
-            // pixelmaps under the new parameters).
-            self.invalidate_caches();
+            // Cache entries and history stay: entries are keyed by the
+            // settings fingerprint, and Back recomputes under the new
+            // settings when needed.
             self.recompute();
         }
     }
@@ -6966,6 +7073,15 @@ fn pick_and_load(app: &mut DottirApp, role: SeqRole) {
     }
 }
 
+/// A byte count as MB / GB.
+fn fmt_bytes(n: u64) -> String {
+    if n >= 1 << 30 {
+        format!("{:.1} GB", n as f64 / (1u64 << 30) as f64)
+    } else {
+        format!("{:.0} MB", n as f64 / (1u64 << 20) as f64)
+    }
+}
+
 /// `n` residues as bp / kb / Mb.
 fn fmt_bp(n: u64) -> String {
     match n {
@@ -7173,6 +7289,7 @@ fn save_session(app: &mut DottirApp) {
             self_comparison: app.settings.self_comparison,
             triangle: codec::triangle_to_str(app.settings.triangle).to_string(),
             memory_limit_mib: app.settings.memory_limit_bytes / (1024 * 1024),
+            cache_budget_mib: Some(app.settings.cache_budget_bytes >> 20),
         },
         greyramp: SessionGreyramp {
             white: app.greyramp.white,
@@ -7248,6 +7365,9 @@ fn open_session(app: &mut DottirApp, ctx: &Context) {
         app.settings.triangle = t;
     }
     app.settings.memory_limit_bytes = s.plot.memory_limit_mib * 1024 * 1024;
+    if let Some(mib) = s.plot.cache_budget_mib {
+        app.settings.cache_budget_bytes = mib.max(64) << 20;
+    }
     app.settings.large = s
         .large
         .as_ref()
@@ -7639,5 +7759,86 @@ mod repeat_floor_tests {
         let (f, err) = repeat_floor(&seq, &ls, Some(&dir.join("missing.gff3")));
         assert!(f.is_none() && err.is_some());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod cache_key_tests {
+    use super::*;
+
+    #[test]
+    fn fingerprint_ignores_display_settings() {
+        let a = Settings::default();
+        let mut b = a.clone();
+        b.large.classes = ClassMask::from_classes(&[RepeatClass::Low]);
+        b.large.shade = Shade::Score;
+        b.large.cov_white_bp = 7.0;
+        b.large.colour_by_class = !a.large.colour_by_class;
+        b.large.engine = EngineChoice::Exact;
+        b.show_ridge_overlay = !a.show_ridge_overlay;
+        b.zoom = 17;
+        b.cache_budget_bytes = 1 << 20;
+        assert_eq!(a.compute_fingerprint(), b.compute_fingerprint());
+    }
+
+    #[test]
+    fn fingerprint_follows_compute_settings_and_back() {
+        let a = Settings::default();
+        let mut b = a.clone();
+        b.window_size = Some(31);
+        assert_ne!(a.compute_fingerprint(), b.compute_fingerprint());
+        b.window_size = a.window_size;
+        assert_eq!(a.compute_fingerprint(), b.compute_fingerprint());
+        for change in [
+            |s: &mut Settings| s.strand = Strand::Forward,
+            |s: &mut Settings| s.large.seed_pattern = "111010010100110111".into(),
+            |s: &mut Settings| s.large.max_occ = 10,
+            |s: &mut Settings| s.inverted_repeat_colour = true,
+        ] {
+            let mut c = a.clone();
+            change(&mut c);
+            assert_ne!(a.compute_fingerprint(), c.compute_fingerprint());
+        }
+        // A manual pixel factor matters only when auto is off.
+        let mut c = a.clone();
+        c.pixel_fac += 5;
+        assert_eq!(a.compute_fingerprint(), c.compute_fingerprint());
+        c.auto_pixel_fac = false;
+        assert_ne!(a.compute_fingerprint(), c.compute_fingerprint());
+    }
+
+    #[test]
+    fn settings_a_b_a_hits_the_cache() {
+        let plot = |v: u8| DotPlot {
+            width: 2,
+            height: 2,
+            pixels: vec![v; 4],
+            reverse_pixels: None,
+            params: dottir_core::PlotParams {
+                window_size: 25,
+                zoom: 1,
+                pixel_fac: 50,
+                karlin: None,
+            },
+        };
+        let a = Settings::default();
+        let mut b = a.clone();
+        b.window_size = Some(31);
+        let key = |s: &Settings| CacheKey {
+            fingerprint: s.compute_fingerprint(),
+            large: false,
+            slice: ViewSlice::full(100, 100),
+            zoom: 1,
+        };
+        let mut cache: crate::view_cache::ByteLru<CacheKey, (DotPlot, Option<LargePlot>)> =
+            crate::view_cache::ByteLru::new(1 << 20);
+        cache.insert(key(&a), (plot(1), None), 4);
+        cache.insert(key(&b), (plot(2), None), 4);
+        assert_eq!(cache.get(&key(&a)).unwrap().0.pixels, vec![1; 4]);
+        let large = CacheKey {
+            large: true,
+            ..key(&a)
+        };
+        assert!(cache.get(&large).is_none(), "engines do not share entries");
     }
 }

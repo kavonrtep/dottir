@@ -172,6 +172,9 @@ pub struct SessionPlot {
     /// "both" / "upper" / "lower".
     pub triangle: String,
     pub memory_limit_mib: u64,
+    /// Pixelmap cache budget; absent in sessions before v0.8.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_budget_mib: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -317,6 +320,7 @@ mod tests {
                 self_comparison: false,
                 triangle: "both".into(),
                 memory_limit_mib: 512,
+                cache_budget_mib: Some(1024),
             },
             greyramp: SessionGreyramp {
                 white: 40,

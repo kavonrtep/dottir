@@ -27,6 +27,7 @@ mod compute_worker;
 mod genome_view;
 mod record_sort;
 mod session;
+mod view_cache;
 
 use std::path::PathBuf;
 

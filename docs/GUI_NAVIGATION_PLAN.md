@@ -180,11 +180,12 @@ struct ViewSnapshot {                // history entry, unchanged fields
 * History and cache are cleared only when sequences are (re)loaded.
 * `locked_pixel_fac` / `locked_window` stay per settings state; they are
   part of `ComputeKey` through the resolved values.
-* Large-engine sessions: the worker keeps up to two prepared sessions
-  (LRU by source key + `compatible()`), counted against the same budget
-  via `LargeSession::bytes()`. When the second session would exceed the
-  budget, only the newest is kept.
-* Settings → Performance shows the budget and current use
+* Large-engine sessions: the worker keeps **one** prepared session, as
+  before. *Deviation from the first draft (two sessions):*
+  `LargeSession::prepare_reusing` consumes the previous session to reuse
+  its index after a window change or a record sort; keeping it as a second
+  cached session would lose that reuse or double the index memory.
+* Settings (next to the memory cap) shows the budget and current use
   (`Cache: 412 MB of 1 GB, 7 views`) and a **Clear** button.
 
 ## Failure modes
