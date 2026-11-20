@@ -631,6 +631,17 @@ pub struct DottirApp {
     /// The current view is an exact plot asked for in large mode (plan
     /// N2); rect-zoom keeps it, Fit and zoom out drop it.
     exact_override: bool,
+    /// One-shot: the next recompute is an explicit "exact plot" request.
+    exact_request: bool,
+    /// One-shot: the user accepted the cost of the next exact compute.
+    exact_confirmed: bool,
+    /// An exact compute waiting for the user to accept its cost.
+    pending_exact: Option<PendingExact>,
+    /// Measured exact-engine speed.
+    exact_rate: crate::exact_cost::Rate,
+    /// Start and cells of the exact compute in flight, for the rate and
+    /// the time left.
+    exact_dispatch: Option<(std::time::Instant, f64)>,
     /// View offset to apply when the next compute result lands.
     /// Set by `action_rect_zoom` / `action_back` so the new pixelmap
     /// (which has different dims, hence different coord space) gets
@@ -745,6 +756,38 @@ pub struct DottirApp {
 /// Maximum number of history entries kept around for Back. Older
 /// entries fall off the bottom.
 const HISTORY_MAX: usize = 50;
+
+/// An exact compute held back until the user accepts its cost.
+#[derive(Clone, Debug)]
+struct PendingExact {
+    cost: crate::exact_cost::ExactCost,
+    slice: ViewSlice,
+    zoom: u32,
+    offset: Option<Vec2>,
+    /// Asked for explicitly; Compute turns the exact override on and
+    /// Cancel drops the history entry the request pushed.
+    explicit: bool,
+    strands: &'static str,
+}
+
+/// Plan N3: each visible range doubled around `centre`, shifted (not
+/// shrunk) to stay inside `0..len`. `None` when the result covers both
+/// sequences completely, i.e. the action is Fit.
+fn zoom_out_ranges(
+    vq: &std::ops::Range<usize>,
+    vs: &std::ops::Range<usize>,
+    centre: (usize, usize),
+    qlen: usize,
+    slen: usize,
+) -> Option<(std::ops::Range<usize>, std::ops::Range<usize>)> {
+    let axis = |v: &std::ops::Range<usize>, c: usize, len: usize| {
+        let extent = (2 * v.len()).min(len);
+        let lo = c.saturating_sub(extent / 2).min(len - extent);
+        lo..lo + extent
+    };
+    let (q, s) = (axis(vq, centre.0, qlen), axis(vs, centre.1, slen));
+    (q.len() < qlen || s.len() < slen).then_some((q, s))
+}
 
 /// What a cached view was computed from.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -899,6 +942,11 @@ impl DottirApp {
             locks: std::collections::BTreeMap::new(),
             last_dispatched_key: None,
             exact_override: false,
+            exact_request: false,
+            exact_confirmed: false,
+            pending_exact: None,
+            exact_rate: crate::exact_cost::Rate::default(),
+            exact_dispatch: None,
             rect_select: None,
             selection_drag: None,
             selection: None,
@@ -1615,6 +1663,140 @@ impl DottirApp {
         fp
     }
 
+    /// The exact-engine work of `slice` at `zoom` under the current
+    /// settings.
+    fn exact_job(&self, slice: &ViewSlice, zoom: u32) -> crate::exact_cost::ExactJob {
+        let st = &self.settings;
+        crate::exact_cost::ExactJob {
+            mode: st.mode,
+            strand: if st.mode == BlastMode::Blastp {
+                Strand::Forward
+            } else {
+                st.strand
+            },
+            qlen: slice.q_range.len(),
+            slen: slice.s_range.len(),
+            self_comparison: st.self_comparison && slice.is_self_comparison(),
+            zoom,
+            separate_strands: st.inverted_repeat_colour && st.mode == BlastMode::Blastn,
+            threads: std::thread::available_parallelism().map_or(1, |n| n.get()),
+        }
+    }
+
+    /// An exact compute that must be confirmed first: above 5 s when asked
+    /// for explicitly, above 30 s for an exact view or the global Exact
+    /// engine, or above the memory cap. `None` = dispatch now.
+    fn exact_gate(&self, slice: &ViewSlice, zoom: u32, explicit: bool) -> Option<PendingExact> {
+        use crate::exact_cost::{ASK_ABOVE_EXPLICIT_S, ASK_ABOVE_S};
+        let limit = if explicit {
+            ASK_ABOVE_EXPLICIT_S
+        } else if self.exact_override || self.settings.large.engine == EngineChoice::Exact {
+            ASK_ABOVE_S
+        } else {
+            f64::INFINITY
+        };
+        let job = self.exact_job(slice, zoom);
+        let cost = job.cost(self.exact_rate.get());
+        if cost.seconds <= limit && cost.bytes <= self.settings.memory_limit_bytes {
+            return None;
+        }
+        Some(PendingExact {
+            cost,
+            slice: slice.clone(),
+            zoom,
+            offset: None,
+            explicit,
+            strands: match (job.mode, job.strand) {
+                (BlastMode::Blastn, Strand::Both) => " (both strands)",
+                (BlastMode::Blastx, _) => " (three frames)",
+                _ => "",
+            },
+        })
+    }
+
+    /// Exact plot of the current view (plan N2).
+    fn action_exact_view(&mut self) {
+        let Some(slice) = self.current_slice.clone() else {
+            return;
+        };
+        self.push_history();
+        self.exact_request = true;
+        self.target_slice = Some(slice);
+        self.pending_view_offset_after_compute = Some(self.view_offset);
+        self.recompute();
+        self.exact_request = false;
+    }
+
+    /// The cost dialog of a held-back exact compute.
+    fn exact_dialog(&mut self, ctx: &Context) {
+        let Some(p) = self.pending_exact.clone() else {
+            return;
+        };
+        let over_memory = p.cost.bytes > self.settings.memory_limit_bytes;
+        let mut choice = None;
+        egui::Window::new("Exact plot")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+            .show(ctx, |ui| {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Exact plot of {} × {}{}",
+                        fmt_bp(p.slice.q_range.len() as u64),
+                        fmt_bp(p.slice.s_range.len() as u64),
+                        p.strands
+                    ))
+                    .strong(),
+                );
+                ui.label(format!(
+                    "≈ {:.1e} cells · ≈ {} · ≈ {}",
+                    p.cost.cells,
+                    crate::exact_cost::fmt_duration(p.cost.seconds),
+                    fmt_bytes(p.cost.bytes)
+                ));
+                if !self.exact_rate.is_measured() {
+                    ui.weak("Time assumes 10⁹ cells/s; not yet measured on this machine.");
+                }
+                if over_memory {
+                    ui.colored_label(
+                        Color32::from_rgb(200, 80, 60),
+                        format!(
+                            "Above the memory cap ({}). Raise it in Settings or zoom in.",
+                            fmt_bytes(self.settings.memory_limit_bytes)
+                        ),
+                    );
+                }
+                ui.horizontal(|ui| {
+                    if !over_memory && ui.button("Compute").clicked() {
+                        choice = Some(true);
+                    }
+                    if ui.button("Cancel").clicked() {
+                        choice = Some(false);
+                    }
+                });
+            });
+        match choice {
+            Some(true) => {
+                self.pending_exact = None;
+                if p.explicit {
+                    self.exact_override = true;
+                }
+                self.exact_confirmed = true;
+                self.settings.zoom = p.zoom;
+                self.target_slice = Some(p.slice);
+                self.pending_view_offset_after_compute = p.offset;
+                self.recompute();
+            }
+            Some(false) => {
+                self.pending_exact = None;
+                if p.explicit {
+                    self.history.pop_back();
+                }
+            }
+            None => {}
+        }
+    }
+
     /// Whether `slice` is computed by the large engine.
     fn use_large_engine(&self, slice: &ViewSlice) -> bool {
         if self.exact_override
@@ -1795,8 +1977,78 @@ impl DottirApp {
             return;
         }
         self.push_history();
+        self.exact_override = false;
         self.settings.zoom = canon;
         self.target_slice = Some(full_slice);
+        self.pending_view_offset_after_compute = Some(Vec2::ZERO);
+        self.recompute();
+    }
+
+    /// Residues shown on the canvas: the current slice clipped to the
+    /// visible part of its pixelmap.
+    fn visible_residues(&self) -> Option<(std::ops::Range<usize>, std::ops::Range<usize>)> {
+        let (plot, slice, (w, h)) = (
+            self.plot.as_ref()?,
+            self.current_slice.as_ref()?,
+            self.measured_plot_area?,
+        );
+        let ppp = self.pixels_per_point;
+        let z = plot.params.zoom.max(1) as f32;
+        let axis = |off: f32, extent: f32, px: u32, per_px: f32, r: &std::ops::Range<usize>| {
+            let lo = (off * ppp).clamp(0.0, px as f32);
+            let hi = ((off + extent) * ppp).clamp(lo, px as f32);
+            let a = (r.start + (lo * per_px) as usize).min(r.end);
+            let b = (r.start + (hi * per_px).ceil() as usize).clamp(a, r.end);
+            a..b
+        };
+        let q = axis(
+            self.view_offset.x,
+            w,
+            plot.width,
+            z * self.qx() as f32,
+            &slice.q_range,
+        );
+        let s = axis(self.view_offset.y, h, plot.height, z, &slice.s_range);
+        (!q.is_empty() && !s.is_empty()).then_some((q, s))
+    }
+
+    /// Zoom out ×2 (plan N3) around the crosshair, or the centre of the
+    /// visible area when the crosshair is not on it. No wheel binding:
+    /// the larger view can be expensive.
+    fn action_zoom_out(&mut self) {
+        let (Some((vq, vs)), Some(plot), Some(q), Some(s)) = (
+            self.visible_residues(),
+            self.plot.as_ref(),
+            self.query.as_ref(),
+            self.subject.as_ref(),
+        ) else {
+            return;
+        };
+        let centre = self
+            .crosshair
+            .map(|(x, y)| (x as usize, y as usize))
+            .filter(|(x, y)| vq.contains(x) && vs.contains(y))
+            .unwrap_or(((vq.start + vq.end) / 2, (vs.start + vs.end) / 2));
+        let zoom = plot.params.zoom.max(1).saturating_mul(2);
+        let Some((nq, ns)) = zoom_out_ranges(&vq, &vs, centre, q.len(), s.len()) else {
+            self.action_fit();
+            return;
+        };
+        tracing::info!(
+            "zoom out: zoom {} → {zoom}, slice {}..{} × {}..{}",
+            plot.params.zoom,
+            nq.start,
+            nq.end,
+            ns.start,
+            ns.end
+        );
+        self.push_history();
+        self.exact_override = false;
+        self.settings.zoom = zoom;
+        self.target_slice = Some(ViewSlice {
+            q_range: nq,
+            s_range: ns,
+        });
         self.pending_view_offset_after_compute = Some(Vec2::ZERO);
         self.recompute();
     }
@@ -1852,6 +2104,17 @@ impl DottirApp {
                     if ui.button("Zoom to selection").clicked() {
                         action = Some(0);
                     }
+                    if self.large_plot.is_some()
+                        && ui
+                            .button("Exact plot of selection")
+                            .on_hover_text(
+                                "Zoom in and score every cell (Dotter); shows the \
+                                 estimated cost first",
+                            )
+                            .clicked()
+                    {
+                        action = Some(3);
+                    }
                     if ui
                         .button("Open in new window")
                         .on_hover_text(
@@ -1879,6 +2142,12 @@ impl DottirApp {
             Some(0) => {
                 self.selection = None;
                 self.zoom_to_residues(sel.plot_area, sel.q, sel.s);
+            }
+            Some(3) => {
+                self.selection = None;
+                self.exact_request = true;
+                self.zoom_to_residues(sel.plot_area, sel.q, sel.s);
+                self.exact_request = false;
             }
             Some(1) => {
                 self.selection = None;
@@ -2246,6 +2515,11 @@ impl DottirApp {
         let slen = self.subject.as_ref().map(|s| s.len()).unwrap_or(0);
         let target_slice = target_slice.unwrap_or_else(|| ViewSlice::full(qlen, slen));
 
+        let explicit = std::mem::take(&mut self.exact_request);
+        let prev_override = self.exact_override;
+        if explicit {
+            self.exact_override = true;
+        }
         // Cache hit: restore instantly, no worker dispatch.
         let use_large = self.use_large_engine(&target_slice);
         // The large engine aligns its origin to the zoom grid; snap the
@@ -2295,11 +2569,33 @@ impl DottirApp {
             }
             return;
         }
+        let confirmed = std::mem::take(&mut self.exact_confirmed);
+        if !use_large && !confirmed {
+            if let Some(pending) = self.exact_gate(&target_slice, target_zoom, explicit) {
+                tracing::info!(
+                    "exact plot held for confirmation: {:.2e} cells, ≈ {}",
+                    pending.cost.cells,
+                    crate::exact_cost::fmt_duration(pending.cost.seconds)
+                );
+                self.exact_override = prev_override;
+                if let Some(p) = &self.plot {
+                    self.settings.zoom = p.params.zoom;
+                }
+                self.pending_exact = Some(PendingExact {
+                    offset: self.pending_view_offset_after_compute.take(),
+                    ..pending
+                });
+                return;
+            }
+        }
         self.last_dispatched_key = Some(key);
         if use_large {
+            self.exact_dispatch = None;
             self.dispatch_large(target_slice, target_zoom);
             return;
         }
+        let job = self.exact_job(&target_slice, target_zoom);
+        self.exact_dispatch = Some((std::time::Instant::now(), job.cells()));
         // Re-borrow now that the cache check is done (avoids a
         // double-borrow of self).
         let (q, s) = (
@@ -2502,8 +2798,12 @@ impl DottirApp {
         }
         if let Some(r) = latest {
             self.compute_in_flight = false;
+            let exact_run = self.exact_dispatch.take();
             match r.plot {
                 Ok(plot) => {
+                    if let (Some((t0, cells)), None) = (exact_run, &r.large) {
+                        self.exact_rate.record(cells, t0.elapsed().as_secs_f64());
+                    }
                     tracing::info!(
                         "computed {}×{} pixelmap (W={}, zoom={}, resolved_pixel_fac={})",
                         plot.width,
@@ -2788,6 +3088,9 @@ impl eframe::App for DottirApp {
         {
             self.action_back();
         }
+        if !ctx.wants_keyboard_input() && ctx.input(|i| i.key_pressed(egui::Key::Minus)) {
+            self.action_zoom_out();
+        }
         self.handle_keyboard(ctx);
         self.draw_menu(ctx);
         self.draw_greyramp_panel(ctx);
@@ -2808,6 +3111,7 @@ impl eframe::App for DottirApp {
             self.action_rect_zoom(pa, rs);
         }
         self.selection_menu(ctx);
+        self.exact_dialog(ctx);
 
         // Deferred initial compute: pre-loaded sequences (CLI or
         // load_sequence before the first paint) couldn't pick a
@@ -3471,6 +3775,7 @@ impl DottirApp {
                             ("L-click", "set crosshair"),
                             ("L-drag", "pan"),
                             ("M-drag", "zoom into rectangle (dotter classic)"),
+                            ("-", "zoom out ×2"),
                             ("Esc/Bsp", "back (pop view history)"),
                         ];
                         let keys: &[(&str, &str)] =
@@ -3539,6 +3844,20 @@ impl DottirApp {
                         .clicked()
                     {
                         self.action_fit();
+                    }
+                    let zoomed_in = self.current_slice.as_ref().is_some_and(|sl| {
+                        sl.q_range.len() < self.query.as_ref().map_or(0, |q| q.len())
+                            || sl.s_range.len() < self.subject.as_ref().map_or(0, |s| s.len())
+                    });
+                    if ui
+                        .add_enabled(zoomed_in, egui::Button::new("Zoom out"))
+                        .on_hover_text(
+                            "Twice the visible area around the crosshair (or the centre), \
+                             at half the resolution (-).",
+                        )
+                        .clicked()
+                    {
+                        self.action_zoom_out();
                     }
                     let back_enabled = !self.history.is_empty();
                     if ui
@@ -3733,6 +4052,7 @@ impl DottirApp {
                     ("L-click", "set crosshair"),
                     ("L-drag", "pan"),
                     ("M-drag", "zoom into rectangle"),
+                    ("-", "zoom out ×2"),
                     ("Esc/Bsp", "back (pop view history)"),
                 ] {
                     ui.horizontal(|ui| {
@@ -4713,11 +5033,21 @@ impl DottirApp {
                 .color(Color32::from_gray(80)),
             );
         }
+        let exact = ui
+            .button("Exact plot of this view…")
+            .on_hover_text(
+                "Score every cell of the current view with the exact engine \
+                 (Dotter); shows the estimated cost first. Back returns here.",
+            )
+            .clicked();
         if redraw {
             self.rederive_large_plot();
         }
         if refit {
             self.auto_coverage_ramp();
+        }
+        if exact {
+            self.action_exact_view();
         }
         if retexture {
             self.texture_dirty = true;
@@ -4739,7 +5069,18 @@ impl DottirApp {
                 format!("Large engine… {:.0}%", f * 100.0)
             }
             crate::compute_worker::Stage::Exact => {
-                format!("Exact engine… {:.0}%", f * 100.0)
+                let left = self
+                    .exact_dispatch
+                    .filter(|_| f > 0.02)
+                    .map(|(t0, _)| {
+                        let el = t0.elapsed().as_secs_f64();
+                        format!(
+                            " · {} left",
+                            crate::exact_cost::fmt_duration(el / f as f64 - el)
+                        )
+                    })
+                    .unwrap_or_default();
+                format!("Exact engine… {:.0}%{left}", f * 100.0)
             }
             _ => "Recomputing…".to_string(),
         }
@@ -4803,7 +5144,8 @@ impl DottirApp {
             });
     }
 
-    fn draw_status_bar(&self, ctx: &Context) {
+    fn draw_status_bar(&mut self, ctx: &Context) {
+        let mut exact = false;
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 if self.compute_in_flight {
@@ -4836,6 +5178,17 @@ impl DottirApp {
                         "{engine} engine · pixelmap {}×{}, W={}",
                         plot.width, plot.height, plot.params.window_size
                     ));
+                    if self.large_plot.is_some()
+                        && !self.compute_in_flight
+                        && ui
+                            .small_button("Exact…")
+                            .on_hover_text(
+                                "Exact plot of this view; shows the estimated cost first.",
+                            )
+                            .clicked()
+                    {
+                        exact = true;
+                    }
                     if let Some((q_seq, s_seq)) = self.crosshair {
                         // Crosshair is in absolute residue coords;
                         // map to slice-local pixmap pixel to read the
@@ -4877,6 +5230,9 @@ impl DottirApp {
                 }
             });
         });
+        if exact {
+            self.action_exact_view();
+        }
     }
 
     /// H2: bottom dock showing the sequence context around the
@@ -7840,5 +8196,33 @@ mod cache_key_tests {
             ..key(&a)
         };
         assert!(cache.get(&large).is_none(), "engines do not share entries");
+    }
+}
+
+#[cfg(test)]
+mod zoom_out_tests {
+    use super::zoom_out_ranges;
+
+    #[test]
+    fn doubles_around_the_centre() {
+        let r = zoom_out_ranges(&(400..600), &(1000..1100), (500, 1050), 10_000, 10_000);
+        assert_eq!(r, Some((300..700, 950..1150)));
+    }
+
+    #[test]
+    fn shifts_instead_of_shrinking_at_the_ends() {
+        let r = zoom_out_ranges(&(0..100), &(9_900..10_000), (10, 9_990), 10_000, 10_000);
+        assert_eq!(r, Some((0..200, 9_800..10_000)));
+    }
+
+    #[test]
+    fn covering_both_sequences_is_fit() {
+        assert_eq!(
+            zoom_out_ranges(&(0..600), &(0..600), (300, 300), 1000, 1000),
+            None
+        );
+        // One axis still partial: a real zoom out, the other axis full.
+        let r = zoom_out_ranges(&(0..600), &(0..100), (300, 50), 1000, 1000);
+        assert_eq!(r, Some((0..1000, 0..200)));
     }
 }

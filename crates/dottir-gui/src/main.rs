@@ -24,6 +24,7 @@
 mod annotation_overlay;
 mod app;
 mod compute_worker;
+mod exact_cost;
 mod genome_view;
 mod record_sort;
 mod session;
