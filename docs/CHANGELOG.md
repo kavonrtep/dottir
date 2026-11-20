@@ -26,6 +26,8 @@ GUI navigation (docs/GUI_NAVIGATION_PLAN.md).
 * The GUI view cache is bounded by memory (default 1 GiB, Settings) and
   keyed by the compute settings, so settings changed back are instant;
   history holds 50 views and survives settings changes.
+* The full view is always kept in memory, outside the cache budget, so
+  Fit is instant.
 
 ## [0.7.0] - 2026-11-19
 

@@ -172,6 +172,14 @@ struct ViewSnapshot {                // history entry, unchanged fields
 
 * Cache bound: total `bytes` ≤ budget; least recently used entries are
   evicted first. A single entry above the budget is shown but not cached.
+* **Full view pinned** (added after first testing): the full view of the
+  current settings is kept outside the budget and never evicted, so Fit
+  is always instant. Fit accepts it when its zoom is within the 25 %
+  resize threshold of the canvas fit zoom (the canvas shifts by a few
+  pixels, e.g. axis tracks). After a settings change the old full view
+  becomes an ordinary entry, and a cached full view of the new settings
+  becomes the pinned one. An exact plot of the full view asked for in
+  large mode is not pinned.
 * A settings change no longer clears the cache; entries with another
   `ComputeKey` stop matching and age out. Setting a value back hits the
   cache.

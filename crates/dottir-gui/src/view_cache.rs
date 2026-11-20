@@ -49,6 +49,14 @@ impl<K: PartialEq, V: Clone> ByteLru<K, V> {
         true
     }
 
+    /// Remove and return the least recently used entry whose key matches.
+    pub fn take_first(&mut self, pred: impl Fn(&K) -> bool) -> Option<(K, V, u64)> {
+        let pos = self.entries.iter().position(|(k, _, _)| pred(k))?;
+        let e = self.entries.remove(pos)?;
+        self.used -= e.2;
+        Some(e)
+    }
+
     pub fn set_budget(&mut self, budget: u64) {
         self.budget = budget;
         self.evict();
@@ -140,6 +148,16 @@ mod tests {
         c.insert('a', 2, 30);
         assert_eq!(c.used(), 30);
         assert_eq!(c.get(&'a'), Some(2));
+    }
+
+    #[test]
+    fn take_first_removes_the_entry_and_its_bytes() {
+        let mut c = ByteLru::new(100);
+        c.insert(1, 'a', 30);
+        c.insert(2, 'b', 30);
+        assert_eq!(c.take_first(|k| *k > 1), Some((2, 'b', 30)));
+        assert_eq!(c.used(), 30);
+        assert_eq!(c.take_first(|k| *k > 1), None);
     }
 
     #[test]

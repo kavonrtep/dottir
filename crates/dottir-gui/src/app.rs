@@ -621,6 +621,10 @@ pub struct DottirApp {
     /// entries in place and setting a value back hits them. Cleared when
     /// sequences are (re)loaded.
     pixelmap_cache: crate::view_cache::ByteLru<CacheKey, (DotPlot, Option<LargePlot>)>,
+    /// The full view (both sequences) of the current settings, kept
+    /// outside the LRU budget: it is the most expensive view and the one
+    /// Fit returns to.
+    home_view: Option<(CacheKey, DotPlot, Option<LargePlot>)>,
     /// [`Settings::compute_fingerprint`] the locked values belong to.
     fingerprint: u64,
     /// `(locked_pixel_fac, locked_window)` of other fingerprints, so
@@ -789,6 +793,13 @@ fn zoom_out_ranges(
     (q.len() < qlen || s.len() < slen).then_some((q, s))
 }
 
+/// Whether a full view computed at zoom `a` still fits a canvas whose
+/// fit zoom is `b`: within the resize-retarget threshold.
+fn fit_zoom_matches(a: u32, b: u32) -> bool {
+    let (hi, lo) = (a.max(b) as f32, a.min(b).max(1) as f32);
+    hi / lo <= 1.0 + RESIZE_RETARGET_THRESHOLD
+}
+
 /// What a cached view was computed from.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct CacheKey {
@@ -938,6 +949,7 @@ impl DottirApp {
             last_compute_canvas_size: None,
             history: std::collections::VecDeque::with_capacity(HISTORY_MAX),
             pixelmap_cache: crate::view_cache::ByteLru::new(crate::view_cache::DEFAULT_BUDGET),
+            home_view: None,
             fingerprint: 0,
             locks: std::collections::BTreeMap::new(),
             last_dispatched_key: None,
@@ -1622,11 +1634,42 @@ impl DottirApp {
         });
     }
 
+    /// The full slice of the loaded sequences.
+    fn full_slice(&self) -> Option<ViewSlice> {
+        Some(ViewSlice::full(
+            self.query.as_ref()?.len(),
+            self.subject.as_ref()?.len(),
+        ))
+    }
+
+    /// Whether `key` is the full view under the normal engine choice
+    /// (not an exact plot asked for in large mode).
+    fn is_home_key(&self, key: &CacheKey) -> bool {
+        self.full_slice()
+            .is_some_and(|f| key.slice == f && key.large == self.engine_is_large(&key.slice, false))
+    }
+
     fn cache_get(&mut self, key: &CacheKey) -> Option<(DotPlot, Option<LargePlot>)> {
+        if let Some((k, plot, large)) = &self.home_view {
+            // The canvas, hence Fit's zoom, shifts by a few pixels (axis
+            // tracks, panels); within the resize threshold the home view
+            // is still a fit.
+            if k.fingerprint == key.fingerprint
+                && k.large == key.large
+                && k.slice == key.slice
+                && fit_zoom_matches(k.zoom, key.zoom)
+            {
+                return Some((plot.clone(), large.clone()));
+            }
+        }
         self.pixelmap_cache.get(key)
     }
 
     fn cache_insert(&mut self, key: CacheKey, plot: DotPlot, large: Option<LargePlot>) {
+        if key.fingerprint == self.fingerprint && self.is_home_key(&key) {
+            self.home_view = Some((key, plot, large));
+            return;
+        }
         let bytes = crate::view_cache::view_bytes(&plot, large.as_ref());
         if !self.pixelmap_cache.insert(key, (plot, large), bytes) {
             tracing::info!(
@@ -1636,10 +1679,31 @@ impl DottirApp {
         }
     }
 
+    /// After a settings change the old home view becomes an ordinary
+    /// cache entry, and a cached full view of the new settings, if any,
+    /// becomes the home view.
+    fn swap_home_view(&mut self, fp: u64) {
+        if let Some((k, plot, large)) = self.home_view.take() {
+            let bytes = crate::view_cache::view_bytes(&plot, large.as_ref());
+            self.pixelmap_cache.insert(k, (plot, large), bytes);
+        }
+        let Some(full) = self.full_slice() else {
+            return;
+        };
+        let large = self.engine_is_large(&full, false);
+        if let Some((k, v, _)) = self
+            .pixelmap_cache
+            .take_first(|k| k.fingerprint == fp && k.slice == full && k.large == large)
+        {
+            self.home_view = Some((k, v.0, v.1));
+        }
+    }
+
     /// Drop everything tied to the sequences: cache, history and the
     /// per-settings locked values. Called when sequences are (re)loaded.
     fn invalidate_caches(&mut self) {
         self.pixelmap_cache.clear();
+        self.home_view = None;
         self.history.clear();
         self.locks.clear();
         self.locked_pixel_fac = None;
@@ -1659,6 +1723,7 @@ impl DottirApp {
             (self.locked_pixel_fac, self.locked_window) =
                 self.locks.remove(&fp).unwrap_or_default();
             self.fingerprint = fp;
+            self.swap_home_view(fp);
         }
         fp
     }
@@ -1799,7 +1864,12 @@ impl DottirApp {
 
     /// Whether `slice` is computed by the large engine.
     fn use_large_engine(&self, slice: &ViewSlice) -> bool {
-        if self.exact_override
+        self.engine_is_large(slice, self.exact_override)
+    }
+
+    /// The engine for `slice`, with or without an exact override.
+    fn engine_is_large(&self, slice: &ViewSlice, exact_override: bool) -> bool {
+        if exact_override
             || self.settings.mode != BlastMode::Blastn
             || self.settings.reverse_query
             || self.settings.reverse_subject
@@ -1971,7 +2041,10 @@ impl DottirApp {
             .as_ref()
             .map(|cs| cs == &full_slice)
             .unwrap_or(false)
-            && self.plot.as_ref().map(|p| p.params.zoom).unwrap_or(0) == canon
+            && self
+                .plot
+                .as_ref()
+                .is_some_and(|p| fit_zoom_matches(p.params.zoom, canon))
             && self.view_offset == Vec2::ZERO;
         if already_canonical {
             return;
@@ -2555,6 +2628,7 @@ impl DottirApp {
                 target_slice.s_range.start,
                 target_slice.s_range.end,
             );
+            self.settings.zoom = plot.params.zoom;
             self.current_slice = Some(target_slice);
             self.plot = Some(plot);
             self.texture_dirty = true;
@@ -4463,13 +4537,22 @@ impl DottirApp {
                 });
                 ui.horizontal(|ui| {
                     let c = &self.pixelmap_cache;
+                    let home = self
+                        .home_view
+                        .as_ref()
+                        .map_or(0, |(_, p, l)| crate::view_cache::view_bytes(p, l.as_ref()));
                     ui.weak(format!(
-                        "Cache: {} of {}, {} views",
+                        "Cache: {} of {}, {} views; full view {} (always kept)",
                         fmt_bytes(c.used()),
                         fmt_bytes(c.budget()),
-                        c.len()
+                        c.len(),
+                        fmt_bytes(home)
                     ));
-                    if ui.small_button("Clear").clicked() {
+                    if ui
+                        .small_button("Clear")
+                        .on_hover_text("Drop the cached views; the full view stays.")
+                        .clicked()
+                    {
                         self.pixelmap_cache.clear();
                     }
                 });
@@ -8201,7 +8284,16 @@ mod cache_key_tests {
 
 #[cfg(test)]
 mod zoom_out_tests {
-    use super::zoom_out_ranges;
+    use super::{fit_zoom_matches, zoom_out_ranges};
+
+    #[test]
+    fn fit_accepts_the_home_zoom_within_the_resize_threshold() {
+        assert!(fit_zoom_matches(1000, 1000));
+        assert!(fit_zoom_matches(1000, 1040), "a few pixels of canvas");
+        assert!(fit_zoom_matches(1250, 1000));
+        assert!(!fit_zoom_matches(1300, 1000), "window resized");
+        assert!(!fit_zoom_matches(1, 2));
+    }
 
     #[test]
     fn doubles_around_the_centre() {

@@ -128,7 +128,8 @@ in the GUI under **View → Keyboard shortcuts…**.
 * Computed views are cached in memory, up to the **View cache** budget
   in Settings (default 1 GiB; least recently used views go first). A
   view is found again by its settings, engine, region and zoom, so
-  changing a setting and changing it back is instant. The cache is
+  changing a setting and changing it back is instant. The full view is
+  always kept, outside the budget, so **Fit** is instant. The cache is
   cleared when sequences are loaded.
 * While a plot computes, **Stop** (on the plot and in the status bar)
   cancels it and keeps the current plot. This also cancels building the
